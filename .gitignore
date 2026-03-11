@@ -7,3 +7,4 @@ bob-pg*
 bob-sqlite
 .windsurfrules
 .DS_Store
+.ssh/
