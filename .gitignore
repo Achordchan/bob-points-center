@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.*
+*.log
+bob-*.tar.gz
+bob-pg*
+bob-sqlite
+.windsurfrules
+.DS_Store

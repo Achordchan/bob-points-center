@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BOB币 API 文档</title>
+    <link rel="stylesheet" href="/assets/base.css" />
+    <link rel="stylesheet" href="/assets/docs.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="panel left">
+        <div class="hd">
+          <div class="title">BOB币系统接口目录 <span class="badge" id="version"></span></div>
+        </div>
+        <div class="bd">
+          <input class="search" id="search" placeholder="搜索：路径 / 名称 / 标签" />
+          <div style="height:10px"></div>
+          <div class="nav" id="nav"></div>
+        </div>
+      </aside>
+
+      <main class="panel middle">
+        <div class="hd">
+          <div class="title" id="docTitle">加载中…</div>
+          <div class="small muted" id="docPath"></div>
+        </div>
+        <div class="bd" id="doc"></div>
+      </main>
+
+      <aside class="panel right">
+        <div class="hd">
+          <div class="title">在线调试</div>
+          <div class="small muted">一键发起请求</div>
+        </div>
+        <div class="bd">
+          <div class="section">
+            <h3>Base URL</h3>
+            <div class="row">
+              <input id="baseUrl" />
+              <button class="btn secondary" id="useCurrent">使用当前</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>请求地址</h3>
+            <div class="kv">
+              <div class="k">方法</div>
+              <div class="v"><span class="method" id="tryMethod">-</span></div>
+            </div>
+            <div class="kv">
+              <div class="k">路径</div>
+              <div class="v" id="tryPath">-</div>
+            </div>
+          </div>
+
+          <div class="section" id="tryQuerySection" style="display:none;">
+            <h3>Query 参数</h3>
+            <div id="tryQuery"></div>
+          </div>
+
+          <div class="section" id="tryBodySection" style="display:none;">
+            <h3>请求体（JSON）</h3>
+            <textarea id="tryBody"></textarea>
+          </div>
+
+          <div class="section" id="tryBodyFieldsSection" style="display:none;">
+            <div class="row" style="align-items:center;">
+              <h3 style="margin:0;">请求体字段</h3>
+              <button class="btn secondary" id="toggleBodyMode">切换：原始 JSON</button>
+            </div>
+            <div style="height:10px"></div>
+            <div id="tryBodyFields"></div>
+          </div>
+
+          <div class="section">
+            <div class="row">
+              <button class="btn" id="send">发送</button>
+              <button class="btn secondary" id="copyCurl">复制 curl</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>响应</h3>
+            <div class="split">
+              <div class="kv">
+                <div class="k">HTTP 状态</div>
+                <div class="v" id="respStatus">-</div>
+              </div>
+              <div class="code" id="respBody">-</div>
+              <div id="respQrWrap" style="display:none;">
+                <div style="height:12px"></div>
+                <div class="muted small">二维码预览（仅测试用，可直接扫码核销）</div>
+                <div style="height:10px"></div>
+                <div style="display:flex; justify-content:center;">
+                  <img id="respQrImg" alt="QR" style="width:220px;height:220px;border:1px solid var(--line);border-radius:12px;background:#fff;" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <script src="/assets/base.js"></script>
+    <script src="/assets/docs.js"></script>
+  </body>
+</html>

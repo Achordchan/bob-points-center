@@ -1,0 +1,1602 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BOB币 - 管理端</title>
+    <link rel="stylesheet" href="/assets/base.css" />
+    <link rel="stylesheet" href="/assets/admin.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="globalToast hidden" id="globalToast">-</div>
+      <header>
+        <div>
+          <h1>BOB币 - 管理端</h1>
+          <div class="muted" id="userHint">-</div>
+        </div>
+        <div class="row">
+          <a class="muted" href="/docs" target="_blank" rel="noreferrer">API 文档</a>
+          <button class="secondary" id="btnLogout" disabled>退出登录</button>
+        </div>
+      </header>
+
+      <div class="tabs">
+        <button class="tabbtn active" id="tabUsers">用户管理</button>
+        <button class="tabbtn" id="tabRedeem">核销管理</button>
+        <button class="tabbtn" id="tabMall">商城管理</button>
+        <button class="tabbtn" id="tabRedPacket">红包管理</button>
+        <button class="tabbtn" id="tabMessages">消息管理</button>
+        <button class="tabbtn" id="tabSettings">高级设置</button>
+      </div>
+
+      <section id="panelUsers">
+        <section class="card">
+          <div class="row" style="justify-content: space-between;">
+            <div>
+              <h2 style="margin:0 0 6px; font-size:18px;">用户列表</h2>
+              <div class="help">支持搜索、查看余额、选择多用户批量发币/删除。</div>
+            </div>
+            <div class="row">
+              <button class="secondary" id="btnSyncUsers" disabled>同步通讯录</button>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:10px;">
+            <input id="userKeyword" placeholder="搜索姓名或 userid" style="flex:1; min-width:240px;" />
+          </div>
+
+          <div class="row" style="margin-top:10px; justify-content: space-between;">
+            <div class="muted" id="userStat">-</div>
+            <div class="row">
+              <div class="selectWrap">
+                <button class="secondary" id="btnSelectMenu" disabled>▾</button>
+                <button class="secondary" id="btnToggleSelect" disabled>选择</button>
+                <div class="selectMenu hidden" id="selectMenu">
+                  <button class="secondary" id="btnSelectPage" type="button">全选当页</button>
+                  <button class="secondary" id="btnSelectAll" type="button">全选全部</button>
+                  <button class="secondary" id="btnSelectClear" type="button">清空选择</button>
+                </div>
+              </div>
+              <button class="secondary" id="btnBulkGrant" disabled>批量发币</button>
+              <button class="secondary" id="btnBulkDeduct" disabled>批量减币</button>
+              <button class="secondary" id="btnBulkNotify" disabled>批量发消息</button>
+              <button class="secondary" id="btnBulkDelete" disabled>删除</button>
+              <button class="secondary" id="btnResetUserData" disabled>清空该用户</button>
+              <button class="secondary" id="btnResetAllData" disabled>清空全部</button>
+              <button class="secondary" id="btnUserPrev" disabled>上一页</button>
+              <button class="secondary" id="btnUserNext" disabled>下一页</button>
+            </div>
+          </div>
+
+          <div class="toast" id="userToast"></div>
+
+          <div style="height:10px"></div>
+          <div style="max-height: 640px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th id="thPick" class="hidden" style="width:56px;">选择</th>
+                  <th>姓名</th>
+                  <th>userid</th>
+                  <th style="width:120px;">管理员</th>
+                  <th style="width:120px;">余额</th>
+                  <th style="width:160px;">更新时间</th>
+                  <th style="width:150px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="userTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="panelRedPacket" class="hidden">
+        <section class="card">
+          <div class="row" style="justify-content: space-between; align-items:center;">
+            <div>
+              <h2 style="margin:0 0 6px; font-size:18px;">抢红包配置</h2>
+              <div class="help">立即开始 + 倒计时，分配为整数，单份 ≤ 平均值 × 2，最小 1。</div>
+            </div>
+            <button id="btnRedPacketStart" disabled>创建并开始</button>
+          </div>
+
+          <div class="toast" id="redPacketToast"></div>
+
+          <div class="red-packet-grid" style="margin-top:12px;">
+            <div class="kv">
+              <label for="redPacketTotalAmount">红包总金额</label>
+              <input id="redPacketTotalAmount" type="number" min="1" placeholder="例如：200" />
+            </div>
+            <div class="kv">
+              <label for="redPacketTotalCount">参与人数</label>
+              <input id="redPacketTotalCount" type="number" min="1" placeholder="例如：50" />
+            </div>
+            <div class="kv">
+              <label for="redPacketCountdown">倒计时（秒）</label>
+              <input id="redPacketCountdown" type="number" min="0" placeholder="例如：30" />
+            </div>
+            <div class="kv">
+              <label for="redPacketDuration">活动持续（分钟）</label>
+              <input id="redPacketDuration" type="number" min="1" placeholder="例如：10" />
+            </div>
+            <div class="kv">
+              <label for="redPacketSponsor">赞助人（可选）</label>
+              <input id="redPacketSponsor" placeholder="例如：市场部" />
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:14px; border-radius:14px; border:1px dashed var(--line);">
+            <div class="row" style="justify-content: space-between;">
+              <div class="muted">当前状态</div>
+              <div class="pill" id="redPacketStatus">-</div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv"><div class="muted">开始时间</div><div id="redPacketStartAt">-</div></div>
+            <div style="height:6px"></div>
+            <div class="kv"><div class="muted">结束时间</div><div id="redPacketEndAt">-</div></div>
+            <div style="height:6px"></div>
+            <div class="kv"><div class="muted">已抢/总数</div><div id="redPacketClaimed">-</div></div>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top:14px;">
+          <div class="row" style="justify-content: space-between; align-items:center;">
+            <div>
+              <h3 style="margin:0 0 6px; font-size:16px;">红包历史</h3>
+              <div class="help">记录所有红包活动和作废发放明细。</div>
+            </div>
+            <div class="row">
+              <button class="secondary" id="btnRedPacketHistoryRefresh" disabled>刷新</button>
+              <button class="secondary" id="btnRedPacketHistoryClear" disabled>清空历史</button>
+            </div>
+          </div>
+
+          <div class="toast" id="redPacketHistoryToast"></div>
+
+          <div class="red-packet-history-table" style="margin-top:12px; max-height: 520px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:90px;">ID</th>
+                  <th style="width:220px;">时间</th>
+                  <th style="width:160px;">总额/份数</th>
+                  <th style="width:160px;">已抢/剩余</th>
+                  <th style="width:120px;">状态</th>
+                  <th style="width:160px;">赞助人</th>
+                  <th>发放明细</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="redPacketHistoryTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="panelRedeem" class="hidden">
+        <section class="card">
+            <h2 style="margin:0 0 10px; font-size:18px;">扫码核销</h2>
+            <div class="help">用钉钉扫码（优先）或打开摄像头扫码，拿到 encoded 后直接核销。</div>
+            <div class="row" style="margin-top:10px;">
+              <button id="btnScan" disabled>扫码</button>
+              <button class="secondary" id="btnStopScan" disabled>停止摄像头</button>
+              <button class="secondary" id="btnConfirmClear">清空输出</button>
+            </div>
+            <div style="height:10px"></div>
+            <video id="video" class="video hidden" playsinline></video>
+            <div style="height:10px"></div>
+            <label for="confirmEncoded">二维码内容 encoded</label>
+            <textarea id="confirmEncoded" placeholder="扫码后会自动填入，也可手动粘贴…"></textarea>
+
+            <div class="row" style="margin-top:10px;">
+              <button id="btnConfirm" disabled>核销</button>
+            </div>
+            <div class="toast" id="outConfirm"></div>
+          </section>
+
+        <details class="card" id="redeemHistoryDetails">
+          <summary>已核销</summary>
+          <div class="help">展示已核销记录，方便快速核对。</div>
+          <div class="row" style="margin-top:10px; justify-content: space-between;">
+            <div class="muted" id="redeemHistoryStat">-</div>
+            <div class="row">
+              <button class="secondary" id="btnRedeemHistoryRefresh" disabled>刷新</button>
+              <button class="secondary" id="btnRedeemHistoryMore" disabled>加载更多</button>
+              <button class="secondary" id="btnRedeemHistoryClear" disabled>清空已核销</button>
+            </div>
+          </div>
+          <div style="height:10px"></div>
+          <div style="max-height: 520px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:170px;">时间</th>
+                  <th style="width:220px;">用户</th>
+                  <th style="width:160px;">姓名</th>
+                  <th style="width:240px;">兑换单号</th>
+                  <th>商品</th>
+                  <th style="width:120px;">扣减</th>
+                </tr>
+              </thead>
+              <tbody id="redeemHistoryTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="redeemPendingDetails" style="margin-top:12px;">
+          <summary>未核销</summary>
+          <div class="help">展示未核销订单，用于后期对账核对。</div>
+          <div class="row" style="margin-top:10px; justify-content: space-between;">
+            <div class="muted" id="redeemPendingStat">-</div>
+            <div class="row">
+              <button class="secondary" id="btnRedeemPendingRefresh" disabled>刷新</button>
+              <button class="secondary" id="btnRedeemPendingMore" disabled>加载更多</button>
+            </div>
+          </div>
+          <div style="height:10px"></div>
+          <div style="max-height: 520px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:170px;">下单时间</th>
+                  <th style="width:220px;">用户</th>
+                  <th style="width:160px;">姓名</th>
+                  <th style="width:240px;">兑换单号</th>
+                  <th>商品</th>
+                  <th style="width:120px;">扣减</th>
+                </tr>
+              </thead>
+              <tbody id="redeemPendingTable"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <section id="panelMall" class="hidden">
+        <section class="card mall-hero">
+          <h2 style="margin:0 0 10px; font-size:18px;">商城管理</h2>
+          <div class="help">支持三种版本：宜搭版 / AI表格版 / 自建版。同一时间只使用一个数据源。</div>
+
+          <div style="height:12px"></div>
+          <div class="row mall-mode-row">
+            <button class="secondary" id="btnMallModeYida" disabled>宜搭版（占位）</button>
+            <button class="secondary" id="btnMallModeAiTable" disabled>AI表格版（封存）</button>
+            <button id="btnMallModeSelf" disabled>自建版</button>
+            <div class="muted" id="mallModeHint">当前：自建版（可编辑）</div>
+          </div>
+        </section>
+
+        <section class="card mall-opening-card">
+          <div class="row mall-opening-head" style="justify-content: space-between;">
+            <div>
+              <h3 style="margin:0 0 6px; font-size:16px;">商城开启控制</h3>
+              <div class="help">默认仅提供开关控制；自动开启配置可在“更多设置”中展开。</div>
+            </div>
+            <div class="row mall-opening-actions">
+              <button class="secondary" id="btnMallOpeningMore" disabled>更多设置</button>
+              <button id="btnMallToggleNow" disabled>立即开启</button>
+            </div>
+          </div>
+
+          <div class="mall-opening-grid" id="mallOpeningSimpleGrid">
+            <div class="kv">
+              <label>当前状态</label>
+              <div class="mall-opening-status" id="mallOpeningStatus">-</div>
+            </div>
+          </div>
+
+          <div class="mall-opening-advanced hidden" id="mallOpeningAdvanced">
+            <div class="mall-opening-grid">
+              <div class="kv">
+                <label>自动开启</label>
+                <label class="muted publish-row">
+                  <input type="checkbox" id="mallAutoEnable" />
+                  启用自动开启计划
+                </label>
+              </div>
+            <div class="kv">
+              <label for="mallNextOpenAt">下一次开启时间</label>
+              <input id="mallNextOpenAt" type="datetime-local" />
+            </div>
+            <div class="kv">
+              <label for="mallIntervalMinutes">开启频率（分钟）</label>
+              <input id="mallIntervalMinutes" type="number" min="1" placeholder="例如：30" />
+            </div>
+            <div class="kv">
+              <label for="mallOpenDuration">开启持续（分钟）</label>
+              <input id="mallOpenDuration" type="number" min="1" placeholder="例如：20" />
+            </div>
+            <div class="kv">
+              <label for="mallRemindSeconds">提前提醒（秒）</label>
+              <input id="mallRemindSeconds" type="number" min="0" placeholder="例如：180（0 表示不提醒）" />
+            </div>
+            <div class="kv">
+              <label for="mallCloseRemindSeconds">关闭前提醒（秒）</label>
+              <input id="mallCloseRemindSeconds" type="number" min="0" placeholder="例如：180（0 表示不提醒）" />
+            </div>
+            <div class="kv">
+              <label>下一次开启展示</label>
+              <div class="mall-opening-next" id="mallNextOpenText">-</div>
+            </div>
+            <div class="kv">
+              <label>下一次关闭展示</label>
+              <div class="mall-opening-next" id="mallNextCloseText">-</div>
+            </div>
+            </div>
+          </div>
+
+          <div class="row hidden" id="mallOpeningAdvancedActions" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary" id="btnMallOpeningRefresh" disabled>刷新</button>
+            <button id="btnMallOpeningSave" disabled>保存设置</button>
+          </div>
+          <div class="error" id="mallOpeningErr"></div>
+        </section>
+
+        <section class="card mall-product-card" id="mallProductListPanel">
+          <div class="row mall-header-row" style="justify-content: space-between;">
+            <div>
+              <h3 style="margin:0 0 6px; font-size:16px;">商品列表</h3>
+              <div class="help">商品字段会映射到二维码 payload：product_id / product_name / bob_amount。</div>
+            </div>
+            <div class="row mall-actions">
+              <button class="secondary" id="btnMallProductRefresh" disabled>刷新</button>
+              <button id="btnMallProductCreate" disabled>新增商品</button>
+            </div>
+          </div>
+
+          <div class="toast" id="mallAiToast"></div>
+
+          <div style="height:10px"></div>
+          <div class="mall-table-wrap" style="max-height: 640px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:190px;">商品ID</th>
+                  <th>名称</th>
+                  <th style="width:120px;">扣减</th>
+                  <th style="width:120px;">库存</th>
+                  <th style="width:120px;">限购</th>
+                  <th style="width:120px;">CDK兑换</th>
+                  <th style="width:120px;">状态</th>
+                  <th style="width:120px;">排序</th>
+                  <th style="width:170px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="mallProductTable"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card mall-product-card" id="charityProjectPanel" style="margin-top:12px;">
+          <div class="row mall-header-row" style="justify-content: space-between;">
+            <div>
+              <h3 style="margin:0 0 6px; font-size:16px;">公益区管理</h3>
+              <div class="help">管理公益项目、目标金额、档位、执行状态与助力记录。</div>
+            </div>
+            <div class="row mall-actions">
+              <button class="secondary" id="btnCharityProjectRefresh" disabled>刷新项目</button>
+              <button id="btnCharityProjectCreate" disabled>新增项目</button>
+            </div>
+          </div>
+          <div class="toast" id="charityProjectToast"></div>
+          <div class="error" id="charityProjectErr"></div>
+          <div style="height:10px"></div>
+          <div class="mall-table-wrap" style="max-height: 420px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:180px;">项目ID</th>
+                  <th>名称</th>
+                  <th style="width:120px;">目标</th>
+                  <th style="width:120px;">累计</th>
+                  <th style="width:100px;">人数</th>
+                  <th style="width:100px;">次数</th>
+                  <th style="width:110px;">状态</th>
+                  <th style="width:120px;">执行状态</th>
+                  <th style="width:90px;">排序</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="charityProjectTable"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card mall-product-card" id="charityContributionPanel" style="margin-top:12px;">
+          <div class="row mall-header-row" style="justify-content: space-between; gap: 10px; align-items:flex-end;">
+            <div>
+              <h3 style="margin:0 0 6px; font-size:16px;">公益助力记录</h3>
+              <div class="help">按项目查看最新助力流水和累计概览。</div>
+            </div>
+            <div class="row mall-actions" style="align-items:flex-end; gap:10px;">
+              <div>
+                <div class="help" style="margin-bottom:4px;">筛选项目</div>
+                <select id="charityContributionProjectFilter" style="min-width:220px;">
+                  <option value="">全部项目</option>
+                </select>
+              </div>
+              <button class="secondary" id="btnCharityContributionRefresh" disabled>刷新记录</button>
+            </div>
+          </div>
+          <div class="muted" id="charityContributionStat">-</div>
+          <div class="error" id="charityContributionErr"></div>
+          <div style="height:10px"></div>
+          <div class="mall-table-wrap" style="max-height: 420px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:170px;">时间</th>
+                  <th style="width:180px;">项目</th>
+                  <th>助力人</th>
+                  <th style="width:120px;">金额</th>
+                </tr>
+              </thead>
+              <tbody id="charityContributionTable"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <details class="card" id="mallYidaPlaceholder">
+          <summary>宜搭版（占位）</summary>
+          <div class="muted">（暂未接入，后续再做）</div>
+        </details>
+
+        <details class="card" id="mallSelfPlaceholder">
+          <summary>自建版（占位）</summary>
+          <div class="muted">（暂未接入，后续再做）</div>
+        </details>
+      </section>
+
+      <section id="panelMessages" class="hidden">
+        <div id="messagesNotifyMount"></div>
+        <div id="messagesGroupMount" style="margin-top:12px;"></div>
+
+      </section>
+
+      <section id="panelSettings" class="hidden">
+        <details class="card" id="attendanceRewardDetails">
+          <summary>钉钉打卡奖励</summary>
+          <div class="help">员工准时打卡时自动随机发放 BOB 币奖励，通过 Stream 事件实时触发。需在钉钉开放平台订阅「员工打卡」事件。</div>
+
+          <div class="row" style="margin-top:12px; justify-content:space-between; gap:10px;">
+            <div class="row" style="gap:16px;">
+              <label class="muted publish-row">
+                <input type="checkbox" id="attendanceRewardEnabled" />
+                启用打卡奖励
+              </label>
+              <label class="muted publish-row" style="color: #e6a817;">
+                <input type="checkbox" id="attendanceTestMode" />
+                测试模式（跳过迟到 &amp; 打卡类型校验）
+              </label>
+            </div>
+            <div class="row">
+              <button class="secondary" id="btnAttendanceRewardReset" type="button" disabled>恢复默认</button>
+              <button id="btnAttendanceRewardSave" type="button" disabled>保存设置</button>
+            </div>
+          </div>
+
+          <div style="height:12px"></div>
+
+          <div class="kv">
+            <label>上班时间</label>
+            <div style="flex:1;">
+              <span style="font-weight:600;">08:30</span>
+              <div class="help" style="margin-top:4px;">固定为北京时间 08:30，与服务器时区无关。宽限分钟数可在下方调整。</div>
+            </div>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label for="attendanceLateGraceMinutes">宽限分钟数</label>
+            <div style="flex:1;">
+              <input id="attendanceLateGraceMinutes" type="number" min="0" placeholder="0" style="max-width:120px;" />
+              <div class="help" style="margin-top:4px;">超过上班时间多少分钟内仍算准时（默认 0，即严格不迟到）。</div>
+            </div>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label>奖励范围（BOB 币）</label>
+            <div class="row" style="gap:8px; flex:1;">
+              <input id="attendanceRewardMin" type="number" min="1" placeholder="最小值" style="max-width:100px;" />
+              <span class="muted" style="align-self:center;">—</span>
+              <input id="attendanceRewardMax" type="number" min="1" placeholder="最大值" style="max-width:100px;" />
+              <div class="help" style="align-self:center; margin:0;">随机取区间整数</div>
+            </div>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label for="attendanceMaxPerDay">每日上限次数</label>
+            <div style="flex:1;">
+              <input id="attendanceMaxPerDay" type="number" min="1" placeholder="1" style="max-width:120px;" />
+              <div class="help" style="margin-top:4px;">每人每天最多奖励次数，防止重复发放。</div>
+            </div>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label>打卡类型</label>
+            <label class="muted publish-row">
+              <input type="checkbox" id="attendanceOnlyCheckin" />
+              仅上班打卡触发（忽略下班打卡）
+            </label>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label for="attendanceReason">奖励理由</label>
+            <div style="flex:1;">
+              <input id="attendanceReason" placeholder="打卡奖励" />
+              <div class="help" style="margin-top:4px;">写入账本的理由文案，支持 <code>{{name}}</code> 变量。</div>
+            </div>
+          </div>
+
+          <div class="toast" id="attendanceRewardToast"></div>
+          <div class="error" id="attendanceRewardErr"></div>
+
+          <div style="height:12px"></div>
+          <div class="row" style="justify-content:space-between; align-items:flex-end; gap:10px;">
+            <div>
+              <div style="font-weight:700; font-size:14px;">今日打卡奖励摘要</div>
+              <div class="help">优先看今天实时奖励、自动补发和异常情况。</div>
+            </div>
+          </div>
+          <div class="stats-grid" id="attendanceSummaryGrid" style="margin-top:10px;">
+            <div class="stat-card"><div class="stat-label">实时奖励数</div><div class="stat-value" id="attendanceSummaryStreamRewarded">-</div></div>
+            <div class="stat-card"><div class="stat-label">自动补发数</div><div class="stat-value" id="attendanceSummaryReconcileRewarded">-</div></div>
+            <div class="stat-card"><div class="stat-label">已跳过数</div><div class="stat-value" id="attendanceSummarySkipped">-</div></div>
+            <div class="stat-card"><div class="stat-label">异常数</div><div class="stat-value" id="attendanceSummaryErrors">-</div></div>
+            <div class="stat-card"><div class="stat-label">总发放 BOB</div><div class="stat-value" id="attendanceSummaryTotalAmount">-</div></div>
+          </div>
+
+          <div style="height:12px"></div>
+          <div class="row" style="justify-content:space-between; gap:10px; align-items:flex-end;">
+            <div>
+              <div style="font-weight:700; font-size:14px;">发放状态列表</div>
+              <div class="help">按天查看总发放、异常情况和自动补发结果。异常天会标红。</div>
+            </div>
+            <div class="row" style="gap:8px; align-items:flex-end;">
+              <div>
+                <div class="help" style="margin-bottom:4px;">查看天数</div>
+                <select id="attendanceStatusDays" style="min-width:120px;">
+                  <option value="7">近 7 天</option>
+                  <option value="14">近 14 天</option>
+                </select>
+              </div>
+              <button class="secondary" id="btnAttendanceStatusRefresh" type="button" disabled>刷新列表</button>
+            </div>
+          </div>
+          <div class="toast" id="attendanceStatusToast"></div>
+          <div class="error" id="attendanceStatusErr"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 360px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:120px;">日期</th>
+                  <th style="width:120px;">总记录</th>
+                  <th style="width:120px;">已奖励</th>
+                  <th style="width:120px;">已跳过</th>
+                  <th style="width:120px;">异常人数</th>
+                  <th style="width:120px;">自动补发</th>
+                  <th style="width:140px;">总计发放</th>
+                  <th style="width:120px;">状态</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="attendanceStatusTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="backupDetails" style="margin-top:12px;">
+          <summary>备份管理</summary>
+          <div class="help">导出当前所有数据为 JSON 文件，或从备份文件恢复。建议在重大操作前先导出一份全量备份。</div>
+
+          <div style="height:14px;"></div>
+
+          <div class="kv" style="align-items:flex-start;">
+            <label style="padding-top:6px;">导出备份</label>
+            <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+              <div class="row" style="gap:10px; flex-wrap:wrap;">
+                <button id="btnExportSettings" type="button" disabled>导出设置备份</button>
+                <button id="btnExportFull" type="button" class="secondary" disabled>导出全量备份（含用户数据）</button>
+              </div>
+              <div class="help">
+                <b>设置备份</b>：包含系统设置、商品、公益项目、商城开闭场、FAQ、公告、版本信息等配置，<b>不含</b>用户账户、账本、订单、日志和打卡记录。<br>
+                <b>设置备份包含表</b>：<code>system_settings</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>mall_opening_schedule</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>system_versions</code>。<br>
+                <b>全量备份</b>：包含全部核心业务数据，含用户、余额、账本、订单、CDK、公益助力、打卡奖励记录、红包、反馈、系统日志、令牌等，文件较大。<br>
+                <b>全量备份包含表</b>：<code>users</code>、<code>accounts</code>、<code>bob_tokens</code>、<code>ledger</code>、<code>redeems</code>、<code>redeem_cdks</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>charity_contributions</code>、<code>attendance_reward_records</code>、<code>mall_opening_schedule</code>、<code>red_packet_activity</code>、<code>red_packet_items</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>system_versions</code>、<code>user_feedback</code>、<code>audit_logs</code>、<code>system_settings</code>。
+              </div>
+            </div>
+          </div>
+
+          <div style="height:16px; border-top:1px solid var(--line); margin-top:16px;"></div>
+
+          <div class="kv" style="align-items:flex-start;">
+            <label style="padding-top:6px;">导入恢复</label>
+            <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+              <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap;">
+                <label id="backupFileLabel" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; padding:7px 16px; border-radius:8px; border:1px solid var(--line); font-size:14px; background:var(--bg2);">
+                  <span>📂</span>
+                  <span id="backupFileName">选择备份文件…</span>
+                  <input type="file" id="backupFileInput" accept=".json" style="display:none;" />
+                </label>
+                <select id="backupImportMode" style="padding:7px 12px; border-radius:8px; border:1px solid var(--line); font-size:14px; background:var(--bg2);">
+                  <option value="merge">合并模式（保留现有数据，冲突跳过）</option>
+                  <option value="overwrite">覆盖模式（清空后重新写入）</option>
+                </select>
+              </div>
+              <div class="help" style="color:#e6a817;">
+                ⚠️ <b>覆盖模式</b>会先清空对应表再写入，用户余额和账本将被替换，操作不可逆，请谨慎使用。
+              </div>
+              <div>
+                <button id="btnImportBackup" type="button" disabled>开始导入</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="toast" id="backupToast" style="margin-top:10px;"></div>
+          <div class="error" id="backupErr" style="margin-top:6px;"></div>
+
+          <div id="backupReport" style="display:none; margin-top:12px; padding:12px; background:var(--bg2); border-radius:10px; font-size:13px; line-height:1.8;"></div>
+        </details>
+
+        <details class="card" id="cdkDetails" style="margin-top:12px;">
+          <summary>CDK 兑换</summary>
+          <div class="help">生成一物一码的 CDK，并管理其兑换与删除状态。编码规则由系统统一生成。</div>
+
+          <div style="height:12px;"></div>
+          <div class="kv">
+            <label for="cdkProductSelect">兑换商品</label>
+            <select id="cdkProductSelect">
+              <option value="">请选择商品</option>
+            </select>
+          </div>
+          <div style="height:8px;"></div>
+          <div class="kv">
+            <label for="cdkQuantityInput">生成数量</label>
+            <div class="row" style="justify-content:flex-start; gap:10px;">
+              <input id="cdkQuantityInput" type="number" min="1" max="500" value="1" style="max-width:160px;" />
+              <button id="btnCdkGenerate" type="button" disabled>生成 CDK</button>
+              <button class="secondary" id="btnCdkRefresh" type="button" disabled>刷新列表</button>
+            </div>
+          </div>
+          <div class="toast" id="cdkToast"></div>
+          <div class="error" id="cdkErr"></div>
+
+          <div class="cdk-batch-box">
+            <div class="row" style="justify-content:space-between; align-items:center; gap:10px;">
+              <div>
+                <div style="font-weight:700;">本次生成批次</div>
+                <div class="help" id="cdkBatchHint">生成成功后，可在此处一键复制全部 CDK。编码由系统自动生成。</div>
+              </div>
+              <button class="secondary" id="btnCdkCopyBatch" type="button" disabled>复制本批次</button>
+            </div>
+            <textarea id="cdkBatchOutput" readonly placeholder="本次生成的 CDK 将显示在这里"></textarea>
+          </div>
+
+          <div style="height:12px;"></div>
+          <div style="max-height: 520px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:180px;">商品</th>
+                  <th style="width:180px;">CDK</th>
+                  <th style="width:120px;">状态</th>
+                  <th style="width:140px;">生成人</th>
+                  <th style="width:170px;">生成时间</th>
+                  <th style="width:140px;">兑换人</th>
+                  <th style="width:170px;">兑换时间</th>
+                  <th style="width:220px;">兑换单号</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="cdkTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="tokenDetails" style="margin-top:12px;">
+          <summary>BOB-Token</summary>
+          <div class="help">Token 只用于外部接口防误触：生成后可直接用于调用 API；需要停用就手动吊销。</div>
+          <div style="height:10px"></div>
+          <div class="row" style="margin-top:10px;">
+            <button id="btnCreateToken" disabled>生成新 Token</button>
+            <button class="secondary" id="btnRefreshTokens" disabled>刷新列表</button>
+          </div>
+          <div class="error" id="tokenErr"></div>
+
+          <div style="max-height: 420px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:90px;">id</th>
+                  <th>token</th>
+                  <th style="width:180px;">创建时间</th>
+                  <th style="width:180px;">吊销时间</th>
+                  <th style="width:260px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="tokenTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="notifySettingsDetails" style="margin-top:12px;">
+          <summary>消息通知设置</summary>
+          <div class="help">控制私聊机器人通知开关与模板变量，转账/发币/扣币/下单/红包均可配置。</div>
+          <div class="row" style="margin-top:10px; justify-content: space-between; gap:10px;">
+            <label class="muted publish-row">
+              <input type="checkbox" id="notifyEnabled" />
+              启用私聊通知
+            </label>
+            <div class="row">
+              <button class="secondary" id="btnNotifyTplReset" disabled>恢复默认</button>
+              <button id="btnNotifyTplSave" disabled>保存设置</button>
+            </div>
+          </div>
+
+          <div class="notifyToolbar" style="margin-top:12px;">
+            <div class="help">变量说明（点击插入）</div>
+            <div class="notifyVarsRow">
+              <button class="varChip" type="button" data-var="name">{{name}}</button>
+              <button class="varChip" type="button" data-var="userid">{{userid}}</button>
+              <button class="varChip" type="button" data-var="amount">{{amount}}</button>
+              <button class="varChip" type="button" data-var="balance">{{balance}}</button>
+              <button class="varChip" type="button" data-var="reason">{{reason}}</button>
+              <button class="varChip" type="button" data-var="product_name">{{product_name}}</button>
+              <button class="varChip" type="button" data-var="exchange_id">{{exchange_id}}</button>
+              <button class="varChip" type="button" data-var="from_name">{{from_name}}</button>
+              <button class="varChip" type="button" data-var="to_name">{{to_name}}</button>
+              <button class="varChip" type="button" data-var="activity_id">{{activity_id}}</button>
+              <button class="varChip" type="button" data-var="transfer_id">{{transfer_id}}</button>
+            </div>
+            <div class="notifyVarDesc">
+              <div><code>{{name}}</code>：用户姓名（例如：陈驰宇-Achord）</div>
+              <div><code>{{userid}}</code>：用户 ID（钉钉 userId）</div>
+              <div><code>{{amount}}</code>：本次变动金额</div>
+              <div><code>{{balance}}</code>：变动后余额</div>
+              <div><code>{{reason}}</code>：变动原因（如管理员发放、扣币说明）</div>
+              <div><code>{{product_name}}</code>：商品名称</div>
+              <div><code>{{exchange_id}}</code>：订单/兑换单号</div>
+              <div><code>{{from_name}}</code>：转账发起人姓名</div>
+              <div><code>{{to_name}}</code>：转账收款人姓名</div>
+              <div><code>{{activity_id}}</code>：红包活动 ID</div>
+              <div><code>{{transfer_id}}</code>：转账流水号</div>
+            </div>
+          </div>
+
+          <div class="notifyEditor" style="margin-top:12px;">
+            <div class="kv">
+              <label for="notifyTemplateSelect">模板类型</label>
+              <select id="notifyTemplateSelect">
+                <option value="grant">发币通知</option>
+                <option value="deduct">扣币通知</option>
+                <option value="redeem">核销通知</option>
+                <option value="mall_buy">下单通知</option>
+                <option value="transfer_out">转账转出通知</option>
+                <option value="transfer_in">转账转入通知</option>
+                <option value="red_packet">红包通知</option>
+              </select>
+            </div>
+            <div style="height:10px"></div>
+            <label class="muted publish-row">
+              <input type="checkbox" id="notifyTplEnabled" />
+              启用该通知
+            </label>
+            <div style="height:10px"></div>
+            <div class="kv">
+              <label for="notifyTplTitle">标题模板</label>
+              <input id="notifyTplTitle" placeholder="例如：【BOB币中心】通知 {{name}}" />
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="notifyTplContent">内容模板</label>
+              <textarea id="notifyTplContent" placeholder="例如：金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币"></textarea>
+            </div>
+          </div>
+
+          <div class="notifyTest" style="margin-top:12px;">
+            <div class="help">测试发送（默认接收人：陈驰宇-Achord）</div>
+            <div class="row" style="margin-top:8px;">
+              <input id="notifyTestName" placeholder="接收人姓名" value="陈驰宇-Achord" />
+              <button class="secondary" id="btnNotifyTest" type="button" disabled>发送测试</button>
+            </div>
+            <div class="notifyTestList hidden" id="notifyTestList"></div>
+            <div class="help" id="notifyTestTargetHint">默认接收人：陈驰宇-Achord</div>
+          </div>
+          <div class="toast" id="notifyTplToast"></div>
+          <div class="error" id="notifyTplErr"></div>
+        </details>
+
+        <details class="card" id="groupCardDetails" style="margin-top:12px;">
+          <summary>群聊互动卡片推送</summary>
+          <div class="help">支持配置自动群卡模板（商城开启/提醒/库存）与手动推送模板。</div>
+          <div class="notifyToolbar" style="margin-top:10px;">
+            <div class="help">群卡变量说明（点击插入）</div>
+            <div class="notifyVarsRow">
+              <button class="varChip" type="button" data-var="title">{{title}}</button>
+              <button class="varChip" type="button" data-var="content">{{content}}</button>
+              <button class="varChip" type="button" data-var="open_time">{{open_time}}</button>
+              <button class="varChip" type="button" data-var="close_time">{{close_time}}</button>
+              <button class="varChip" type="button" data-var="product_name">{{product_name}}</button>
+              <button class="varChip" type="button" data-var="stock">{{stock}}</button>
+              <button class="varChip" type="button" data-var="amount">{{amount}}</button>
+            </div>
+            <div class="notifyVarDesc">
+              <div><code>{{title}}</code>：原始标题文本（手动推送标题）</div>
+              <div><code>{{content}}</code>：原始 Markdown 内容（手动推送内容）</div>
+              <div><code>{{open_time}}</code>：商城开启时间（自动开启场景）</div>
+              <div><code>{{close_time}}</code>：商城关闭时间（关闭提醒场景）</div>
+              <div><code>{{product_name}}</code>：商品名称（库存/上新场景）</div>
+              <div><code>{{stock}}</code>：库存文案（库存告急场景）</div>
+              <div><code>{{amount}}</code>：价格文案（上新场景）</div>
+            </div>
+          </div>
+          <div class="notifyEditor" style="margin-top:10px;">
+            <label class="muted publish-row">
+              <input type="checkbox" id="groupCardEnabled" />
+              启用群卡片通知
+            </label>
+            <div style="height:10px"></div>
+            <div class="kv">
+              <label for="groupCardTemplateSelect">模板类型</label>
+              <select id="groupCardTemplateSelect">
+                <option value="manual">手动推送模板</option>
+                <option value="mall_open">商城已开启</option>
+                <option value="mall_open_remind">商城即将开启</option>
+                <option value="mall_close_remind">商城即将关闭</option>
+                <option value="stock_low">库存告急</option>
+                <option value="stock_soldout">库存售罄</option>
+                <option value="new_product">新品上架</option>
+              </select>
+            </div>
+            <div style="height:10px"></div>
+            <label class="muted publish-row">
+              <input type="checkbox" id="groupCardTplEnabled" />
+              启用当前模板
+            </label>
+            <div style="height:10px"></div>
+            <div class="kv">
+              <label for="groupCardTplTitle">标题模板</label>
+              <input id="groupCardTplTitle" placeholder="例如：{{title}}" />
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardTplContent">内容模板</label>
+              <textarea id="groupCardTplContent" placeholder="例如：{{content}}"></textarea>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardTplButtons" style="align-self:flex-start;padding-top:6px;">按钮（JSON 数组）</label>
+              <div style="flex:1;">
+                <textarea id="groupCardTplButtons" rows="4" placeholder='[{"text":"去商城","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"}]' style="font-family:monospace;font-size:12px;"></textarea>
+                <div class="help" style="margin-top:4px;">支持字段：text（按钮文字）、url（跳转链接，支持变量）、color（blue / gray / red）。留空则不显示按钮。</div>
+              </div>
+            </div>
+            <div class="row" style="margin-top:10px; justify-content:flex-end; gap:10px;">
+              <button class="secondary" id="btnGroupCardTplReset" type="button" disabled>恢复默认</button>
+              <button class="secondary" id="btnGroupCardTplTest" type="button" disabled>发送测试</button>
+              <button id="btnGroupCardTplSave" type="button" disabled>保存群卡设置</button>
+            </div>
+            <div class="toast" id="groupCardTplToast"></div>
+            <div class="error" id="groupCardTplErr"></div>
+          </div>
+
+          <details style="margin-top:12px; border:1px dashed var(--line); border-radius:12px; padding:10px 12px;">
+            <summary style="cursor:pointer;">手动测试发送（可选，含按钮/图片/链接）</summary>
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardTitle">biaoti（标题）</label>
+              <input id="groupCardTitle" placeholder="例如：【BOB币中心】公告" value="【BOB币&2026巴布春晚】" />
+            </div>
+
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardContent">neirong（内容 / 支持 Markdown）</label>
+              <textarea id="groupCardContent" placeholder="例如：## 标题\n\n- 内容一\n- 内容二">欢迎各位来到**2026徐州巴布春节联欢晚会**！  
+我是来自古希腊、专程前来掌管 **BOB币** 的神明✨  
+
+今晚我将多次与大家互动——你可以通过**游戏**、**抽奖**等环节获取BOB币，随后进入**商城**选购心仪商品并下单。  
+我们的工作人员将为你核销订单并安排发货🏮  
+
+最后，特别感谢 **Achord** 为本系统提供强大驱动！  
+期待与大家共度一个欢乐纷呈的夜晚🎉</textarea>
+            </div>
+
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardLinkUrl">linkUrl（可选：用于生成默认按钮）</label>
+              <input id="groupCardLinkUrl" placeholder="例如：https://bob.baymaxgroup.com/mall" />
+            </div>
+
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardImageUrl">imageUrl（可选）</label>
+              <input id="groupCardImageUrl" placeholder="例如：https://.../image.jpg" />
+            </div>
+
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardOutTrackId">outTrackId（可选）</label>
+              <input id="groupCardOutTrackId" placeholder="例如：manual_20260123_001" />
+            </div>
+
+            <div style="height:10px"></div>
+
+            <div class="kv">
+              <label for="groupCardButtons">btns（可选：JSON 数组）</label>
+              <textarea id="groupCardButtons" placeholder='例如：[{"text":"去商城","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"}]'>[
+  {"text":"俺要购物！","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"},
+  {"text":"俺有多少钱？","url":"https://bob.baymaxgroup.com/mall?tab=balance","color":"gray"}
+]</textarea>
+            </div>
+
+            <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+              <button class="secondary" id="btnGroupCardClear" type="button" disabled>清空</button>
+              <button id="btnGroupCardSend" type="button" disabled>推送到群</button>
+            </div>
+            <div class="error" id="groupCardErr"></div>
+            <div class="toast" id="groupCardOut"></div>
+          </details>
+        </details>
+
+        <details class="card" id="auditLogDetails" style="margin-top:12px;">
+          <summary>系统日志</summary>
+          <div class="help">实时记录后台关键行为（包含管理员登录/登出、IP、时间及接口操作）。</div>
+          <div class="row" style="margin-top:10px; justify-content: space-between;">
+            <div class="muted" id="auditLogStat">-</div>
+            <div class="row">
+              <label class="muted publish-row" style="padding: 6px 10px;">
+                <input type="checkbox" id="auditLogAuto" />
+                自动刷新（5秒）
+              </label>
+              <button class="secondary" id="btnAuditLogRefresh" disabled>刷新</button>
+            </div>
+          </div>
+          <div class="toast" id="auditLogToast"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 520px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:170px;">时间</th>
+                  <th style="width:140px;">事件</th>
+                  <th style="width:180px;">操作者</th>
+                  <th style="width:180px;">IP</th>
+                  <th style="width:90px;">状态</th>
+                  <th style="width:280px;">路径</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="auditLogTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="faqDetails" style="margin-top:12px;">
+          <summary>规则 FAQ 管理</summary>
+          <div class="help">维护“更多”页面的规则与常见问题。</div>
+          <div class="row" style="margin-top:10px; justify-content:flex-end;">
+            <button class="secondary" id="btnFaqRefresh" disabled>刷新</button>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="faqQuestion">问题</label>
+            <input id="faqQuestion" placeholder="例如：BOB 币如何获得？" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="faqAnswer">答案</label>
+            <textarea id="faqAnswer" placeholder="请输入 FAQ 答案"></textarea>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="faqSort">排序</label>
+            <input id="faqSort" value="0" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="faqEnabled">启用</label>
+            <label class="muted publish-row"><input type="checkbox" id="faqEnabled" checked /> 前台可见</label>
+          </div>
+          <input id="faqId" type="hidden" />
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+            <button class="secondary" id="btnFaqClear" disabled>清空</button>
+            <button id="btnFaqSave" disabled>保存 FAQ</button>
+          </div>
+          <div class="toast" id="faqToast"></div>
+          <div class="error" id="faqErr"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 360px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:72px;">ID</th>
+                  <th>问题</th>
+                  <th style="width:90px;">排序</th>
+                  <th style="width:90px;">状态</th>
+                  <th style="width:180px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="faqTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="announcementDetails" style="margin-top:12px;">
+          <summary>公告中心管理</summary>
+          <div class="help">发布“更多”页面公告，支持等级与定时发布时间。</div>
+          <div class="row" style="margin-top:10px; justify-content:flex-end;">
+            <button class="secondary" id="btnAnnouncementRefresh" disabled>刷新</button>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementTitle">标题</label>
+            <input id="announcementTitle" placeholder="例如：商城发货安排通知" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementContent">内容</label>
+            <textarea id="announcementContent" placeholder="请输入公告内容"></textarea>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementLevel">等级</label>
+            <select id="announcementLevel">
+              <option value="info" selected>通知</option>
+              <option value="success">成功</option>
+              <option value="warning">提醒</option>
+              <option value="danger">重要</option>
+            </select>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementSort">排序</label>
+            <input id="announcementSort" value="0" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementPublishAt">发布时间（可选）</label>
+            <input id="announcementPublishAt" type="datetime-local" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="announcementEnabled">启用</label>
+            <label class="muted publish-row"><input type="checkbox" id="announcementEnabled" checked /> 前台可见</label>
+          </div>
+          <input id="announcementId" type="hidden" />
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+            <button class="secondary" id="btnAnnouncementClear" disabled>清空</button>
+            <button id="btnAnnouncementSave" disabled>保存公告</button>
+          </div>
+          <div class="toast" id="announcementToast"></div>
+          <div class="error" id="announcementErr"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 360px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:72px;">ID</th>
+                  <th>标题</th>
+                  <th style="width:90px;">等级</th>
+                  <th style="width:90px;">状态</th>
+                  <th style="width:200px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="announcementTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="feedbackDetails" style="margin-top:12px;">
+          <summary>反馈建议管理</summary>
+          <div class="help">查看用户反馈并处理（状态与回复）。</div>
+          <div class="row" style="margin-top:10px; justify-content:space-between; gap:10px;">
+            <input id="feedbackKeyword" placeholder="搜索用户/内容关键词" style="max-width: 260px;" />
+            <div class="row">
+              <select id="feedbackStatusFilter">
+                <option value="" selected>全部状态</option>
+                <option value="pending">待处理</option>
+                <option value="processing">处理中</option>
+                <option value="resolved">已处理</option>
+                <option value="rejected">已驳回</option>
+              </select>
+              <button class="secondary" id="btnFeedbackRefresh" disabled>刷新</button>
+            </div>
+          </div>
+          <div class="toast" id="feedbackToast"></div>
+          <div class="error" id="feedbackErr"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 420px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:70px;">ID</th>
+                  <th style="width:160px;">用户</th>
+                  <th style="width:90px;">分类</th>
+                  <th>内容</th>
+                  <th style="width:90px;">状态</th>
+                  <th style="width:220px;">处理</th>
+                </tr>
+              </thead>
+              <tbody id="feedbackTable"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="card" id="versionDetails" style="margin-top:12px;">
+          <summary>版本信息管理</summary>
+          <div class="help">维护“更多”页面版本信息（展示最新启用版本）。</div>
+          <div class="row" style="margin-top:10px; justify-content:flex-end;">
+            <button class="secondary" id="btnVersionRefresh" disabled>刷新</button>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="versionName">版本号</label>
+            <input id="versionName" placeholder="例如：v2.3.0" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="versionNotes">更新说明</label>
+            <textarea id="versionNotes" placeholder="请输入更新说明"></textarea>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="versionPublishAt">发布时间（可选）</label>
+            <input id="versionPublishAt" type="datetime-local" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="versionEnabled">启用</label>
+            <label class="muted publish-row"><input type="checkbox" id="versionEnabled" checked /> 前台可见</label>
+          </div>
+          <input id="versionId" type="hidden" />
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+            <button class="secondary" id="btnVersionClear" disabled>清空</button>
+            <button id="btnVersionSave" disabled>保存版本</button>
+          </div>
+          <div class="toast" id="versionToast"></div>
+          <div class="error" id="versionErr"></div>
+          <div style="height:10px"></div>
+          <div style="max-height: 320px; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:80px;">ID</th>
+                  <th>版本号</th>
+                  <th style="width:120px;">状态</th>
+                  <th style="width:180px;">发布时间</th>
+                  <th style="width:130px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="versionTable"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <div class="modal hidden" id="grantModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">批量发币</h3>
+          <div class="muted" id="grantModalHint">-</div>
+          <div style="height:10px"></div>
+          <div class="out mono" id="grantModalTargets" style="max-height: 220px;"></div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="modalAmount">发币数量</label>
+            <input id="modalAmount" value="10" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="modalReason">原因（可选）</label>
+            <input id="modalReason" value="admin_grant" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="modalRefId">批次/备注ID（可选）</label>
+            <input id="modalRefId" placeholder="例如：batch_20260121" />
+          </div>
+          <div class="row" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary" id="btnModalCancel">取消</button>
+            <button id="btnModalSubmit">确认发币</button>
+          </div>
+          <div class="error" id="grantModalErr"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="deductModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">批量减币</h3>
+          <div class="muted" id="deductModalHint">-</div>
+          <div style="height:10px"></div>
+          <div class="out mono" id="deductModalTargets" style="max-height: 220px;"></div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="deductAmount">减币数量</label>
+            <input id="deductAmount" value="10" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="deductNote">原因（必填）</label>
+            <input id="deductNote" placeholder="例如：错误发放回收/扣罚" />
+          </div>
+
+          <div style="height:16px"></div>
+          <div class="row" style="justify-content:flex-end;">
+            <button class="secondary" id="btnDeductCancel">取消</button>
+            <button id="btnDeductSubmit">确认减币</button>
+          </div>
+          <div class="error" id="deductModalErr"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="notifyModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">发送私聊消息</h3>
+          <div class="muted" id="notifyModalHint">-</div>
+          <div style="height:10px"></div>
+          <div class="out mono" id="notifyModalTargets" style="max-height: 220px;"></div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="notifyTitle">标题（可选）</label>
+            <input id="notifyTitle" placeholder="例如：【BOB币中心】通知" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="notifyContent">内容（必填）</label>
+            <textarea id="notifyContent" placeholder="请输入要发送的内容…"></textarea>
+          </div>
+
+          <div class="row" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary" id="btnNotifyCancel">取消</button>
+            <button id="btnNotifySubmit">确认发送</button>
+          </div>
+          <div class="error" id="notifyModalErr"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="redeemModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">核销确认</h3>
+          <div class="help">请核对信息无误后点击“核销”。</div>
+
+          <div style="height:12px"></div>
+          <div class="kv"><div class="muted">用户</div><div class="mono" id="redeemModalUserid">-</div></div>
+          <div style="height:8px"></div>
+          <div class="kv"><div class="muted">兑换单号</div><div class="mono" id="redeemModalExchange">-</div></div>
+          <div style="height:8px"></div>
+          <div class="kv"><div class="muted">商品</div><div id="redeemModalProduct">-</div></div>
+          <div style="height:8px"></div>
+          <div class="kv"><div class="muted">扣减数量</div><div id="redeemModalAmount">-</div></div>
+
+          <div style="height:12px"></div>
+          <div class="muted" style="margin-bottom:6px;">二维码内容 encoded</div>
+          <div class="out mono" id="redeemModalEncoded" style="max-height: 160px;"></div>
+
+          <div class="toast" id="redeemModalToast"></div>
+
+          <div class="row" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary" id="btnRedeemModalClose">关闭</button>
+            <button id="btnRedeemModalConfirm">核销</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="mallProductModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">商品编辑</h3>
+          <div class="help">自建版：保存后立即生效。图片支持选择文件或直接粘贴截图。</div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductId">商品ID</label>
+            <input id="mallProductId" placeholder="系统自动生成" readonly />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductName">名称</label>
+            <input id="mallProductName" placeholder="例如：咖啡券" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductAmount">扣减数量</label>
+            <input id="mallProductAmount" value="10" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductStock">库存（可选）</label>
+            <input id="mallProductStock" placeholder="例如：100" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>限购（可选）</label>
+            <div class="mall-limit-inline">
+              <label class="muted publish-row">
+                <input type="checkbox" id="mallProductLimitEnable" />
+                启用限购
+              </label>
+              <input id="mallProductLimit" type="number" min="1" placeholder="例如：1" />
+            </div>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>CDK 兑换</label>
+            <label class="muted publish-row">
+              <input type="checkbox" id="mallProductCdkEnabled" />
+              允许通过 CDK 兑换此商品
+            </label>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>上架状态</label>
+            <div class="row" style="justify-content:flex-start; gap:14px;">
+              <label class="muted" style="display:flex; align-items:center; gap:6px;"><input type="radio" name="mallProductStatus" id="mallProductStatusOn" value="on" checked /> 上架</label>
+              <label class="muted" style="display:flex; align-items:center; gap:6px;"><input type="radio" name="mallProductStatus" id="mallProductStatusOff" value="off" /> 下架</label>
+            </div>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductSort">排序（可选）</label>
+            <input id="mallProductSort" placeholder="例如：100" />
+          </div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>图片（可选）</label>
+            <div class="mall-upload">
+              <div class="row upload-actions" style="justify-content:flex-start; gap:10px;">
+                <input id="mallProductImageFile" type="file" accept="image/*" />
+                <button class="secondary btn-icon" type="button" id="btnMallProductImageClear">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 6V4h8v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6 6l1 14h10l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>清除图片</span>
+                </button>
+              </div>
+              <input id="mallProductImageUrl" type="hidden" />
+              <div class="upload-layout">
+                <div class="upload-drop">
+                  <textarea id="mallProductImagePaste" class="upload-paste" placeholder="把图片拖拽到这里，或点击后 Ctrl+V 粘贴截图"></textarea>
+                  <div class="upload-hint">支持拖拽 / 粘贴截图</div>
+                </div>
+                <div class="upload-preview">
+                  <img id="mallProductImagePreview" alt="" />
+                </div>
+              </div>
+              <div class="mall-crop-box hidden" id="mallImageCropBox">
+                <div class="mall-crop-title">图片裁切（商城显示比例 1:1）</div>
+                <div class="mall-crop-frame" id="mallCropFrame">
+                  <img id="mallCropImage" alt="裁切预览" />
+                </div>
+                <div class="mall-crop-controls">
+                  <div class="mall-crop-row">
+                    <label for="mallCropZoom">缩放</label>
+                    <input id="mallCropZoom" type="range" min="100" max="300" step="1" value="100" />
+                    <div class="muted mono" id="mallCropZoomText">100%</div>
+                  </div>
+                  <div class="mall-crop-row">
+                    <label for="mallCropX">左右</label>
+                    <input id="mallCropX" type="range" min="0" max="100" step="1" value="50" />
+                  </div>
+                  <div class="mall-crop-row">
+                    <label for="mallCropY">上下</label>
+                    <input id="mallCropY" type="range" min="0" max="100" step="1" value="50" />
+                  </div>
+                </div>
+                <div class="row" style="justify-content:flex-end; margin-top:8px; gap:8px;">
+                  <button class="secondary" id="btnMallCropCancel" type="button">取消裁切</button>
+                  <button id="btnMallCropApply" type="button">应用裁切</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="mallProductRemark">商品简介（可选）</label>
+            <input id="mallProductRemark" placeholder="例如：兑换说明、有效期、使用限制等" />
+          </div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>发布到群（可选）</label>
+            <label class="muted publish-row">
+              <input type="checkbox" id="mallProductPublishGroup" />
+              保存后发送新品通知到群
+            </label>
+          </div>
+
+          <div class="row mall-modal-footer" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary btn-icon" id="btnMallProductCancel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <span>取消</span>
+            </button>
+            <button class="btn-icon" id="btnMallProductSave" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>保存</span>
+            </button>
+          </div>
+          <div class="error" id="mallProductErr"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="charityProjectModal">
+        <div class="modalBox">
+          <h3 class="modalTitle">公益项目编辑</h3>
+          <div class="help">公益项目立即生效；状态为暂停时前台可见但不可助力，归档后前台不展示。</div>
+
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectId">项目ID</label>
+            <input id="charityProjectId" placeholder="系统自动生成" readonly />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectName">项目名称</label>
+            <input id="charityProjectName" placeholder="例如：流浪犬救助计划" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>封面图片</label>
+            <div class="mall-upload">
+              <div class="row upload-actions" style="justify-content:flex-start; gap:10px;">
+                <input id="charityProjectImageFile" type="file" accept="image/*" />
+                <button class="secondary btn-icon" type="button" id="btnCharityProjectImageClear">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 6V4h8v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6 6l1 14h10l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>清除图片</span>
+                </button>
+              </div>
+              <input id="charityProjectCoverUrl" type="hidden" />
+              <div class="upload-layout">
+                <div class="upload-drop">
+                  <textarea id="charityProjectImagePaste" class="upload-paste" placeholder="把图片拖拽到这里，或点击后 Ctrl+V 粘贴截图"></textarea>
+                  <div class="upload-hint">支持拖拽 / 粘贴截图</div>
+                </div>
+                <div class="upload-preview">
+                  <img id="charityProjectImagePreview" alt="" />
+                </div>
+              </div>
+              <div class="mall-crop-box hidden" id="charityImageCropBox">
+                <div class="mall-crop-title">图片裁切（公益区显示比例 1:1）</div>
+                <div class="mall-crop-frame" id="charityCropFrame">
+                  <img id="charityCropImage" alt="裁切预览" />
+                </div>
+                <div class="mall-crop-controls">
+                  <div class="mall-crop-row">
+                    <label for="charityCropZoom">缩放</label>
+                    <input id="charityCropZoom" type="range" min="100" max="300" step="1" value="100" />
+                    <div class="muted mono" id="charityCropZoomText">100%</div>
+                  </div>
+                  <div class="mall-crop-row">
+                    <label for="charityCropX">左右</label>
+                    <input id="charityCropX" type="range" min="0" max="100" step="1" value="50" />
+                  </div>
+                  <div class="mall-crop-row">
+                    <label for="charityCropY">上下</label>
+                    <input id="charityCropY" type="range" min="0" max="100" step="1" value="50" />
+                  </div>
+                </div>
+                <div class="row" style="justify-content:flex-end; margin-top:8px; gap:8px;">
+                  <button class="secondary" id="btnCharityCropCancel" type="button">取消裁切</button>
+                  <button id="btnCharityCropApply" type="button">应用裁切</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectSummary">项目简介</label>
+            <textarea id="charityProjectSummary" placeholder="简要说明这个公益项目要做什么"></textarea>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectRules">规则说明</label>
+            <textarea id="charityProjectRules" placeholder="例如：达到目标金额后，我们会统一采购、救助并同步进展"></textarea>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectTarget">目标金额</label>
+            <input id="charityProjectTarget" type="number" min="1" placeholder="例如：1000" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectTiers">助力档位</label>
+            <input id="charityProjectTiers" placeholder="例如：10,20,50,100" />
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectStatus">项目状态</label>
+            <select id="charityProjectStatus">
+              <option value="active">启用中</option>
+              <option value="paused">暂停助力</option>
+              <option value="archived">已归档</option>
+            </select>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectExecutionStatus">执行状态</label>
+            <select id="charityProjectExecutionStatus">
+              <option value="pending">待执行</option>
+              <option value="in_progress">执行中</option>
+              <option value="completed">已完成</option>
+            </select>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectExecutionNote">执行说明</label>
+            <textarea id="charityProjectExecutionNote" placeholder="可填写执行进度或备注"></textarea>
+          </div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label for="charityProjectSort">排序</label>
+            <input id="charityProjectSort" type="number" min="0" placeholder="数字越小越靠前" />
+          </div>
+
+          <div class="row mall-modal-footer" style="margin-top:12px; justify-content:flex-end;">
+            <button class="secondary btn-icon" id="btnCharityProjectCancel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <span>取消</span>
+            </button>
+            <button class="btn-icon" id="btnCharityProjectSave" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>保存</span>
+            </button>
+          </div>
+          <div class="error" id="charityProjectModalErr"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="attendanceStatusDetailModal">
+        <div class="modalBox" style="max-width: 980px; width: min(980px, 96vw);">
+          <h3 class="modalTitle">打卡奖励详情</h3>
+          <div class="help" id="attendanceStatusDetailHint">-</div>
+          <div style="height:10px"></div>
+          <div class="muted" id="attendanceStatusDetailStat">-</div>
+          <div style="height:10px"></div>
+          <div style="max-height: 60vh; overflow:auto; border:1px solid var(--line); border-radius: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:170px;">时间</th>
+                  <th style="width:180px;">用户</th>
+                  <th style="width:100px;">类型</th>
+                  <th style="width:120px;">来源</th>
+                  <th style="width:110px;">结果</th>
+                  <th style="width:110px;">金额</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="attendanceStatusDetailTable"></tbody>
+            </table>
+          </div>
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:8px;">
+            <button class="secondary" id="btnAttendanceDetailReconcile" type="button">重新对账并自动补发</button>
+            <button id="btnAttendanceDetailClose" type="button">关闭</button>
+          </div>
+          <div class="error" id="attendanceStatusDetailErr"></div>
+        </div>
+      </div>
+
+      <div class="error" id="err"></div>
+    </div>
+
+    <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js"></script>
+    <script src="/assets/base.js"></script>
+    <script src="/assets/admin.js"></script>
+  </body>
+</html>

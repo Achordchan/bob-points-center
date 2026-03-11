@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BOB币 - 红包大屏</title>
+    <link rel="stylesheet" href="/assets/base.css" />
+    <link rel="stylesheet" href="/assets/mall_screen.css" />
+  </head>
+  <body class="screen">
+    <div class="screenWrap">
+      <header class="screenHeader">
+        <div class="brand">
+          <div class="brandTitle">BOB币 · 红包现场</div>
+          <div class="brandSub" id="screenSub">好运开场，红包来袭</div>
+        </div>
+        <div class="screenClock" id="screenClock">--:--:--</div>
+      </header>
+
+      <main class="screenMain">
+        <section class="infoPanel">
+          <div class="infoCard">
+            <div class="infoLabel">活动状态</div>
+            <div class="infoValue statusValue" id="screenStatus">-</div>
+            <div class="infoHint" id="screenStatusHint">-</div>
+          </div>
+
+          <div class="infoGrid" id="screenInfoGrid">
+            <div class="statCard">
+              <div class="statLabel">红包总额</div>
+              <div class="statValue" id="screenTotalAmount">-</div>
+            </div>
+            <div class="statCard">
+              <div class="statLabel">总份数</div>
+              <div class="statValue" id="screenTotalCount">-</div>
+            </div>
+            <div class="statCard">
+              <div class="statLabel">已抢份数</div>
+              <div class="statValue" id="screenClaimedCount">-</div>
+            </div>
+            <div class="statCard">
+              <div class="statLabel">剩余份数</div>
+              <div class="statValue" id="screenRemainingCount">-</div>
+            </div>
+          </div>
+
+          <div class="sponsorCard hidden" id="screenSponsorWrap">
+            <div class="sponsorLabel">特别感谢</div>
+            <div class="sponsorValue" id="screenSponsor">-</div>
+          </div>
+
+          <div class="qrPanel" id="screenQrPanel">
+            <div class="qrTitle">钉钉扫码进入抢红包</div>
+            <div class="qrBox">
+              <img id="screenQrImg" alt="钉钉扫码进入" />
+            </div>
+            <div class="qrHint">打开钉钉扫一扫 · 直达余额页参与抢红包</div>
+          </div>
+        </section>
+
+        <section class="heroPanel">
+          <div class="redPacketStage" id="redPacketStage">
+            <div class="stageGlow"></div>
+            <div class="stageRing"></div>
+            <div class="stageTop"></div>
+            <div class="stageBody">
+              <div class="stageBodyText">
+                <div class="stageCountdownLabel" id="screenCountdownLabel">-</div>
+                <div class="stageCountdown" id="screenCountdown">--:--</div>
+              </div>
+            </div>
+            <div class="stageTopOverlay">
+              <div class="stageTopTitle">抢红包</div>
+              <div class="stageTopStatus" id="screenHeroStatus">-</div>
+              <div class="stageTopAmount" id="screenHeroAmount">-</div>
+            </div>
+            <div class="stageSeal">
+              <div class="stageSealChar">福</div>
+            </div>
+            <div class="stageSpark stageSpark1"></div>
+            <div class="stageSpark stageSpark2"></div>
+            <div class="stageSpark stageSpark3"></div>
+            <div class="confettiLayer" id="confettiLayer"></div>
+          </div>
+          <div class="heroHint" id="screenHint">-</div>
+        </section>
+
+        <section class="feedPanel hidden" id="screenFeedPanel">
+          <div class="feedHeader">
+            <div class="feedTitle">最新抢到</div>
+            <div class="feedSub" id="screenFeedSub">实时同步红包战况</div>
+          </div>
+          <div class="feedList" id="screenRecentList"></div>
+        </section>
+      </main>
+
+      <footer class="screenFooter">
+        <div class="footerBadge">红包现场 · 好运常在</div>
+        <div class="footerHint">参与请打开 BOB币中心</div>
+      </footer>
+    </div>
+
+    <script src="/assets/base.js"></script>
+    <script src="/assets/mall_screen.js"></script>
+  </body>
+</html>

@@ -1,0 +1,60 @@
+import { Router } from 'express';
+
+import { requireAdminSession } from '../middleware/requireAdminSession.js';
+import { createBobToken, deleteBobToken, listBobTokens, revokeBobToken } from '../services/bobTokenService.js';
+
+export function bobTokenRouter() {
+  const router = Router();
+
+  router.get('/list', requireAdminSession(), async (req, res) => {
+    try {
+      const db = req.app.locals.db;
+      const includeRevoked = req.query.includeRevoked !== '0' && req.query.includeRevoked !== 'false';
+      const limit = req.query.limit;
+      const rows = await listBobTokens(db, { includeRevoked, limit });
+      return res.json({ ok: true, data: rows });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/create', requireAdminSession(), async (req, res) => {
+    try {
+      const db = req.app.locals.db;
+      const result = await createBobToken(db);
+      return res.json({ ok: true, ...result });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/revoke', requireAdminSession(), async (req, res) => {
+    try {
+      const db = req.app.locals.db;
+      const id = req.body?.tokenId;
+      const result = await revokeBobToken(db, id);
+      return res.json(result);
+    } catch (err) {
+      const message = String(err?.message || err);
+      const status = message === 'invalid token id' ? 400 : 500;
+      return res.status(status).json({ error: message });
+    }
+  });
+
+  router.post('/delete', requireAdminSession(), async (req, res) => {
+    try {
+      const db = req.app.locals.db;
+      const id = req.body?.tokenId;
+      const result = await deleteBobToken(db, id);
+      return res.json(result);
+    } catch (err) {
+      const message = String(err?.message || err);
+      const status = ['invalid token id', 'token not found', 'token must be revoked before delete'].includes(message)
+        ? 400
+        : 500;
+      return res.status(status).json({ error: message });
+    }
+  });
+
+  return router;
+}

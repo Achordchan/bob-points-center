@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BOB币 - 管理端登录</title>
+    <link rel="stylesheet" href="/assets/base.css" />
+    <link rel="stylesheet" href="/assets/admin_login.css" />
+  </head>
+  <body>
+    <div class="login-shell">
+      <div class="login-brand">
+        <div class="brand-badge">BOB</div>
+        <h1>BOB币 管理端</h1>
+        <div class="muted" id="hint">正在检查登录状态…</div>
+        <div class="brand-sub">安全、快捷地进入管理后台</div>
+      </div>
+
+      <div class="login-panel">
+        <section class="card login-card" id="cardDingtalk">
+          <div class="card-title">钉钉登录</div>
+          <div class="muted">在钉钉内打开会自动登录；电脑浏览器可用账号密码登录。</div>
+          <div class="row" style="margin-top:12px;">
+            <button id="btnDingLogin" disabled>开始钉钉登录</button>
+            <button class="secondary" id="btnReload">刷新</button>
+          </div>
+          <div class="error" id="dingErr"></div>
+        </section>
+
+        <section class="card login-card" id="cardFallback">
+          <div class="card-title">账号密码登录</div>
+          <div class="muted">仅在电脑浏览器或非钉钉环境使用。</div>
+          <div class="login-form">
+            <div class="field">
+              <label>账号</label>
+              <input id="fbUser" value="admin" />
+            </div>
+            <div class="field">
+              <label>密码</label>
+              <input id="fbPass" type="password" />
+            </div>
+            <div class="login-actions">
+              <button id="fbLogin">登录</button>
+            </div>
+          </div>
+          <div class="error" id="fbErr"></div>
+        </section>
+
+        <div class="error" id="err"></div>
+      </div>
+    </div>
+
+    <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js"></script>
+    <script src="/assets/base.js"></script>
+    <script src="/assets/admin_login.js"></script>
+  </body>
+</html>
