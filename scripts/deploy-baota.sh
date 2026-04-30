@@ -62,10 +62,12 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
+NPM_CLI="${NODE_BIN}/../lib/node_modules/npm/bin/npm-cli.js"
+
 if [ -f "package-lock.json" ]; then
-  "${NODE_BIN}/npm" ci --omit=dev
+  "${NODE_BIN}/node" "${NPM_CLI}" ci --omit=dev
 else
-  "${NODE_BIN}/npm" install --omit=dev
+  "${NODE_BIN}/node" "${NPM_CLI}" install --omit=dev
 fi
 
 chown -R www:www "${DEPLOY_PATH}"
