@@ -26,25 +26,30 @@
 - PostgreSQL 16+（必需）
 - Redis 7+（可选）
 
-## 快速开始（本地）
+## 快速开始（本地开发）
 
 1) 安装依赖
 ```bash
 npm install
 ```
 
-2) 准备环境变量
-```bash
-cp .env.example .env
-```
-按需修改 `.env` 中的数据库与钉钉配置。
+2) 准备本地 `.env`
 
-3) 启动数据库（Docker）
+从团队安全渠道取得 `.env`，不要提交到仓库。本地开发默认通过 SSH 隧道连接远程 PostgreSQL，数据库地址写成：
+
 ```bash
-npm run pg:up
+PG_HOST=127.0.0.1
+PG_PORT=35432
 ```
 
-4) 启动服务
+3) 打开远程数据库隧道
+```bash
+npm run db:tunnel
+```
+
+保持这个终端不要关闭；结束开发时按 `Ctrl+C`。`npm run pg:up` 当前也是打开同一个隧道，不会在本机创建数据库。
+
+4) 另开一个终端启动服务
 ```bash
 npm start
 ```
@@ -53,7 +58,7 @@ npm start
 
 ## 环境变量说明
 
-以下为常用配置（见 `.env.example`）：
+以下为常用配置，实际值从团队安全渠道取得后写入本地 `.env`：
 
 - `PORT`：服务端口
 - `SERVER_BASE_URL`：对外访问地址（用于通知链接等）
@@ -123,9 +128,11 @@ psql -h <host> -p <port> -U <user> -d <db> < bob.sql
 
 ## 常用脚本
 
-- 启动 PG/Redis（Docker）：`npm run pg:up`
-- 停止 PG/Redis（Docker）：`npm run pg:down`
 - 启动服务：`npm start`
+- 打开远程 PostgreSQL 隧道：`npm run db:tunnel`
+- 兼容旧习惯打开数据库隧道：`npm run pg:up`
+- 关闭数据库隧道：在运行 `npm run db:tunnel` 或 `npm run pg:up` 的终端按 `Ctrl+C`
+- 手动部署到宝塔：`npm run deploy:baota`
 - 手动对账补发（管理员）：`POST /admin/settings/attendance-reward/reconcile`，可传 `{"date":"YYYY-MM-DD","notify":false}` 只补账不推送
 
 ## 项目结构
@@ -142,15 +149,36 @@ src/
 docs/                   # 文档与说明
 ```
 
-## 宝塔面板部署（建议流程）
+## 开发与发布流程
 
-1) 宝塔安装：Nginx + Node.js + PostgreSQL + Redis  
-2) 上传项目到 `/www/wwwroot/你的目录`  
-3) `npm install --production`  
-4) 配好 `.env`（PG 配置、钉钉配置等）  
-5) 使用 `pm2` 启动：`pm2 start src/index.js --name bob`  
-6) Nginx 反代到 `127.0.0.1:8000`  
-7) 配置 SSL
+当前项目使用 GitHub Actions 自动部署到宝塔 Node 项目，标准顺序是：
+
+```text
+本地开发 -> 本地测试 -> git commit -> git push origin main -> GitHub Actions -> 同步到宝塔 -> 宝塔重启 Node 项目 -> 健康检查
+```
+
+注意：`git commit` 只保存到本机仓库，不会更新生产环境；只有 `git push origin main` 推送到 GitHub 后，才会触发自动部署。
+
+## 宝塔生产部署
+
+- 生产域名：`bob.baymaxgroup.com`
+- 宝塔项目名：`bob_points_center`
+- 生产目录：`/www/wwwroot/bob.baymaxgroup.com`
+- 服务端口：`8000`
+- 部署 workflow：`.github/workflows/deploy-baota.yml`
+- 部署脚本：`scripts/deploy-baota.sh`
+
+部署脚本会通过 `rsync` 同步代码，但会保留服务器上的 `.env`、上传文件、日志、备份和 `node_modules` 等运行期文件。同步完成后，脚本使用宝塔 `nodejsModel` 重启项目，并检查本机 `/health` 与公网 `/health`。
+
+## 手动部署
+
+正常开发只需要推送 `main`，不需要手动部署。确实需要从本机直接同步服务器时，可运行：
+
+```bash
+npm run deploy:baota
+```
+
+手动部署同样不会上传 `.env`，服务器必须已经存在正确的 `.env`。
 
 ## 运维与排查建议
 
