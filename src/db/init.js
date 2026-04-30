@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS redeems (
   bob_amount BIGINT NOT NULL,
   fulfilled_at BIGINT,
   hidden INTEGER NOT NULL DEFAULT 0,
+  limit_round INTEGER NOT NULL DEFAULT 1,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE
 );
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS mall_products (
   bob_amount BIGINT NOT NULL,
   stock BIGINT,
   limit_per_user INTEGER NOT NULL DEFAULT 0,
+  limit_round INTEGER NOT NULL DEFAULT 1,
   cdk_enabled INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'on',
   sort INTEGER,
@@ -459,6 +461,9 @@ export async function initDb(input) {
   await db.get('SELECT 1');
   await db.exec(schemaSql);
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS cdk_enabled INTEGER NOT NULL DEFAULT 0");
+  await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
+  await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
   await db.run('INSERT INTO mall_opening_schedule(id, is_open, auto_enabled) VALUES(1, 1, 0) ON CONFLICT DO NOTHING');
   return db;
 }

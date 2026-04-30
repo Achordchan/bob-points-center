@@ -22,7 +22,7 @@ const mallProductsCache = {
   inflight: null,
 };
 const MALL_PRODUCTS_QUERY =
-  "SELECT product_id, product_name, bob_amount, stock, limit_per_user, status, sort, image_url, remark, updated_at FROM mall_products WHERE status = 'on' ORDER BY (sort IS NULL), sort ASC, product_id COLLATE NOCASE";
+  "SELECT product_id, product_name, bob_amount, stock, limit_per_user, limit_round, status, sort, image_url, remark, updated_at FROM mall_products WHERE status = 'on' ORDER BY (sort IS NULL), sort ASC, product_id COLLATE NOCASE";
 
 function enqueueRedPacketClaim(task) {
   const next = redPacketClaimQueue.then(task, task);
@@ -32,6 +32,77 @@ function enqueueRedPacketClaim(task) {
 
 async function listMallProducts(db) {
   return await db.all(MALL_PRODUCTS_QUERY);
+}
+
+function normalizeLimitRound(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return 1;
+  }
+  return n;
+}
+
+async function attachMallLimitUsage(db, userid, rows) {
+  const uid = userid ? String(userid) : '';
+  const list = Array.isArray(rows) ? rows : [];
+  if (!uid || list.length === 0) {
+    return list.map((row) => ({ ...row }));
+  }
+
+  const limitedRows = list.filter((row) => {
+    const limit = toInt(row?.limit_per_user);
+    return limit !== null && limit > 0 && row?.product_id;
+  });
+  if (limitedRows.length === 0) {
+    return list.map((row) => ({
+      ...row,
+      limit_round: normalizeLimitRound(row?.limit_round),
+      limit_used: 0,
+      limit_total: 0,
+      limit_remaining: null,
+      limit_reached: false,
+    }));
+  }
+
+  const productIds = Array.from(new Set(limitedRows.map((row) => String(row.product_id))));
+  const usedRows = await db.all(
+    `SELECT product_id, COALESCE(limit_round, 1) AS limit_round, COUNT(1) AS cnt
+       FROM redeems
+      WHERE userid = ?
+        AND product_id = ANY(?)
+        AND COALESCE(bob_amount, 0) > 0
+      GROUP BY product_id, COALESCE(limit_round, 1)`,
+    [uid, productIds],
+  );
+  const usedMap = new Map((usedRows || []).map((row) => [
+    `${String(row.product_id)}:${normalizeLimitRound(row.limit_round)}`,
+    Number(row.cnt || 0),
+  ]));
+
+  return list.map((row) => {
+    const limit = toInt(row?.limit_per_user) || 0;
+    const round = normalizeLimitRound(row?.limit_round);
+    if (limit <= 0) {
+      return {
+        ...row,
+        limit_round: round,
+        limit_used: 0,
+        limit_total: 0,
+        limit_remaining: null,
+        limit_reached: false,
+      };
+    }
+    const used = Math.min(limit, Math.max(0, usedMap.get(`${String(row.product_id)}:${round}`) || 0));
+    const remaining = Math.max(0, limit - used);
+    return {
+      ...row,
+      limit_round: round,
+      limit_used: used,
+      limit_total: limit,
+      limit_remaining: remaining,
+      limit_reached: remaining <= 0,
+    };
+  });
 }
 
 async function getMallProductsVersionInfo(db) {
@@ -211,7 +282,7 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
     ? (fn) => db.transaction(fn)
     : async (fn) => await fn(db);
   const txData = await txRunner(async (tx) => {
-    const p = await tx.get('SELECT product_id, product_name, bob_amount, stock, limit_per_user, status, image_url FROM mall_products WHERE product_id = ? LIMIT 1', [productId]);
+    const p = await tx.get('SELECT product_id, product_name, bob_amount, stock, limit_per_user, limit_round, status, image_url FROM mall_products WHERE product_id = ? LIMIT 1 FOR UPDATE', [productId]);
     if (!p) {
       throw new Error('product not found');
     }
@@ -225,13 +296,15 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
     }
 
     const limitPerUser = toInt(p?.limit_per_user);
+    const limitRound = normalizeLimitRound(p?.limit_round);
+    let limitUsed = 0;
     if (limitPerUser && limitPerUser > 0) {
       const usedRow = await tx.get(
-        'SELECT COUNT(1) as cnt FROM redeems WHERE userid = ? AND product_id = ?',
-        [String(userid), String(p.product_id)],
+        'SELECT COUNT(1) as cnt FROM redeems WHERE userid = ? AND product_id = ? AND COALESCE(limit_round, 1) = ? AND COALESCE(bob_amount, 0) > 0',
+        [String(userid), String(p.product_id), limitRound],
       );
-      const used = Number(usedRow?.cnt ?? 0);
-      if (used >= limitPerUser) {
+      limitUsed = Number(usedRow?.cnt ?? 0);
+      if (limitUsed >= limitPerUser) {
         throw new Error('purchase_limit_reached');
       }
     }
@@ -254,6 +327,7 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
       productName: String(p.product_name || ''),
       bobAmount: amount,
       reason: 'mall_buy',
+      limitRound,
     });
 
     let qr = { encoded: null, qr_image_url: null };
@@ -277,10 +351,10 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
         throw err;
       }
     }
-    return { p, amount, oldStock, newStock, r, qr };
+    return { p, amount, oldStock, newStock, r, qr, limitPerUser: limitPerUser || 0, limitRound, limitUsed };
   });
 
-  const { p, amount, oldStock, newStock, r, qr } = txData;
+  const { p, amount, oldStock, newStock, r, qr, limitPerUser, limitRound, limitUsed } = txData;
 
   if (!skipNotify && oldStock !== null && newStock !== null) {
       const productText = String(p.product_name || p.product_id || productId);
@@ -339,7 +413,25 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
       },
     });
   }
-  return { ok: true, exchange_id: r.exchange_id, balance: r.balance, encoded: qr.encoded, qr_image_url: qr.qr_image_url, notify: !skipNotify && awaitNotify ? notify : undefined };
+  const limitAfter = limitPerUser > 0 ? Math.min(limitPerUser, limitUsed + 1) : 0;
+  return {
+    ok: true,
+    exchange_id: r.exchange_id,
+    balance: r.balance,
+    encoded: qr.encoded,
+    qr_image_url: qr.qr_image_url,
+    notify: !skipNotify && awaitNotify ? notify : undefined,
+    product: {
+      product_id: String(p.product_id),
+      product_name: String(p.product_name || ''),
+      bob_amount: amount,
+      image_url: p?.image_url ? String(p.image_url) : '',
+      limit_round: limitRound,
+      limit_used: limitAfter,
+      limit_total: limitPerUser,
+      limit_remaining: limitPerUser > 0 ? Math.max(0, limitPerUser - limitAfter) : null,
+    },
+  };
 }
 
 function buildQrForRedeem({ exchange_id, userid, product_id, product_name, bob_amount }, secret) {
@@ -868,10 +960,11 @@ export function mallRouter() {
 
   router.get('/products', requireWebSession(), async (req, res) => {
     const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     try {
       res.setHeader('Cache-Control', 'no-store');
       const snapshot = await getMallProductsSnapshotCached(db);
-      const rows = snapshot?.rows || [];
+      const rows = await attachMallLimitUsage(db, userid, snapshot?.rows || []);
       const versionInfo = snapshot?.versionInfo || { total: 0, version: '0:0:0' };
       return res.json({
         ok: true,
@@ -1217,6 +1310,7 @@ export function mallRouter() {
           'product not on sale',
           'invalid product price',
           'out of stock',
+          'purchase_limit_reached',
           'insufficient balance',
           'exchange already redeemed',
           'QR_SIGN_SECRET missing',
@@ -1266,6 +1360,7 @@ export function mallRouter() {
           'product not on sale',
           'invalid product price',
           'out of stock',
+          'purchase_limit_reached',
           'insufficient balance',
           'exchange already redeemed',
           'QR_SIGN_SECRET missing',

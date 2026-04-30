@@ -1466,6 +1466,10 @@
 
   function closeConfirmModal() {
     state.pendingBuyProductId = null;
+    const btnOk = document.getElementById('btnConfirmOk');
+    const btnAddCart = document.getElementById('btnConfirmAddCart');
+    if (btnOk) btnOk.disabled = false;
+    if (btnAddCart) btnAddCart.disabled = false;
     setConfirmModalVisible(false);
   }
 
@@ -1477,6 +1481,35 @@
     const pid = productId ? String(productId) : '';
     if (!pid) return null;
     return (state.products || []).find((x) => String(x?.product_id || '') === pid) || null;
+  }
+
+  function getProductLimitInfo(p) {
+    const totalRaw = p?.limit_total ?? p?.limit_per_user;
+    const totalNum = totalRaw === null || totalRaw === undefined ? 0 : Number(totalRaw);
+    const total = Number.isFinite(totalNum) && totalNum > 0 ? Math.floor(totalNum) : 0;
+    if (total <= 0) {
+      return { enabled: false, total: 0, used: 0, remaining: Infinity, reached: false };
+    }
+
+    const usedRaw = p?.limit_used;
+    const usedNum = usedRaw === null || usedRaw === undefined ? 0 : Number(usedRaw);
+    const used = Math.min(total, Math.max(0, Number.isFinite(usedNum) ? Math.floor(usedNum) : 0));
+    const remainingRaw = p?.limit_remaining;
+    const remainingNum = remainingRaw === null || remainingRaw === undefined ? NaN : Number(remainingRaw);
+    const remaining = Math.max(0, Number.isFinite(remainingNum) ? Math.floor(remainingNum) : total - used);
+    return {
+      enabled: true,
+      total,
+      used,
+      remaining,
+      reached: remaining <= 0 || p?.limit_reached === true,
+    };
+  }
+
+  function getCartQtyForProduct(productId) {
+    const pid = productId ? String(productId) : '';
+    const item = (state.cartItems || []).find((x) => String(x?.productId || '') === pid);
+    return Math.max(0, Math.floor(Number(item?.qty || 0)));
   }
 
   function updateCartViewButton() {
@@ -1502,8 +1535,22 @@
 
   function upsertCartItem(productId, delta) {
     const pid = productId ? String(productId) : '';
-    const step = Number(delta);
-    if (!pid || !Number.isFinite(step) || step === 0) return;
+    let step = Number(delta);
+    if (!pid || !Number.isFinite(step) || step === 0) return false;
+    step = Math.trunc(step);
+    if (step === 0) return false;
+
+    if (step > 0) {
+      const row = getProductById(pid);
+      const limit = getProductLimitInfo(row);
+      if (limit.enabled) {
+        const currentQty = getCartQtyForProduct(pid);
+        const allowed = Math.max(0, limit.remaining - currentQty);
+        if (allowed <= 0) return false;
+        step = Math.min(step, allowed);
+      }
+    }
+
     const idx = state.cartItems.findIndex((x) => String(x?.productId || '') === pid);
     if (idx < 0) {
       if (step > 0) {
@@ -1519,6 +1566,7 @@
     }
     saveCartToStorage();
     updateCartViewButton();
+    return true;
   }
 
   function addToCart(productId) {
@@ -1531,7 +1579,10 @@
       showNotice('该商品已售罄，无法加入购物车', 'error');
       return false;
     }
-    upsertCartItem(row.product_id, 1);
+    if (!upsertCartItem(row.product_id, 1)) {
+      showNotice('已达到该商品限购数量', 'error');
+      return false;
+    }
     showNotice(`已加入购物车：${String(row?.product_name || row?.product_id || '')}`, 'success');
     return true;
   }
@@ -1554,6 +1605,7 @@
 
     let total = 0;
     let validCount = 0;
+    let blockedCount = 0;
     list.innerHTML = rows
       .map((item) => {
         const pid = String(item?.productId || '');
@@ -1564,20 +1616,27 @@
         const inStock = !!row && isProductInStock(row);
         const amountOk = Number.isFinite(amount) && amount > 0;
         const lineAmount = amountOk ? amount * qty : 0;
-        if (inStock && amountOk) {
+        const limit = getProductLimitInfo(row);
+        const overLimit = limit.enabled && qty > limit.remaining;
+        if (inStock && amountOk && !overLimit) {
           total += lineAmount;
           validCount += qty;
+        } else if (overLimit) {
+          blockedCount += 1;
         }
         const statusText = !row ? '商品已不存在' : (!inStock ? '已售罄' : (amountOk ? `${amount} BOB / 件` : '价格异常'));
+        const limitText = limit.enabled ? ` · 已购 ${limit.used}/${limit.total}` : '';
+        const blockText = overLimit ? ` · 本轮还可下单 ${limit.remaining} 件` : '';
+        const incDisabled = !row || !inStock || overLimit || (limit.enabled && qty >= limit.remaining);
         return `<div class="cartItem">
           <div>
             <div class="cartItemTitle">${escapeHtml(name)}</div>
-            <div class="cartItemMeta">${escapeHtml(statusText)} · 小计 ${escapeHtml(String(lineAmount))} BOB</div>
+            <div class="cartItemMeta">${escapeHtml(statusText)}${escapeHtml(limitText)}${escapeHtml(blockText)} · 小计 ${escapeHtml(String(lineAmount))} BOB</div>
           </div>
           <div class="cartQty">
             <button class="cartQtyBtn" type="button" data-cart-dec="${escapeHtml(pid)}">-</button>
             <div class="cartQtyNum">${escapeHtml(String(qty))}</div>
-            <button class="cartQtyBtn" type="button" data-cart-inc="${escapeHtml(pid)}">+</button>
+            <button class="cartQtyBtn" type="button" data-cart-inc="${escapeHtml(pid)}" ${incDisabled ? 'disabled' : ''}>+</button>
           </div>
         </div>`;
       })
@@ -1591,7 +1650,7 @@
     const affordable = balanceOk ? balance >= total : false;
     balanceBox.classList.toggle('confirmBalanceBad', balanceOk && !affordable);
 
-    btnCheckout.disabled = state.cartCheckoutInFlight || validCount <= 0 || mallLocked;
+    btnCheckout.disabled = state.cartCheckoutInFlight || validCount <= 0 || blockedCount > 0 || mallLocked;
   }
 
   function openCartModal() {
@@ -1616,6 +1675,12 @@
       const qty = Math.max(1, Math.floor(Number(item?.qty || 1)));
       const row = getProductById(pid);
       if (!row || !isProductInStock(row)) continue;
+      const limit = getProductLimitInfo(row);
+      if (limit.enabled && qty > limit.remaining) {
+        showNotice(`已达到${String(row?.product_name || row?.product_id || '该商品')}限购数量`, 'error');
+        renderCartModal();
+        return;
+      }
       for (let i = 0; i < qty; i += 1) {
         queue.push(pid);
       }
@@ -1666,6 +1731,8 @@
     const name = p?.product_name ? String(p.product_name) : String(p.product_id);
     const amount = Number(p?.bob_amount);
     const amountText = Number.isFinite(amount) ? `${amount} BOB 币` : '-';
+    const limit = getProductLimitInfo(p);
+    const limitReached = limit.enabled && limit.remaining <= 0;
 
     const productBox = document.getElementById('confirmProduct');
     const amountBox = document.getElementById('confirmAmount');
@@ -1674,11 +1741,13 @@
     if (productBox) productBox.textContent = name;
     if (amountBox) amountBox.textContent = amountText;
     if (limitBox) {
-      const limitRaw = p?.limit_per_user;
-      const limitNum = limitRaw === null || limitRaw === undefined ? 0 : Number(limitRaw);
-      const limitText = Number.isFinite(limitNum) && limitNum > 0 ? `每人限购 ${limitNum}件` : '不限';
-      limitBox.textContent = limitText;
+      limitBox.textContent = limit.enabled ? `已购 ${limit.used}/${limit.total}` : '不限';
+      limitBox.classList.toggle('confirmBalanceBad', limitReached);
     }
+    const btnOk = document.getElementById('btnConfirmOk');
+    const btnAddCart = document.getElementById('btnConfirmAddCart');
+    if (btnOk) btnOk.disabled = limitReached;
+    if (btnAddCart) btnAddCart.disabled = limitReached;
     if (balanceBox) {
       balanceBox.textContent = '加载中…';
       balanceBox.classList.remove('confirmBalanceBad');
@@ -1812,6 +1881,7 @@
     if (!Number.isFinite(balance) || balance < 0) return false;
     if (!Number.isFinite(amount) || amount <= 0) return false;
     if (!isProductInStock(p)) return false;
+    if (getProductLimitInfo(p).reached) return false;
     return amount <= balance;
   }
 
@@ -2108,9 +2178,8 @@
         const stockNum = stockRaw === null || stockRaw === undefined ? null : Number(stockRaw);
         const stockText = stockNum === null ? '库存：无限' : (Number.isFinite(stockNum) ? `库存：${stockNum}` : '库存：-');
 
-        const limitRaw = p?.limit_per_user;
-        const limitNum = limitRaw === null || limitRaw === undefined ? 0 : Number(limitRaw);
-        const limitText = Number.isFinite(limitNum) && limitNum > 0 ? `限购：${limitNum}` : '';
+        const limit = getProductLimitInfo(p);
+        const limitText = limit.enabled ? `已购：${limit.used}/${limit.total}` : '';
 
         const imageUrl = p?.image_url ? String(p.image_url) : '';
         const imgHtml = imageUrl
@@ -2118,7 +2187,10 @@
           : `<div class="productImgFallback"></div>`;
 
         const soldOut = stockNum !== null && Number.isFinite(stockNum) && stockNum <= 0;
-        const soldOutHtml = soldOut ? `<div class="soldOutCardOverlay">售罄</div>` : '';
+        const limitReached = limit.enabled && limit.remaining <= 0;
+        const soldOutHtml = soldOut
+          ? `<div class="soldOutCardOverlay">售罄</div>`
+          : (limitReached ? `<div class="soldOutCardOverlay">已达限购</div>` : '');
 
         const remark = p?.remark ? String(p.remark) : '';
         const metaText = [stockText, limitText].filter((x) => x).join(' · ');
@@ -2126,7 +2198,7 @@
         const cardAttrs = soldOut ? '' : ` data-product-id="${escapeHtml(productId)}"`;
 
         return (
-          `<div class="productCard${soldOut ? ' productSoldOut' : ' productClickable'}"${cardAttrs}>` +
+          `<div class="productCard${soldOut ? ' productSoldOut' : ' productClickable'}${limitReached ? ' productLimitReached' : ''}"${cardAttrs}>` +
           `<div class="productMedia">${imgHtml}</div>` +
           `<div class="productBody">` +
           `<div class="productTitle">${escapeHtml(name || productId || '-') }</div>` +
@@ -2781,7 +2853,6 @@
     switchTab('shop');
     setTimeout(() => {
       addToCart(productId);
-      showNotice(`已加入购物车：${String(product?.product_name || productId)}`, 'success');
     }, 200);
   }
 
@@ -2965,6 +3036,12 @@
 
   async function buy(productId, { quiet = false, skipReload = false } = {}) {
     if (!productId) return;
+    const row = getProductById(productId);
+    const limit = getProductLimitInfo(row);
+    if (limit.enabled && limit.remaining <= 0) {
+      if (!quiet) showNotice('已达到该商品限购数量', 'error');
+      return { ok: false, error: '已达到该商品限购数量' };
+    }
 
     const silent = !isMallOpen(state.opening) && isMallEasterUnlocked();
     const r = await fetchJson('/mall/buy', {
@@ -2995,7 +3072,8 @@
       if (
         errRaw === 'out of stock' ||
         errRaw === 'product not on sale' ||
-        errRaw === 'product not found'
+        errRaw === 'product not found' ||
+        errRaw === 'purchase_limit_reached'
       ) {
         await loadProducts(undefined, { force: true });
       }
@@ -3403,7 +3481,9 @@
                   showNotice('商品已不可购买', 'error');
                   return;
                 }
-                upsertCartItem(incId, 1);
+                if (!upsertCartItem(incId, 1)) {
+                  showNotice('已达到该商品限购数量', 'error');
+                }
                 renderCartModal();
               }
             });

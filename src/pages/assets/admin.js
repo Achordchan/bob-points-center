@@ -500,6 +500,7 @@
       'POST /admin/mall/opening/close-now': '立即闭场',
       'GET /admin/mall/self/products': '查看自营商品',
       'POST /admin/mall/self/products': '保存自营商品',
+      'POST /admin/mall/self/products/limit-round': '开启商品新一轮限购',
       'POST /admin/mall/self/products/delete': '删除自营商品',
       'GET /admin/charity/projects': '查看公益项目',
       'POST /admin/charity/projects/save': '保存公益项目',
@@ -2417,9 +2418,39 @@
   function syncMallProductLimitInput() {
     const enabled = document.getElementById('mallProductLimitEnable')?.checked;
     const input = document.getElementById('mallProductLimit');
-    if (!input) return;
-    input.disabled = !enabled;
-    if (!enabled) input.value = '';
+    if (input) {
+      input.disabled = !enabled;
+      if (!enabled) input.value = '';
+    }
+    syncMallProductLimitRoundPanel();
+  }
+
+  function normalizeMallProductLimitRound(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return 1;
+    return n;
+  }
+
+  function syncMallProductLimitRoundPanel(row) {
+    const panel = document.getElementById('mallProductLimitRoundPanel');
+    if (!panel) return;
+    const pid = getInputValue('mallProductId').trim();
+    const data = row && typeof row === 'object' ? row : (mallState.rowsById.get(pid) || {});
+    const limitEnabled = document.getElementById('mallProductLimitEnable')?.checked;
+    const savedProduct = !!pid && mallState.rowsById.has(pid);
+    const show = Boolean(limitEnabled && savedProduct);
+    panel.classList.toggle('hidden', !show);
+
+    const text = document.getElementById('mallProductLimitRoundText');
+    const limitRaw = data?.limit_per_user === null || data?.limit_per_user === undefined ? 0 : Number(data.limit_per_user);
+    const limitNum = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 0;
+    const round = normalizeMallProductLimitRound(data?.limit_round);
+    if (text) {
+      text.textContent = limitNum > 0 ? `当前限购 ${limitNum} 件，第 ${round} 轮` : `第 ${round} 轮`;
+    }
+
+    const btn = document.getElementById('btnMallProductLimitRoundReset');
+    if (btn) btn.disabled = !show || mallState.mode !== 'self';
   }
 
   function getInputValue(id) {
@@ -2457,6 +2488,7 @@
     const limitInput = document.getElementById('mallProductLimit');
     if (limitInput) limitInput.value = limitEnabled ? String(limitRaw) : '';
     syncMallProductLimitInput();
+    syncMallProductLimitRoundPanel(r);
 
     const publish = document.getElementById('mallProductPublishGroup');
     if (publish) publish.checked = false;
@@ -2496,6 +2528,8 @@
       publish_to_group: document.getElementById('mallProductPublishGroup')?.checked ? 1 : 0,
     };
 
+    const btnSave = document.getElementById('btnMallProductSave');
+    const prevDisabled = btnSave ? btnSave.disabled : false;
     const limitEnabled = document.getElementById('mallProductLimitEnable')?.checked;
     const limitInput = getInputValue('mallProductLimit').trim();
     const limitValue = limitInput === '' ? null : Number(limitInput);
@@ -2508,8 +2542,6 @@
       body.limit_per_user = Math.floor(limitValue);
     }
 
-    const btnSave = document.getElementById('btnMallProductSave');
-    const prevDisabled = btnSave ? btnSave.disabled : false;
     if (btnSave) btnSave.disabled = true;
     setMallProductModalErr('');
     try {
@@ -2526,6 +2558,51 @@
       await loadMallProducts();
     } finally {
       if (btnSave) btnSave.disabled = prevDisabled;
+    }
+  }
+
+  async function startMallProductLimitRound() {
+    if (mallState.mode !== 'self') {
+      setMallProductModalErr('当前模式为只读，无法操作。');
+      return;
+    }
+    const pid = getInputValue('mallProductId').trim();
+    const row = mallState.rowsById.get(pid);
+    if (!pid || !row) {
+      setMallProductModalErr('请先保存商品后再开启新一轮限购。');
+      return;
+    }
+    const limitRaw = row?.limit_per_user === null || row?.limit_per_user === undefined ? 0 : Number(row.limit_per_user);
+    if (!Number.isFinite(limitRaw) || limitRaw <= 0) {
+      setMallProductModalErr('该商品未启用限购，无法开启新一轮。');
+      return;
+    }
+    const name = row?.product_name ? String(row.product_name) : pid;
+    const ok = window.confirm(`确认开启新一轮限购吗？\n\n${name}\n旧订单仍保留，新一轮会从 0/${Math.floor(limitRaw)} 重新计算。`);
+    if (!ok) return;
+
+    const btn = document.getElementById('btnMallProductLimitRoundReset');
+    const prevDisabled = btn ? btn.disabled : false;
+    if (btn) btn.disabled = true;
+    setMallProductModalErr('');
+    try {
+      const r = await fetchJson('/admin/mall/self/products/limit-round', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ product_id: pid }),
+      });
+      if (!r?.data?.ok) {
+        setMallProductModalErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '开启失败'));
+        return;
+      }
+      const nextRow = r.data.data || {};
+      mallState.rowsById.set(pid, nextRow);
+      syncMallProductLimitRoundPanel(nextRow);
+      await loadMallProducts();
+      setMallToast(`已开启新一轮限购：${name}`, false);
+    } finally {
+      if (btn) btn.disabled = prevDisabled;
+      syncMallProductLimitRoundPanel(mallState.rowsById.get(pid) || row);
     }
   }
 
@@ -2569,7 +2646,8 @@
 
         const limitRaw = x?.limit_per_user;
         const limitNum = limitRaw === null || limitRaw === undefined ? 0 : Number(limitRaw);
-        const limitText = Number.isFinite(limitNum) && limitNum > 0 ? String(limitNum) : '不限';
+        const round = normalizeMallProductLimitRound(x?.limit_round);
+        const limitText = Number.isFinite(limitNum) && limitNum > 0 ? `${Math.floor(limitNum)} / 第${round}轮` : '不限';
 
         const cdkEnabled = Number(x?.cdk_enabled || 0) === 1;
         const cdkHtml = `<span class="pill ${cdkEnabled ? 'pillOk' : 'pillBad'}">${safeText(cdkEnabled ? '可兑换' : '关闭')}</span>`;
@@ -4134,6 +4212,10 @@
     const mallProductLimitEnable = document.getElementById('mallProductLimitEnable');
     if (mallProductLimitEnable) {
       mallProductLimitEnable.addEventListener('change', syncMallProductLimitInput);
+    }
+    const btnMallProductLimitRoundReset = document.getElementById('btnMallProductLimitRoundReset');
+    if (btnMallProductLimitRoundReset) {
+      btnMallProductLimitRoundReset.addEventListener('click', startMallProductLimitRound);
     }
 
     const tbody = document.getElementById('mallProductTable');

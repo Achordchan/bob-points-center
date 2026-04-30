@@ -13,8 +13,17 @@ function isUniqueViolation(err) {
   return code === '23505';
 }
 
-export async function createRedeemOrderInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason }) {
+function normalizeLimitRound(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return 1;
+  }
+  return n;
+}
+
+export async function createRedeemOrderInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason, limitRound }) {
   const amount = toInt(bobAmount);
+  const round = normalizeLimitRound(limitRound);
   if (!exchangeId) {
     throw new Error('missing exchange_id');
   }
@@ -41,8 +50,8 @@ export async function createRedeemOrderInTx(db, { exchangeId, userid, productId,
 
   try {
     await db.run(
-      'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at) VALUES(?, ?, ?, ?, ?, NULL)',
-      [String(exchangeId), String(userid), String(productId), cleanProductName, amount],
+      'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, limit_round) VALUES(?, ?, ?, ?, ?, NULL, ?)',
+      [String(exchangeId), String(userid), String(productId), cleanProductName, amount, round],
     );
   } catch (err) {
     if (isUniqueViolation(err)) {

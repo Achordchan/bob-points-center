@@ -840,6 +840,35 @@ tr.selected { background: rgba(26, 115, 232, 0.10); }
   margin: 0;
 }
 
+#mallProductModal .mall-limit-round-panel {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#mallProductModal .mall-limit-round-panel.hidden {
+  display: none;
+}
+
+#mallProductModal .mall-limit-round-meta {
+  min-width: 0;
+}
+
+#mallProductModal .mall-limit-round-title {
+  font-weight: 700;
+  color: #222;
+}
+
+#mallProductModal .mall-limit-round-panel button {
+  flex: 0 0 auto;
+}
+
 :is(#mallProductModal, #charityProjectModal) .publish-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
@@ -1189,5 +1218,10 @@ tr.selected { background: rgba(26, 115, 232, 0.10); }
 
   #mallProductModal .row button {
     min-width: 0;
+  }
+
+  #mallProductModal .mall-limit-round-panel {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

@@ -769,7 +769,7 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const rows = await db.all(
-        "SELECT product_id, product_name, bob_amount, stock, limit_per_user, cdk_enabled, status, sort, image_url, remark, created_at, updated_at FROM mall_products ORDER BY (sort IS NULL), sort ASC, product_id COLLATE NOCASE",
+        "SELECT product_id, product_name, bob_amount, stock, limit_per_user, limit_round, cdk_enabled, status, sort, image_url, remark, created_at, updated_at FROM mall_products ORDER BY (sort IS NULL), sort ASC, product_id COLLATE NOCASE",
       );
       return res.json({ ok: true, count: (rows || []).length, data: rows || [] });
     } catch (err) {
@@ -827,7 +827,7 @@ export function adminRouter() {
       }
 
       const row = await db.get(
-        'SELECT product_id, product_name, bob_amount, stock, limit_per_user, cdk_enabled, status, sort, image_url, remark, created_at, updated_at FROM mall_products WHERE product_id = ? LIMIT 1',
+        'SELECT product_id, product_name, bob_amount, stock, limit_per_user, limit_round, cdk_enabled, status, sort, image_url, remark, created_at, updated_at FROM mall_products WHERE product_id = ? LIMIT 1',
         [input.product_id],
       );
 
@@ -855,6 +855,38 @@ export function adminRouter() {
         product_id: String(input.product_id),
         reason: isCreate ? 'create' : 'update',
       });
+      return res.json({ ok: true, data: row });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/mall/self/products/limit-round', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const productId = req.body?.product_id ? String(req.body.product_id).trim() : '';
+    if (!productId) {
+      return res.status(400).json({ error: 'missing product_id' });
+    }
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const row = await db.get(
+        `UPDATE mall_products
+            SET limit_round = GREATEST(COALESCE(limit_round, 1), 1) + 1,
+                updated_at = unixepoch()
+          WHERE product_id = ?
+            AND COALESCE(limit_per_user, 0) > 0
+          RETURNING product_id, product_name, bob_amount, stock, limit_per_user, limit_round,
+                    cdk_enabled, status, sort, image_url, remark, created_at, updated_at`,
+        [productId],
+      );
+      if (!row) {
+        const exists = await db.get('SELECT product_id, limit_per_user FROM mall_products WHERE product_id = ? LIMIT 1', [productId]);
+        if (!exists) {
+          return res.status(404).json({ error: 'product not found' });
+        }
+        return res.status(400).json({ error: '该商品未启用限购' });
+      }
+      publishMallRealtimeEvent('products_changed', { product_id: productId, reason: 'limit_round' });
       return res.json({ ok: true, data: row });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -2267,14 +2299,14 @@ export function adminRouter() {
         try {
           // eslint-disable-next-line no-await-in-loop
           await db.exec(
-            `INSERT INTO mall_products(product_id, product_name, bob_amount, stock, limit_per_user, cdk_enabled, status, sort, image_url, remark, created_at, updated_at)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            `INSERT INTO mall_products(product_id, product_name, bob_amount, stock, limit_per_user, limit_round, cdk_enabled, status, sort, image_url, remark, created_at, updated_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
              ON CONFLICT(product_id) DO UPDATE SET
                product_name=excluded.product_name, bob_amount=excluded.bob_amount, stock=excluded.stock,
-               limit_per_user=excluded.limit_per_user, cdk_enabled=excluded.cdk_enabled, status=excluded.status, sort=excluded.sort,
+               limit_per_user=excluded.limit_per_user, limit_round=excluded.limit_round, cdk_enabled=excluded.cdk_enabled, status=excluded.status, sort=excluded.sort,
                image_url=excluded.image_url, remark=excluded.remark, updated_at=excluded.updated_at`,
             [row.product_id, row.product_name, row.bob_amount, row.stock ?? null, row.limit_per_user ?? 0,
-              row.cdk_enabled ?? 0, row.status ?? 'on', row.sort ?? null, row.image_url ?? null, row.remark ?? null,
+              row.limit_round ?? 1, row.cdk_enabled ?? 0, row.status ?? 'on', row.sort ?? null, row.image_url ?? null, row.remark ?? null,
               row.created_at ?? Math.floor(Date.now() / 1000), row.updated_at ?? Math.floor(Date.now() / 1000)],
           );
           count++;
@@ -2512,10 +2544,11 @@ export function adminRouter() {
           try {
             // eslint-disable-next-line no-await-in-loop
             await db.exec(
-              `INSERT INTO redeems(id, exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, hidden, created_at)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(exchange_id) DO NOTHING`,
+              `INSERT INTO redeems(id, exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, hidden, limit_round, created_at)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(exchange_id) DO NOTHING`,
               [row.id ?? null, row.exchange_id, row.userid, row.product_id, row.product_name ?? null,
                 row.bob_amount, row.fulfilled_at ?? null, row.hidden ?? 0,
+                row.limit_round ?? 1,
                 row.created_at ?? Math.floor(Date.now() / 1000)],
             );
             count++;

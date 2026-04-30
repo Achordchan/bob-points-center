@@ -1570,6 +1570,26 @@ export function buildOpenApiSpec({ baseUrl }) {
         },
       },
 
+      '/admin/mall/self/products/limit-round': {
+        post: {
+          tags: ['管理端'],
+          summary: '开启商品新一轮限购',
+          requestBody: requestJson({
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              product_id: { type: 'string' },
+            },
+            required: ['product_id'],
+          }, {
+            product_id: 'P01',
+          }),
+          responses: withCommonErrors({
+            '200': successResponse('成功', REF_GENERIC),
+          }, { unauthorized: true, badRequest: true, notFound: true }),
+        },
+      },
+
       '/admin/mall/aitable/products': {
         get: {
           tags: ['管理端'],
