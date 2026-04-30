@@ -2468,7 +2468,8 @@
       return null;
     }
     setText('balanceErr', '');
-    setText('balance', String(me.data.balance ?? '--'));
+    const balanceText = me.data.balance === null || me.data.balance === undefined ? '--' : `6${me.data.balance}`;
+    setText('balance', balanceText);
     return me.data;
   }
 
