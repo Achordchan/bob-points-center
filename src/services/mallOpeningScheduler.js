@@ -1,4 +1,5 @@
 import { notifyGroupInteractiveCardBySettings } from './groupCardNotifyService.js';
+import { publishMallRealtimeEvent } from './mallRealtimeService.js';
 
 function toInt(value) {
   const n = Number(value);
@@ -141,6 +142,11 @@ export function startMallOpeningScheduler({ db, cfg }) {
     if (Object.keys(updates).length) {
       try {
         await updateScheduleRow(db, updates);
+        publishMallRealtimeEvent('opening_changed', {
+          reason: 'scheduler',
+          is_open: updates.is_open,
+          next_open_at: updates.next_open_at,
+        });
       } catch (_) {
         // ignore
       }

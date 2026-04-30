@@ -847,6 +847,75 @@
               启用群卡片通知
             </label>
             <div style="height:10px"></div>
+            <div class="help">发送通道配置：这里控制群卡片发到哪个群、使用哪个模板以及投递方式；保存后立即生效，不需要重启服务。</div>
+            <div style="height:10px"></div>
+            <div class="kv">
+              <label for="groupCardConversationPreset">群会话 ID</label>
+              <div style="flex:1;">
+                <select id="groupCardConversationPreset">
+                  <option value="cidxEY0ywSnrjDytDeXzEscwg==">BOB大群</option>
+                  <option value="cidGgW6mYLsdUyYN4rIuPvgYw==">测试群</option>
+                  <option value="__custom__">自定义</option>
+                </select>
+                <div class="help" style="margin-top:4px;">选择预设群后会自动填入会话 ID；如果要发到其他钉钉群，请选择“自定义”。</div>
+                <input id="groupCardOpenConversationId" placeholder="填写钉钉群 openConversationId" style="margin-top:6px;" />
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardChannelTemplateId">卡片模板 ID</label>
+              <div style="flex:1;">
+                <input id="groupCardChannelTemplateId" placeholder="填写钉钉开放平台卡片模板 ID" />
+                <div class="help" style="margin-top:4px;">用于指定群里发送的互动卡片模板，修改后下次发送立即生效。</div>
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardOperatorUserid">操作人 userid</label>
+              <div style="flex:1;">
+                <input id="groupCardOperatorUserid" placeholder="填写发起卡片投递的 userid" />
+                <div class="help" style="margin-top:4px;">群卡片投递时使用的操作人账号，一般填写可用的管理员或机器人绑定操作人。</div>
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <label class="muted publish-row">
+              <input type="checkbox" id="groupCardBroadcastAll" />
+              是否全员广播
+            </label>
+            <div class="help" style="margin-top:4px;">开启后直接向整个群广播；关闭后只发送给下面填写的指定接收人。</div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardRecipients">指定接收人</label>
+              <div style="flex:1;">
+                <textarea id="groupCardRecipients" rows="3" placeholder="多个 userid 请用逗号或换行分隔"></textarea>
+                <div class="help" style="margin-top:4px;">仅在关闭“全员广播”时生效；留空时默认回退到操作人。</div>
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardTitleKey">标题字段 key</label>
+              <div style="flex:1;">
+                <input id="groupCardTitleKey" placeholder="例如：biaoti" />
+                <div class="help" style="margin-top:4px;">卡片模板里对应标题的变量名，通常和钉钉模板字段保持一致。</div>
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardContentKey">内容字段 key</label>
+              <div style="flex:1;">
+                <input id="groupCardContentKey" placeholder="例如：neirong" />
+                <div class="help" style="margin-top:4px;">卡片模板里对应正文内容的变量名，支持 Markdown 内容。</div>
+              </div>
+            </div>
+            <div style="height:8px"></div>
+            <div class="kv">
+              <label for="groupCardSearchIcon">搜索图标</label>
+              <div style="flex:1;">
+                <input id="groupCardSearchIcon" placeholder="可选：用于群搜索展示" />
+                <div class="help" style="margin-top:4px;">可选项，用于群会话搜索或卡片检索时展示的小图标。</div>
+              </div>
+            </div>
+            <div style="height:10px"></div>
             <div class="kv">
               <label for="groupCardTemplateSelect">模板类型</label>
               <select id="groupCardTemplateSelect">

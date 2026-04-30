@@ -5,6 +5,7 @@ import { listRedeemsByUserid } from '../services/redeemService.js';
 import { requireBobToken } from '../middleware/requireBobToken.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { redeemConfirmWithNotify } from '../services/bobOpsService.js';
+import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 export function redeemRouter() {
   const router = Router();
@@ -40,6 +41,16 @@ export function redeemRouter() {
         bobAmount: payload.bob_amount,
         reason: 'redeem',
         awaitNotify,
+      });
+      publishMallRealtimeEvent('order_updated', {
+        userid: String(payload.userid || ''),
+        exchange_id: String(payload.exchange_id || ''),
+        status: 'fulfilled',
+        source: 'redeem_confirm',
+      });
+      publishMallRealtimeEvent('balance_changed', {
+        userid: String(payload.userid || ''),
+        reason: 'redeem_confirm',
       });
 
       if (awaitNotify) {

@@ -97,10 +97,80 @@ function toOutTrackId(prefix) {
 }
 
 function normalizeRecipients(value) {
-  const arr = Array.isArray(value) ? value : [];
+  const arr = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(/[\r\n,，]+/g) : []);
   return arr
     .map((x) => (x === null || x === undefined ? '' : String(x).trim()))
     .filter((x) => x);
+}
+
+function pickChannelValue(overrideValue, fallbackValue) {
+  return overrideValue === null || overrideValue === undefined ? fallbackValue : overrideValue;
+}
+
+export function resolveGroupCardChannel(cfg, settings = {}) {
+  const channel = settings?.channel && typeof settings.channel === 'object' ? settings.channel : {};
+  return {
+    openConversationId: pickChannelValue(
+      channel.openConversationId,
+      cfg?.dingtalk?.groupOpenConversationId ? String(cfg.dingtalk.groupOpenConversationId).trim() : '',
+    ),
+    cardTemplateId: pickChannelValue(
+      channel.cardTemplateId,
+      cfg?.dingtalk?.groupCardTemplateId ? String(cfg.dingtalk.groupCardTemplateId).trim() : '',
+    ),
+    operatorUserid: pickChannelValue(
+      channel.operatorUserid,
+      cfg?.dingtalk?.groupCardOperatorUserid
+        ? String(cfg.dingtalk.groupCardOperatorUserid).trim()
+        : (cfg?.adminFallbackUserid ? String(cfg.adminFallbackUserid).trim() : ''),
+    ),
+    broadcastAll: typeof channel.broadcastAll === 'boolean'
+      ? channel.broadcastAll
+      : (cfg?.dingtalk?.groupCardBroadcastAll === true),
+    recipients: channel.recipients === null || channel.recipients === undefined
+      ? normalizeRecipients(cfg?.dingtalk?.groupCardRecipients)
+      : normalizeRecipients(channel.recipients),
+    titleKey: pickChannelValue(
+      channel.titleKey,
+      cfg?.dingtalk?.groupCardTitleKey ? String(cfg.dingtalk.groupCardTitleKey).trim() : '',
+    ),
+    contentKey: pickChannelValue(
+      channel.contentKey,
+      cfg?.dingtalk?.groupCardContentKey ? String(cfg.dingtalk.groupCardContentKey).trim() : 'spyj_neirong',
+    ),
+    searchIcon: pickChannelValue(
+      channel.searchIcon,
+      cfg?.dingtalk?.groupCardSearchIcon ? String(cfg.dingtalk.groupCardSearchIcon).trim() : '',
+    ),
+  };
+}
+
+export function buildEffectiveGroupCardSettings(cfg, settings = {}) {
+  return {
+    ...(settings && typeof settings === 'object' ? settings : {}),
+    channel: resolveGroupCardChannel(cfg, settings),
+  };
+}
+
+export function mergeGroupCardChannelIntoCfg(cfg, settings = {}) {
+  const channel = resolveGroupCardChannel(cfg, settings);
+  return {
+    ...(cfg && typeof cfg === 'object' ? cfg : {}),
+    dingtalk: {
+      ...(cfg?.dingtalk && typeof cfg.dingtalk === 'object' ? cfg.dingtalk : {}),
+      groupCardNotifyEnabled: settings?.enabled !== false,
+      groupOpenConversationId: channel.openConversationId,
+      groupCardTemplateId: channel.cardTemplateId,
+      groupCardOperatorUserid: channel.operatorUserid,
+      groupCardBroadcastAll: channel.broadcastAll === true,
+      groupCardRecipients: channel.recipients,
+      groupCardTitleKey: channel.titleKey,
+      groupCardContentKey: channel.contentKey,
+      groupCardSearchIcon: channel.searchIcon,
+    },
+  };
 }
 
 
@@ -323,7 +393,9 @@ export async function notifyGroupInteractiveCardBySettings(db, cfg, payload = {}
     ? renderButtonVars(payload.buttons, vars)
     : (Array.isArray(template?.buttons) ? renderButtonVars(template.buttons, vars) : undefined);
 
-  notifyGroupInteractiveCard(cfg, {
+  const runtimeCfg = mergeGroupCardChannelIntoCfg(cfg, settings);
+
+  notifyGroupInteractiveCard(runtimeCfg, {
     outTrackId: payload?.outTrackId,
     imageUrl: payload?.imageUrl,
     title,

@@ -10,6 +10,7 @@ import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsSer
 import { notifyGroupInteractiveCardBySettings } from '../services/groupCardNotifyService.js';
 import { getRedeemCdkInfo, previewRedeemCdk, redeemCdk } from '../services/cdkService.js';
 import { contributeToCharity, getCharityProjectDetail, listMallCharityProjects } from '../services/charityService.js';
+import { publishMallRealtimeEvent, registerMallRealtimeClient } from '../services/mallRealtimeService.js';
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 
 const mallEasterTokens = new Map();
@@ -54,6 +55,10 @@ async function getMallProductsVersionInfo(db) {
 function invalidateMallProductsCache() {
   mallProductsCache.snapshot = null;
   mallProductsCache.cachedAtMs = 0;
+}
+
+function publishMoreChanged(section, extra = {}) {
+  publishMallRealtimeEvent('more_changed', { section, ...extra });
 }
 
 async function getMallProductsSnapshotCached(db, { force = false } = {}) {
@@ -356,6 +361,23 @@ export function mallRouter() {
     res.type('html').sendFile('mall_screen.html', { root: pagesRoot });
   });
 
+  router.get('/events', async (req, res) => {
+    const scope = req.query?.scope === 'screen' ? 'screen' : 'mall';
+    if (scope === 'screen') {
+      registerMallRealtimeClient({ req, res, scope });
+      return;
+    }
+    const guard = requireWebSession();
+    return guard(req, res, () => {
+      const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+      if (!userid) {
+        return res.status(401).json({ error: 'unauthorized' });
+      }
+      registerMallRealtimeClient({ req, res, scope, userid });
+      return undefined;
+    });
+  });
+
   router.get('/red-packet/screen', async (req, res) => {
     const db = req.app.locals.db;
     const limitRaw = toOptionalInt(req.query?.limit);
@@ -619,6 +641,7 @@ export function mallRouter() {
          VALUES(?, ?, ?, ?, ?, 'pending', unixepoch(), unixepoch())`,
         [userid, name || '', category, content, contact || ''],
       );
+      publishMoreChanged('feedback', { userids: [userid], feedback_id: Number(r?.lastID || 0) });
       return res.json({ ok: true, id: Number(r?.lastID || 0) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -676,8 +699,9 @@ export function mallRouter() {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
+    let result = null;
     try {
-      const result = await enqueueRedPacketClaim(async () => {
+      result = await enqueueRedPacketClaim(async () => {
         const now = Math.floor(Date.now() / 1000);
         const txRunner = typeof db.transaction === 'function'
           ? (fn) => db.transaction(fn)
@@ -767,6 +791,9 @@ export function mallRouter() {
         });
       }
       const serverNowMs = Date.now();
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'red_packet' });
+      publishMallRealtimeEvent('red_packet_changed', { userid, reason: 'red_packet' });
+      publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], reason: 'red_packet' });
       return res.json({
         ok: true,
         amount: result.amount,
@@ -900,8 +927,10 @@ export function mallRouter() {
 
   router.post('/charity/contribute', requireWebSession(), async (req, res) => {
     const db = req.app.locals.db;
+    const cfg = req.app.locals.cfg;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
+    const awaitNotify = toBool(req.query?.await_notify) || toBool(req.body?.await_notify);
     if (!userid) {
       return res.status(401).json({ error: 'unauthorized' });
     }
@@ -912,6 +941,37 @@ export function mallRouter() {
         userid,
         userName: name,
         bobAmount: req.body?.bob_amount,
+      });
+      const displayName = name || await getUserName(db, userid);
+      const projectName = result?.project?.project_name
+        ? String(result.project.project_name)
+        : String(result?.project?.project_id || req.body?.project_id || '-');
+      await sendOrQueueNotify({
+        db,
+        cfg,
+        userid,
+        title: displayName ? `【BOB币中心】公益助力成功 ${displayName}` : '【BOB币中心】公益助力成功',
+        lines: [
+          '类型：支出',
+          `项目：${projectName}`,
+          `金额：${String(result?.contributed_bob_amount ?? req.body?.bob_amount ?? '-') } BOB 币`,
+          `当前余额：${String(result?.balance ?? '-')} BOB 币`,
+        ],
+        awaitNotify,
+        event: 'charity',
+        variables: {
+          name: displayName || userid,
+          userid,
+          project_id: String(result?.project?.project_id || req.body?.project_id || ''),
+          project_name: projectName,
+          amount: String(result?.contributed_bob_amount ?? req.body?.bob_amount ?? ''),
+          balance: String(result?.balance ?? ''),
+        },
+      });
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'charity' });
+      publishMallRealtimeEvent('charity_changed', {
+        userid,
+        project_id: String(result?.project?.project_id || req.body?.project_id || ''),
       });
       return res.json(result);
     } catch (err) {
@@ -1058,6 +1118,12 @@ export function mallRouter() {
       } catch {
         qr = { encoded: null, qr_image_url: null };
       }
+      publishMallRealtimeEvent('order_updated', {
+        userid,
+        exchange_id: String(result.exchange_id || ''),
+        status: 'pending',
+        source: 'cdk_redeem',
+      });
       return res.json({ ok: true, ...result, status: 'pending', encoded: qr.encoded, qr_image_url: qr.qr_image_url });
     } catch (err) {
       const message = String(err?.message || err);
@@ -1133,6 +1199,14 @@ export function mallRouter() {
         delete result.notify;
       }
       invalidateMallProductsCache();
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'mall_buy' });
+      publishMallRealtimeEvent('order_updated', {
+        userid,
+        exchange_id: String(result?.exchange_id || exchangeId),
+        status: 'pending',
+        source: 'mall_buy',
+      });
+      publishMallRealtimeEvent('products_changed', { product_id: productId });
       return res.json(result);
     } catch (err) {
       const message = String(err?.message || err);
@@ -1173,6 +1247,14 @@ export function mallRouter() {
         delete result.notify;
       }
       invalidateMallProductsCache();
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'mall_buy_api' });
+      publishMallRealtimeEvent('order_updated', {
+        userid,
+        exchange_id: String(result?.exchange_id || exchangeId),
+        status: 'pending',
+        source: 'mall_buy_api',
+      });
+      publishMallRealtimeEvent('products_changed', { product_id: productId });
       return res.json(result);
     } catch (err) {
       const message = String(err?.message || err);

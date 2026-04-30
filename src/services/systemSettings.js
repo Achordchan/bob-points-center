@@ -36,11 +36,26 @@ const DEFAULT_NOTIFY_SETTINGS = {
       title: '【BOB币中心】红包到账 {{name}}',
       content: '金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n活动ID：{{activity_id}}',
     },
+    charity: {
+      enabled: true,
+      title: '【BOB币中心】公益助力成功 {{name}}',
+      content: '类型：支出\n项目：{{project_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
   },
 };
 
 const DEFAULT_GROUP_CARD_SETTINGS = {
   enabled: true,
+  channel: {
+    openConversationId: null,
+    cardTemplateId: null,
+    operatorUserid: null,
+    broadcastAll: null,
+    recipients: null,
+    titleKey: null,
+    contentKey: null,
+    searchIcon: null,
+  },
   templates: {
     manual: {
       enabled: true,
@@ -179,6 +194,21 @@ function normalizeButtons(value, fallback) {
   return Array.isArray(fallback) ? fallback : [];
 }
 
+function normalizeOptionalText(value) {
+  if (value === undefined || value === null) return null;
+  return String(value).trim();
+}
+
+function normalizeOptionalRecipients(value) {
+  if (value === undefined || value === null) return null;
+  const source = Array.isArray(value)
+    ? value
+    : String(value).split(/[\r\n,，]+/g);
+  return source
+    .map((item) => (item === null || item === undefined ? '' : String(item).trim()))
+    .filter((item) => item);
+}
+
 export function normalizeGroupCardSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const defaults = DEFAULT_GROUP_CARD_SETTINGS.templates || {};
@@ -194,6 +224,18 @@ export function normalizeGroupCardSettings(input) {
   }
   return {
     enabled: toBool(src.enabled, DEFAULT_GROUP_CARD_SETTINGS.enabled),
+    channel: {
+      openConversationId: normalizeOptionalText(src?.channel?.openConversationId),
+      cardTemplateId: normalizeOptionalText(src?.channel?.cardTemplateId),
+      operatorUserid: normalizeOptionalText(src?.channel?.operatorUserid),
+      broadcastAll: typeof src?.channel?.broadcastAll === 'boolean'
+        ? src.channel.broadcastAll
+        : null,
+      recipients: normalizeOptionalRecipients(src?.channel?.recipients),
+      titleKey: normalizeOptionalText(src?.channel?.titleKey),
+      contentKey: normalizeOptionalText(src?.channel?.contentKey),
+      searchIcon: normalizeOptionalText(src?.channel?.searchIcon),
+    },
     templates: nextTemplates,
   };
 }

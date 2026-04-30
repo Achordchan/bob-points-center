@@ -5,10 +5,13 @@
   const state = {
     payload: null,
     offsetSec: 0,
-    pollTimer: null,
     tickTimer: null,
     clockTimer: null,
     lastClaimKey: null,
+    streamNotice: '',
+    eventsSource: null,
+    realtimeTimers: {},
+    hasSeenRealtimeSnapshot: false,
   };
 
   function setText(id, text) {
@@ -20,6 +23,31 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.classList.toggle('hidden', !visible);
+  }
+
+  function setScreenStreamNotice(text) {
+    state.streamNotice = text ? String(text) : '';
+    setText('screenSub', state.streamNotice || '好运开场，红包来袭');
+  }
+
+  function clearRealtimeTasks() {
+    Object.keys(state.realtimeTimers || {}).forEach((key) => {
+      if (state.realtimeTimers[key]) {
+        clearTimeout(state.realtimeTimers[key]);
+      }
+      state.realtimeTimers[key] = null;
+    });
+  }
+
+  function closeScreenRealtime({ keepNotice = false } = {}) {
+    if (state.eventsSource) {
+      state.eventsSource.close();
+      state.eventsSource = null;
+    }
+    clearRealtimeTasks();
+    if (!keepNotice) {
+      setScreenStreamNotice('');
+    }
   }
 
   function formatTime(ts) {
@@ -209,6 +237,18 @@
     render(state.payload, true);
   }
 
+  function scheduleRealtimeTask(key, task, delay = 80) {
+    if (state.realtimeTimers[key]) return;
+    state.realtimeTimers[key] = setTimeout(async () => {
+      state.realtimeTimers[key] = null;
+      try {
+        await task();
+      } catch (_) {
+        // ignore realtime refresh failures
+      }
+    }, delay);
+  }
+
   function setQrCode() {
     const img = document.getElementById('screenQrImg');
     if (!img) return;
@@ -242,16 +282,55 @@
     }, 1800);
   }
 
-  function startPoll() {
-    if (state.pollTimer) return;
-    state.pollTimer = setInterval(loadScreenData, 4000);
+  function ensureScreenRealtime(forceReconnect = false) {
+    if (typeof window.EventSource === 'undefined') {
+      setScreenStreamNotice('当前环境不支持实时更新，请手动刷新');
+      return null;
+    }
+    if (forceReconnect && state.eventsSource) {
+      closeScreenRealtime({ keepNotice: true });
+    }
+    if (state.eventsSource) return state.eventsSource;
+
+    setScreenStreamNotice(state.hasSeenRealtimeSnapshot ? '实时连接恢复中...' : '实时同步中...');
+    const source = new window.EventSource('/mall/events?scope=screen');
+    state.eventsSource = source;
+    source.onopen = () => {
+      if (state.eventsSource !== source) return;
+      setScreenStreamNotice('');
+    };
+    source.onerror = () => {
+      if (state.eventsSource !== source) return;
+      setScreenStreamNotice('实时连接正在重试...');
+    };
+    ['snapshot', 'ping', 'screen_changed'].forEach((eventName) => {
+      source.addEventListener(eventName, (evt) => {
+        if (state.eventsSource !== source) return;
+        if (eventName === 'ping' || eventName === 'snapshot') {
+          setScreenStreamNotice('');
+        }
+        if (eventName === 'snapshot') {
+          if (!state.hasSeenRealtimeSnapshot) {
+            state.hasSeenRealtimeSnapshot = true;
+            return;
+          }
+        }
+        if (eventName === 'screen_changed' || eventName === 'snapshot') {
+          scheduleRealtimeTask('screen_refresh', async () => {
+            await loadScreenData();
+          }, 20);
+        }
+        void evt;
+      });
+    });
+    return source;
   }
 
   function startTick() {
     if (state.tickTimer) return;
     state.tickTimer = setInterval(() => {
       if (state.payload?.activity) {
-        renderCountdown(state.payload.activity);
+        render(state.payload, false);
       }
     }, 1000);
   }
@@ -267,7 +346,18 @@
     setQrCode();
     setStageActive();
     await loadScreenData();
-    startPoll();
+    ensureScreenRealtime(true);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        ensureScreenRealtime();
+      }
+    });
+    window.addEventListener('focus', () => {
+      ensureScreenRealtime();
+    });
+    window.addEventListener('pagehide', () => {
+      closeScreenRealtime({ keepNotice: true });
+    });
     startTick();
     startClock();
   }

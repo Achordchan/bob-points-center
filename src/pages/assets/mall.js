@@ -32,7 +32,6 @@
     activeMoreTab: 'announcements',
     ledger: [],
     orders: [],
-    refreshTimer: null,
     pendingBuyProductId: null,
     cartItems: [],
     cartCheckoutInFlight: false,
@@ -43,7 +42,6 @@
     reqSeq: 0,
     qrModalExchangeId: null,
     qrModalPayload: null,
-    qrPollTimer: null,
     cdkPreview: null,
     cdkInfoExchangeId: '',
     cdkInfoOpenSource: '',
@@ -53,15 +51,11 @@
     countdownTimer: null,
     closeCountdownTimer: null,
     openingRefreshInFlight: false,
-    openingPollTimer: null,
-    dataPollTimer: null,
-    successTimer: null,
     noticeTimer: null,
     redPacket: null,
     redPacketTimer: null,
     redPacketOffsetMs: 0,
     redPacketClaimInFlight: false,
-    redPacketPollTimer: null,
     redPacketLastCountdown: null,
     reauthInFlight: false,
     modalLockScrollTop: 0,
@@ -77,6 +71,11 @@
     transferSearchTimer: null,
     transferSearchSeq: 0,
     transferBound: false,
+    sessionUserName: '',
+    streamNotice: '',
+    eventsSource: null,
+    realtimeTimers: {},
+    hasSeenRealtimeSnapshot: false,
   };
 
   function normalizeCartItems(items) {
@@ -280,15 +279,6 @@
     }, 1000);
   }
 
-  function startRedPacketPoll() {
-    if (state.redPacketPollTimer) return;
-    state.redPacketPollTimer = setInterval(() => {
-      if (document.hidden) return;
-      if (state.activeTab !== 'balance') return;
-      loadRedPacketStatus();
-    }, 5000);
-  }
-
   async function claimRedPacket() {
     if (state.redPacketClaimInFlight) return;
     state.redPacketClaimInFlight = true;
@@ -349,9 +339,16 @@
     document.getElementById(id).textContent = text;
   }
 
+  function renderUserHint() {
+    const safeName = state.sessionUserName ? String(state.sessionUserName).trim() : '';
+    const base = safeName ? `你好，${safeName}` : '你好';
+    setText('userHint', state.streamNotice ? `${base} · ${state.streamNotice}` : base);
+  }
+
   function setUserIdentity(name, avatarUrl) {
     const safeName = name ? String(name).trim() : '';
-    setText('userHint', safeName ? `你好，${safeName}` : '你好');
+    state.sessionUserName = safeName;
+    renderUserHint();
 
     const avatarImg = document.getElementById('userAvatarImg');
     const avatarFallback = document.getElementById('userAvatarFallback');
@@ -382,6 +379,31 @@
     const safeName = name ? String(name).trim() : '';
     const prev = state.me && typeof state.me === 'object' ? state.me : {};
     state.me = { ...prev, userid: uid, name: safeName || prev?.name || '' };
+  }
+
+  function setRealtimeNotice(text) {
+    state.streamNotice = text ? String(text) : '';
+    renderUserHint();
+  }
+
+  function clearRealtimeTasks() {
+    Object.keys(state.realtimeTimers || {}).forEach((key) => {
+      if (state.realtimeTimers[key]) {
+        clearTimeout(state.realtimeTimers[key]);
+      }
+      state.realtimeTimers[key] = null;
+    });
+  }
+
+  function closeMallRealtime({ keepNotice = false } = {}) {
+    if (state.eventsSource) {
+      state.eventsSource.close();
+      state.eventsSource = null;
+    }
+    clearRealtimeTasks();
+    if (!keepNotice) {
+      setRealtimeNotice('');
+    }
   }
 
   function updateModalScrollLock() {
@@ -416,13 +438,6 @@
 
   function setCartModalVisible(visible) {
     const m = document.getElementById('cartModal');
-    if (!m) return;
-    m.classList.toggle('hidden', !visible);
-    updateModalScrollLock();
-  }
-
-  function setOrderSuccessVisible(visible) {
-    const m = document.getElementById('orderSuccessModal');
     if (!m) return;
     m.classList.toggle('hidden', !visible);
     updateModalScrollLock();
@@ -763,6 +778,7 @@
       if (auth?.data?.userid) {
         setUserIdentity(auth?.data?.name, auth?.data?.avatar);
         syncMeIdentity({ userid: auth?.data?.userid, name: auth?.data?.name });
+        ensureMallRealtime(true);
         await refreshBalanceAndLedger();
         return true;
       }
@@ -772,6 +788,183 @@
     } finally {
       state.reauthInFlight = false;
     }
+  }
+
+  function scheduleRealtimeTask(key, task, delay = 80) {
+    if (state.realtimeTimers[key]) return;
+    state.realtimeTimers[key] = setTimeout(async () => {
+      state.realtimeTimers[key] = null;
+      try {
+        await task();
+      } catch (_) {
+        // ignore realtime refresh failures
+      }
+    }, delay);
+  }
+
+  async function refreshRealtimeSnapshot() {
+    await loadMallOpening();
+    await loadRedPacketStatus();
+    if (state.activeTab === 'balance') {
+      await refreshBalanceAndLedger();
+      return;
+    }
+    if (state.activeTab === 'shop') {
+      await loadProducts(undefined, { force: true });
+      await loadCharityProjects();
+      return;
+    }
+    if (state.activeTab === 'orders') {
+      await loadOrders();
+      return;
+    }
+    if (state.activeTab === 'rich') {
+      if (state.activeRichTab === 'wealth') await loadRichBoard();
+      else await loadPopularProducts();
+      return;
+    }
+    if (state.activeTab === 'more') {
+      await loadMoreData();
+    }
+  }
+
+  function handleRealtimeOrderEvent(payload) {
+    const exchangeId = payload?.exchange_id ? String(payload.exchange_id) : '';
+    const status = payload?.status ? String(payload.status) : '';
+    if (exchangeId && state.qrModalExchangeId === exchangeId && status === 'fulfilled') {
+      closeQrModal();
+      showNotice('核销完成', 'success');
+      switchTab('balance');
+      scheduleRealtimeTask('balance', async () => {
+        await refreshBalanceAndLedger();
+      }, 20);
+    }
+    scheduleRealtimeTask('orders', async () => {
+      await loadOrders();
+      if (state.activeTab === 'more') {
+        await loadMoreData();
+      }
+    });
+  }
+
+  function handleMallRealtimeEvent(eventName, payload) {
+    if (eventName === 'snapshot') {
+      setRealtimeNotice('');
+      if (!state.hasSeenRealtimeSnapshot) {
+        state.hasSeenRealtimeSnapshot = true;
+        return;
+      }
+      scheduleRealtimeTask('snapshot', async () => {
+        await refreshRealtimeSnapshot();
+      }, 20);
+      return;
+    }
+    if (eventName === 'ping') {
+      setRealtimeNotice('');
+      return;
+    }
+    if (eventName === 'balance_changed') {
+      scheduleRealtimeTask('balance', async () => {
+        await refreshBalanceAndLedger();
+        if (state.activeTab === 'more') {
+          await loadMoreData();
+        }
+        if (state.activeTab === 'rich' && state.activeRichTab === 'wealth') {
+          await loadRichBoard();
+        }
+      });
+      return;
+    }
+    if (eventName === 'order_updated') {
+      handleRealtimeOrderEvent(payload);
+      if (state.activeTab === 'rich' && state.activeRichTab === 'products') {
+        scheduleRealtimeTask('rich_products', async () => {
+          await loadPopularProducts();
+        });
+      }
+      return;
+    }
+    if (eventName === 'products_changed') {
+      scheduleRealtimeTask('products', async () => {
+        await loadProducts(undefined, { force: true });
+      });
+      if (state.activeTab === 'rich' && state.activeRichTab === 'products') {
+        scheduleRealtimeTask('rich_products', async () => {
+          await loadPopularProducts();
+        });
+      }
+      return;
+    }
+    if (eventName === 'charity_changed') {
+      scheduleRealtimeTask('charity', async () => {
+        await loadCharityProjects();
+        if (state.activeCharityProjectId) {
+          await loadCharityProjectDetail(null, state.activeCharityProjectId);
+        }
+      });
+      return;
+    }
+    if (eventName === 'opening_changed') {
+      scheduleRealtimeTask('opening', async () => {
+        await loadMallOpening();
+      }, 20);
+      return;
+    }
+    if (eventName === 'red_packet_changed') {
+      scheduleRealtimeTask('red_packet', async () => {
+        await loadRedPacketStatus();
+      }, 20);
+      return;
+    }
+    if (eventName === 'more_changed') {
+      if (state.activeTab === 'more') {
+        scheduleRealtimeTask('more', async () => {
+          await loadMoreData();
+        });
+      }
+    }
+  }
+
+  function ensureMallRealtime(forceReconnect = false) {
+    if (typeof window.EventSource === 'undefined') {
+      setRealtimeNotice('当前环境不支持实时更新，请手动刷新');
+      return null;
+    }
+    if (forceReconnect && state.eventsSource) {
+      closeMallRealtime({ keepNotice: true });
+    }
+    if (state.eventsSource) {
+      return state.eventsSource;
+    }
+
+    setRealtimeNotice(state.hasSeenRealtimeSnapshot ? '实时连接恢复中...' : '实时同步中...');
+    const source = new window.EventSource('/mall/events');
+    state.eventsSource = source;
+
+    source.onopen = () => {
+      if (state.eventsSource !== source) return;
+      setRealtimeNotice('');
+    };
+    source.onerror = () => {
+      if (state.eventsSource !== source) return;
+      setRealtimeNotice('实时连接正在重试...');
+    };
+
+    ['snapshot', 'ping', 'balance_changed', 'order_updated', 'products_changed', 'charity_changed', 'opening_changed', 'red_packet_changed', 'more_changed']
+      .forEach((eventName) => {
+        source.addEventListener(eventName, (evt) => {
+          if (state.eventsSource !== source) return;
+          let payload = {};
+          try {
+            payload = evt?.data ? JSON.parse(evt.data) : {};
+          } catch (_) {
+            payload = {};
+          }
+          handleMallRealtimeEvent(eventName, payload);
+        });
+      });
+
+    return source;
   }
 
   function humanizeBuyError(message, httpStatus) {
@@ -1111,35 +1304,6 @@
     }
   }
 
-  function startOpeningPoll() {
-    if (state.openingPollTimer) return;
-    state.openingPollTimer = setInterval(() => {
-      if (!document.hidden) {
-        refreshOpeningOnce();
-      }
-    }, 12000);
-  }
-
-  function startDataPoll() {
-    if (state.dataPollTimer) return;
-    state.dataPollTimer = setInterval(() => {
-      if (document.hidden) return;
-      if (state.activeTab === 'rich') {
-        loadRichBoard();
-      }
-    if (state.activeTab === 'shop') {
-      loadProducts();
-      loadCharityProjects();
-    }
-      if (state.activeTab === 'orders') {
-        loadOrders();
-      }
-      if (state.activeTab === 'more') {
-        loadMoreData();
-      }
-    }, 12000);
-  }
-
   function applyMallOverlay(row) {
     const overlay = document.getElementById('mallOverlay');
     if (!overlay) return;
@@ -1242,20 +1406,6 @@
     if (!m) return;
     m.classList.toggle('hidden', !visible);
     updateModalScrollLock();
-
-    if (visible) {
-      if (state.qrPollTimer) return;
-      state.qrPollTimer = setInterval(() => {
-        checkRedeemStatus();
-      }, 2500);
-      checkRedeemStatus();
-      return;
-    }
-
-    if (state.qrPollTimer) {
-      clearInterval(state.qrPollTimer);
-      state.qrPollTimer = null;
-    }
   }
 
   function showQrModal({ exchangeId, encoded, qrImageUrl, hint, productTitle, amountText, balanceText, cdkInfoAvailable = false, refundAvailable = true }) {
@@ -1312,27 +1462,6 @@
     setHidden('btnQrCdkInfo', true);
     setHidden('btnQrRefund', false);
     setQrModalVisible(false);
-  }
-
-  async function checkRedeemStatus() {
-    const exchangeId = state.qrModalExchangeId;
-    if (!exchangeId) return;
-
-    const qrModal = document.getElementById('qrModal');
-    if (!qrModal || qrModal.classList.contains('hidden')) return;
-
-    const r = await fetchJson('/mall/orders?limit=30');
-    if (!r?.data || r.data?.error) return;
-
-    const rows = Array.isArray(r.data.data) ? r.data.data : [];
-    const row = rows.find((o) => String(o?.exchange_id || '') === String(exchangeId));
-    const status = row?.status ? String(row.status) : '';
-    if (status !== 'fulfilled') return;
-
-    closeQrModal();
-    showNotice('核销完成', 'success');
-    switchTab('balance');
-    await loadAll();
   }
 
   function closeConfirmModal() {
@@ -3096,31 +3225,21 @@
             });
           });
 
-          if (state.refreshTimer) {
-            clearInterval(state.refreshTimer);
-          }
-          state.refreshTimer = setInterval(() => {
-            if (document.hidden) return;
-            refreshLightweightForCurrentTab();
-          }, 15000);
-
-          startOpeningPoll();
           startRedPacketTimer();
-          startRedPacketPoll();
-          startDataPoll();
+          ensureMallRealtime(true);
 
           document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
-              refreshLightweightForCurrentTab();
-              refreshOpeningOnce();
-              loadRedPacketStatus();
+              ensureMallRealtime();
             }
           });
 
           window.addEventListener('focus', () => {
-            refreshLightweightForCurrentTab();
-            refreshOpeningOnce();
-            loadRedPacketStatus();
+            ensureMallRealtime();
+          });
+
+          window.addEventListener('pagehide', () => {
+            closeMallRealtime({ keepNotice: true });
           });
 
           const qrModal = document.getElementById('qrModal');

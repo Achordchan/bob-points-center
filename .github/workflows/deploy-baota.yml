@@ -1,0 +1,47 @@
+name: Deploy Baota
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: bob-baota-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.BAOTA_SSH_KEY }}" > ~/.ssh/bob_baota_deploy
+          chmod 600 ~/.ssh/bob_baota_deploy
+          ssh-keyscan -H "${{ secrets.BAOTA_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.BAOTA_HOST }}
+          DEPLOY_USER: ${{ secrets.BAOTA_USER }}
+          DEPLOY_PATH: /www/wwwroot/bob.baymaxgroup.com
+          DEPLOY_PROJECT: bob_points_center
+          DEPLOY_NODE_VERSION: v20.19.0
+          DEPLOY_DOMAIN: bob.baymaxgroup.com
+          DEPLOY_PORT: "8000"
+          SSH_OPTS: -i ~/.ssh/bob_baota_deploy -o StrictHostKeyChecking=yes
+        run: bash scripts/deploy-baota.sh

@@ -8,6 +8,14 @@
     window.location.replace('/admin/home');
   }
 
+  function getFallbackLoginErrorText(error) {
+    const code = error === null || error === undefined ? '' : String(error).trim();
+    if (!code) return '登录失败，请稍后再试';
+    if (code === 'missing username or password') return '请输入账号和密码';
+    if (code === 'unauthorized') return '账号或密码错误，请重新输入';
+    return code;
+  }
+
   async function dingLogin() {
     document.getElementById('dingErr').textContent = '';
 
@@ -83,7 +91,7 @@
         goHome();
         return;
       }
-      document.getElementById('fbErr').textContent = r.data?.error || '登录失败';
+      document.getElementById('fbErr').textContent = getFallbackLoginErrorText(r.data?.error);
     });
 
     const me = await fetchJson('/admin/me');

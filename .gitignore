@@ -8,3 +8,7 @@ bob-sqlite
 .windsurfrules
 .DS_Store
 .ssh/
+_deploy/
+data.db
+*.bak-*
+.tmp/

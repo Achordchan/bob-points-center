@@ -1,8 +1,8 @@
 import { getAttendanceRewardSettings } from './systemSettings.js';
-import { grantBob } from './ledgerService.js';
+import { ensureAccount, getBalance, grantBob } from './ledgerService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { safeAppendAuditLog } from './auditLogService.js';
-import { getAccessToken } from './dingtalkService.js';
+import { getAccessToken, getUserProfile } from './dingtalkService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
 const CUTOFF_MIN = 8 * 60 + 30; // 08:30 前算有效
@@ -21,7 +21,10 @@ function renderReason(template, vars) {
 }
 
 async function sendAttendanceNotify(db, cfg, { userid, amount, rewardReason, balance }) {
-  const displayName = await getUserName(db, userid);
+  const displayName = await resolveAttendanceDisplayName(db, cfg, userid);
+  const currentBalance = balance === null || balance === undefined
+    ? await getBalance(db, { userid, name: displayName || '' })
+    : balance;
   return await sendOrQueueNotify({
     db,
     cfg,
@@ -31,7 +34,7 @@ async function sendAttendanceNotify(db, cfg, { userid, amount, rewardReason, bal
       `类型：收入`,
       `原因：${rewardReason || '-'}`,
       `金额：${String(amount)} BOB 币`,
-      balance !== undefined ? `当前余额：${String(balance)} BOB 币` : '',
+      `当前余额：${String(currentBalance)} BOB 币`,
     ].filter(Boolean),
     awaitNotify: true,
     event: 'grant',
@@ -40,7 +43,7 @@ async function sendAttendanceNotify(db, cfg, { userid, amount, rewardReason, bal
       userid,
       reason: rewardReason || '-',
       amount: String(amount),
-      balance: balance !== undefined ? String(balance) : '',
+      balance: String(currentBalance),
     },
   });
 }
@@ -146,9 +149,12 @@ function parseTimeToMinutes(text) {
 function isOnDutyEligible(normalized, settings) {
   if (!normalized.userid) return { ok: false, skipReason: 'missing_userid' };
   if (!normalized.check_time_ms) return { ok: false, skipReason: 'missing_check_time' };
-  const startMin = parseTimeToMinutes(settings.workStartTime) ?? CUTOFF_MIN;
+  if (String(normalized.time_result || '').trim().toLowerCase() === 'notsigned') {
+    return { ok: false, skipReason: 'not_signed' };
+  }
+  const startMin = CUTOFF_MIN;
   const grace = Number(settings.lateGraceMinutes) || 0;
-  const cutoff = startMin + grace; // 08:30 + 宽限
+  const cutoff = startMin + grace;
 
   if (normalized.check_type === 'off_duty') {
     return settings.onlyCheckin ? { ok: false, skipReason: 'skipped_off_duty' } : { ok: true, skipReason: '' };
@@ -164,6 +170,7 @@ function isOnDutyEligible(normalized, settings) {
 function humanizeSkipMessage(skipReason, normalized) {
   const timeSuffix = normalized.check_time_text ? `（${normalized.check_time_text}）` : '';
   if (skipReason === 'skipped_off_duty') return `下班打卡，按设置忽略奖励${timeSuffix}`;
+  if (skipReason === 'not_signed') return `未打卡，跳过奖励${timeSuffix}`;
   if (skipReason === 'skipped_late') return `打卡晚于 08:30（含宽限），跳过奖励${timeSuffix}`;
   if (skipReason === 'max_per_day') return `今日已奖励 1 次，跳过${timeSuffix}`;
   if (skipReason === 'missing_check_time') return '缺少打卡时间，跳过奖励';
@@ -231,10 +238,33 @@ async function writeAttendanceAudit(db, { eventType, userid, actorName, message,
   });
 }
 
+async function resolveAttendanceDisplayName(db, cfg, userid) {
+  const localName = await getUserName(db, userid);
+  if (localName && localName !== userid) return localName;
+
+  if (!cfg?.dingtalk?.appKey || !cfg?.dingtalk?.appSecret) {
+    return localName || '';
+  }
+
+  try {
+    const profile = await getUserProfile(cfg, userid);
+    const profileName = profile?.name ? String(profile.name).trim() : '';
+    if (profileName && profileName !== userid) {
+      await ensureAccount(db, { userid, name: profileName });
+      return profileName;
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[AttendanceReward] resolve user name failed for ' + userid + ':', err?.message || err);
+  }
+
+  return localName || '';
+}
+
 async function handleAttendanceRecord(db, cfg, settings, record, { eventSource = 'stream', notifyOnReward = false } = {}) {
   const userid = record?.userId ? String(record.userId).trim() : '';
   if (!userid) return { ok: false, skipped: true, reason: 'missing_userid' };
-  const displayName = await getUserName(db, userid);
+  const displayName = await resolveAttendanceDisplayName(db, cfg, userid);
   const normalized = normalizeAttendanceRecord(record, displayName || userid);
   if (!normalized.user_name_snapshot) normalized.user_name_snapshot = displayName || userid;
 

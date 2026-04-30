@@ -65,10 +65,72 @@
     testSearchSeq: 0,
   };
 
+  const defaultNotifyTemplates = {
+    grant: {
+      enabled: true,
+      title: '【BOB币中心】恭喜你！{{name}}',
+      content: '类型：收入\n原因：{{reason}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
+    deduct: {
+      enabled: true,
+      title: '【BOB币中心】余额变动通知 {{name}}',
+      content: '类型：支出\n原因：{{reason}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n单号：{{exchange_id}}',
+    },
+    redeem: {
+      enabled: true,
+      title: '【BOB币中心】核销完成 {{name}}',
+      content: '商品：{{product_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n订单号：{{exchange_id}}',
+    },
+    mall_buy: {
+      enabled: true,
+      title: '【BOB币中心】下单成功 {{name}}',
+      content: '商品：{{product_name}}\n价格：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n请尽快联系工作人员线下核销',
+    },
+    transfer_out: {
+      enabled: true,
+      title: '【BOB币中心】转账成功 {{name}}',
+      content: '转出给：{{to_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
+    transfer_in: {
+      enabled: true,
+      title: '【BOB币中心】转账到账 {{name}}',
+      content: '来自：{{from_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
+    red_packet: {
+      enabled: true,
+      title: '【BOB币中心】红包到账 {{name}}',
+      content: '金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n活动ID：{{activity_id}}',
+    },
+    charity: {
+      enabled: true,
+      title: '【BOB币中心】公益助力成功 {{name}}',
+      content: '类型：支出\n项目：{{project_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
+  };
+
   const groupCardState = {
+    channel: {},
     templates: {},
     activeTemplate: 'manual',
   };
+
+  const groupCardConversationPresets = [
+    { label: 'BOB大群', value: 'cidxEY0ywSnrjDytDeXzEscwg==' },
+    { label: '测试群', value: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
+  ];
+
+  function getDefaultGroupCardChannel() {
+    return {
+      openConversationId: '',
+      cardTemplateId: '',
+      operatorUserid: '',
+      broadcastAll: false,
+      recipients: [],
+      titleKey: '',
+      contentKey: '',
+      searchIcon: '',
+    };
+  }
 
   let globalToastTimer = null;
 
@@ -1257,12 +1319,12 @@
     }, 1800);
   }
 
-  function normalizeTemplateEntry(entry) {
+  function normalizeTemplateEntry(entry, fallback = {}) {
     const t = entry && typeof entry === 'object' ? entry : {};
     return {
       enabled: t.enabled !== false,
-      title: t.title ? String(t.title) : '',
-      content: t.content ? String(t.content) : '',
+      title: t.title ? String(t.title) : String(fallback?.title || ''),
+      content: t.content ? String(t.content) : String(fallback?.content || ''),
     };
   }
 
@@ -1276,7 +1338,7 @@
   }
 
   function renderNotifyTemplate(key) {
-    const tpl = normalizeTemplateEntry(notifyState.templates?.[key]);
+    const tpl = normalizeTemplateEntry(notifyState.templates?.[key], defaultNotifyTemplates[key]);
     notifyState.activeTemplate = key;
     const select = document.getElementById('notifyTemplateSelect');
     if (select) select.value = key;
@@ -1359,10 +1421,17 @@
     const settings = data || {};
     document.getElementById('notifyEnabled').checked = settings.enabled !== false;
     notifyState.templates = settings.templates || {};
-    const defaults = ['grant', 'deduct', 'redeem', 'mall_buy', 'transfer_out', 'transfer_in', 'red_packet'];
+    const defaults = ['grant', 'deduct', 'redeem', 'mall_buy', 'transfer_out', 'transfer_in', 'red_packet', 'charity'];
+    const select = document.getElementById('notifyTemplateSelect');
+    if (select && !Array.from(select.options || []).some((opt) => opt.value === 'charity')) {
+      const option = document.createElement('option');
+      option.value = 'charity';
+      option.textContent = '公益助力通知';
+      select.appendChild(option);
+    }
     for (const key of defaults) {
       if (!notifyState.templates[key]) {
-        notifyState.templates[key] = { enabled: true, title: '', content: '' };
+        notifyState.templates[key] = { ...defaultNotifyTemplates[key] };
       }
     }
     const current = document.getElementById('notifyTemplateSelect')?.value || notifyState.activeTemplate;
@@ -1501,6 +1570,85 @@
     if (text) showGlobalToast(String(text), 'error');
   }
 
+  function normalizeGroupCardRecipients(value) {
+    const source = Array.isArray(value)
+      ? value
+      : String(value || '').split(/[\r\n,，]+/g);
+    return source
+      .map((item) => String(item || '').trim())
+      .filter((item) => item);
+  }
+
+  function normalizeGroupCardChannel(channel) {
+    const src = channel && typeof channel === 'object' ? channel : {};
+    return {
+      openConversationId: src.openConversationId ? String(src.openConversationId).trim() : '',
+      cardTemplateId: src.cardTemplateId ? String(src.cardTemplateId).trim() : '',
+      operatorUserid: src.operatorUserid ? String(src.operatorUserid).trim() : '',
+      broadcastAll: src.broadcastAll === true,
+      recipients: normalizeGroupCardRecipients(src.recipients),
+      titleKey: src.titleKey ? String(src.titleKey).trim() : '',
+      contentKey: src.contentKey ? String(src.contentKey).trim() : '',
+      searchIcon: src.searchIcon ? String(src.searchIcon).trim() : '',
+    };
+  }
+
+  function matchGroupCardConversationPreset(value) {
+    const current = String(value || '').trim();
+    const matched = groupCardConversationPresets.find((item) => item.value === current);
+    return matched ? matched.value : '__custom__';
+  }
+
+  function syncGroupCardConversationPresetUi() {
+    const select = document.getElementById('groupCardConversationPreset');
+    const input = document.getElementById('groupCardOpenConversationId');
+    if (!select || !input) return;
+    const selected = select.value || '__custom__';
+    const isCustom = selected === '__custom__';
+    if (!isCustom) {
+      input.value = selected;
+    }
+    input.readOnly = !isCustom;
+    input.placeholder = isCustom ? '填写钉钉群 openConversationId' : '已从预设自动填入';
+  }
+
+  function fillGroupCardChannel(channel) {
+    const normalized = normalizeGroupCardChannel(channel);
+    groupCardState.channel = normalized;
+    const preset = document.getElementById('groupCardConversationPreset');
+    const openConversationId = document.getElementById('groupCardOpenConversationId');
+    const cardTemplateId = document.getElementById('groupCardChannelTemplateId');
+    const operatorUserid = document.getElementById('groupCardOperatorUserid');
+    const broadcastAll = document.getElementById('groupCardBroadcastAll');
+    const recipients = document.getElementById('groupCardRecipients');
+    const titleKey = document.getElementById('groupCardTitleKey');
+    const contentKey = document.getElementById('groupCardContentKey');
+    const searchIcon = document.getElementById('groupCardSearchIcon');
+    if (preset) preset.value = matchGroupCardConversationPreset(normalized.openConversationId);
+    if (openConversationId) openConversationId.value = normalized.openConversationId || '';
+    if (cardTemplateId) cardTemplateId.value = normalized.cardTemplateId || '';
+    if (operatorUserid) operatorUserid.value = normalized.operatorUserid || '';
+    if (broadcastAll) broadcastAll.checked = normalized.broadcastAll === true;
+    if (recipients) recipients.value = normalized.recipients.join('\n');
+    if (titleKey) titleKey.value = normalized.titleKey || '';
+    if (contentKey) contentKey.value = normalized.contentKey || '';
+    if (searchIcon) searchIcon.value = normalized.searchIcon || '';
+    syncGroupCardConversationPresetUi();
+  }
+
+  function collectGroupCardChannelFromInputs() {
+    return normalizeGroupCardChannel({
+      openConversationId: document.getElementById('groupCardOpenConversationId')?.value || '',
+      cardTemplateId: document.getElementById('groupCardChannelTemplateId')?.value || '',
+      operatorUserid: document.getElementById('groupCardOperatorUserid')?.value || '',
+      broadcastAll: document.getElementById('groupCardBroadcastAll')?.checked === true,
+      recipients: document.getElementById('groupCardRecipients')?.value || '',
+      titleKey: document.getElementById('groupCardTitleKey')?.value || '',
+      contentKey: document.getElementById('groupCardContentKey')?.value || '',
+      searchIcon: document.getElementById('groupCardSearchIcon')?.value || '',
+    });
+  }
+
   function normalizeGroupTemplateEntry(entry) {
     const t = entry && typeof entry === 'object' ? entry : {};
     let buttons = t.buttons;
@@ -1564,6 +1712,7 @@
     const data = r.data?.data || {};
     const enabled = document.getElementById('groupCardEnabled');
     if (enabled) enabled.checked = data.enabled !== false;
+    fillGroupCardChannel(data.channel || getDefaultGroupCardChannel());
     groupCardState.templates = data.templates || {};
     const defaults = ['manual', 'mall_open', 'mall_open_remind', 'mall_close_remind', 'stock_low', 'stock_soldout', 'new_product'];
     for (const key of defaults) {
@@ -1589,6 +1738,7 @@
         ? { reset: true }
         : {
             enabled: document.getElementById('groupCardEnabled')?.checked !== false,
+            channel: collectGroupCardChannelFromInputs(),
             templates: (() => {
               const selected = document.getElementById('groupCardTemplateSelect')?.value || groupCardState.activeTemplate || 'manual';
               syncGroupTemplateFromInputs(selected);
@@ -3685,6 +3835,12 @@
         const prev = groupCardState.activeTemplate || 'manual';
         syncGroupTemplateFromInputs(prev);
         renderGroupTemplate(groupTplSelect.value || 'manual');
+      });
+    }
+    const groupConversationPreset = document.getElementById('groupCardConversationPreset');
+    if (groupConversationPreset) {
+      groupConversationPreset.addEventListener('change', () => {
+        syncGroupCardConversationPresetUi();
       });
     }
     const groupTplTitle = document.getElementById('groupCardTplTitle');

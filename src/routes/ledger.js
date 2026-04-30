@@ -5,6 +5,7 @@ import { requireBobToken } from '../middleware/requireBobToken.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
 import { deductBatchWithNotify, deductWithNotify, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
+import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 function toInt(value) {
   const n = Number(value);
@@ -130,6 +131,8 @@ export function ledgerRouter() {
           transfer_id: transferId,
         },
       });
+      publishMallRealtimeEvent('balance_changed', { userid: fromUserid, reason: 'transfer_out' });
+      publishMallRealtimeEvent('balance_changed', { userid: toUserid, reason: 'transfer_in' });
       return res.json({
         ok: true,
         transfer_id: transferId,
@@ -172,6 +175,7 @@ export function ledgerRouter() {
         refId: body.refId,
         awaitNotify,
       });
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'grant' });
 
       if (awaitNotify) {
         return res.json({ ok: true, ...out });
@@ -206,6 +210,11 @@ export function ledgerRouter() {
 
     try {
       const result = await grantBatchWithNotify(db, cfg, { userids, amount, reason, refId, awaitNotify });
+      for (const row of (result?.results || [])) {
+        if (row?.ok && row?.userid) {
+          publishMallRealtimeEvent('balance_changed', { userid: String(row.userid), reason: 'grant_batch' });
+        }
+      }
       return res.json(result);
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -242,6 +251,7 @@ export function ledgerRouter() {
         reason: 'api_deduct',
         awaitNotify,
       });
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'deduct' });
 
       if (awaitNotify) {
         return res.json({ ok: true, ...out });
@@ -297,6 +307,11 @@ export function ledgerRouter() {
         reason: 'api_deduct',
         awaitNotify,
       });
+      for (const row of (result?.results || [])) {
+        if (row?.ok && row?.userid) {
+          publishMallRealtimeEvent('balance_changed', { userid: String(row.userid), reason: 'deduct_batch' });
+        }
+      }
       return res.json(result);
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

@@ -11,7 +11,9 @@ export async function ensureAccount(db, { userid, name }) {
   if (!uid) {
     throw new Error('missing userid');
   }
-  const displayName = name === null || name === undefined ? '' : String(name).trim();
+  const rawDisplayName = name === null || name === undefined ? '' : String(name).trim();
+  // Do not persist userid placeholders as the user's canonical name.
+  const displayName = rawDisplayName && rawDisplayName !== uid ? rawDisplayName : '';
 
   await db.run(
     'INSERT OR IGNORE INTO users(userid, name) VALUES(?, ?)',

@@ -3,12 +3,51 @@ import { getV1AccessToken } from './dingtalkService.js';
 
 const GATEWAY_ENDPOINT = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 
-// 指数退避重连：初始 2s，上限 64s
 const RECONNECT_INITIAL_MS = 2000;
 const RECONNECT_MAX_MS = 64000;
+const STABLE_CONNECTION_MS = 30000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function tryParseJson(value, fallback = null) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function toJsonString(value, fallback = '{}') {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeReason(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  if (value instanceof ArrayBuffer) return Buffer.from(value).toString('utf8');
+  return String(value);
+}
+
+function sendProtocolMessage(ws, { messageId, data }) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(toJsonString({
+    code: 200,
+    headers: {
+      messageId,
+      contentType: 'application/json',
+    },
+    message: 'OK',
+    data: toJsonString(data),
+  }));
 }
 
 async function openConnection(cfg) {
@@ -56,13 +95,15 @@ async function openConnection(cfg) {
 
 function connectWebSocket({ endpoint, ticket, handlers, onDisconnect }) {
   const url = `${endpoint}?ticket=${encodeURIComponent(ticket)}`;
-  // eslint-disable-next-line no-console
   console.log('[DingtalkStream] connecting…');
 
   const ws = new WebSocket(url);
+  let openedAt = 0;
+  let lastSystemTopic = '';
+  let lastDisconnectReason = '';
 
   ws.addEventListener('open', () => {
-    // eslint-disable-next-line no-console
+    openedAt = Date.now();
     console.log('[DingtalkStream] connected');
   });
 
@@ -78,63 +119,65 @@ function connectWebSocket({ endpoint, ticket, handlers, onDisconnect }) {
     const headers = msg?.headers || {};
     const messageId = headers?.messageId || headers?.message_id || '';
     const topic = headers?.topic || '';
-    // 钉钉 EVENT 类消息的真实事件类型在 headers.eventType 里
     const eventType = headers?.eventType || topic;
 
-    // 系统 PING — 回 PONG
-    if (type === 'SYSTEM' && topic === 'ping') {
-      ws.send(JSON.stringify({
-        code: 200,
-        headers: { messageId, topic: 'pong' },
-        message: 'OK',
-        data: msg?.data,
-      }));
-      return;
+    if (type === 'SYSTEM') {
+      lastSystemTopic = topic;
+      const systemData = tryParseJson(msg?.data, {});
+
+      if (topic === 'ping') {
+        sendProtocolMessage(ws, {
+          messageId,
+          data: { opaque: systemData?.opaque || '' },
+        });
+        return;
+      }
+
+      if (topic === 'disconnect') {
+        lastDisconnectReason = String(systemData?.reason || '');
+        console.warn(`[DingtalkStream] server requested disconnect${lastDisconnectReason ? ` reason=${JSON.stringify(lastDisconnectReason)}` : ''}`);
+        return;
+      }
     }
 
-    // 事件/回调 — 先 ACK，再异步处理
     if (type === 'EVENT' || type === 'CALLBACK') {
-      ws.send(JSON.stringify({
-        code: 200,
-        headers: { messageId, topic },
-        message: 'OK',
-        data: '{}',
-      }));
+      sendProtocolMessage(ws, {
+        messageId,
+        data: type === 'CALLBACK'
+          ? { response: null }
+          : { status: 'SUCCESS', message: 'success' },
+      });
 
-      // 优先按 eventType 匹配，再按 topic，最后 fallback 到通配符 '*'
       const handler = handlers?.[eventType] || handlers?.[topic] || handlers?.['*'];
       if (typeof handler === 'function') {
         Promise.resolve()
           .then(() => handler({ topic: eventType, headers, data: msg?.data, raw: msg }))
-          // eslint-disable-next-line no-console
           .catch((err) => console.error('[DingtalkStream] handler error:', err));
       }
     }
   });
 
   ws.addEventListener('error', (ev) => {
-    // eslint-disable-next-line no-console
     console.error('[DingtalkStream] websocket error:', ev?.message || ev);
   });
 
   ws.addEventListener('close', (ev) => {
-    // eslint-disable-next-line no-console
-    console.warn(`[DingtalkStream] disconnected (code=${ev.code})`);
-    if (typeof onDisconnect === 'function') onDisconnect();
+    const uptimeMs = openedAt > 0 ? Date.now() - openedAt : 0;
+    const closeReason = normalizeReason(ev?.reason);
+    const reasonParts = [];
+    if (closeReason) reasonParts.push(`reason=${JSON.stringify(closeReason)}`);
+    if (lastDisconnectReason) reasonParts.push(`serverReason=${JSON.stringify(lastDisconnectReason)}`);
+    if (lastSystemTopic) reasonParts.push(`lastSystemTopic=${JSON.stringify(lastSystemTopic)}`);
+    reasonParts.push(`uptimeMs=${uptimeMs}`);
+    console.warn(`[DingtalkStream] disconnected (code=${ev.code}${reasonParts.length ? ` ${reasonParts.join(' ')}` : ''})`);
+    if (typeof onDisconnect === 'function') {
+      onDisconnect({ code: ev.code, reason: closeReason, serverReason: lastDisconnectReason, lastSystemTopic, uptimeMs });
+    }
   });
 
   return ws;
 }
 
-/**
- * 启动钉钉 Stream 长连接，自动重连。
- *
- * handlers 格式：
- *   { 'attendance_checkin': async ({ topic, headers, data }) => { ... } }
- *   或 { '*': async ({ topic, headers, data }) => { ... } }
- *
- * 返回 { stop() } 可手动关闭。
- */
 export function startDingtalkStream(cfg, handlers = {}) {
   let stopped = false;
   let ws = null;
@@ -142,28 +185,32 @@ export function startDingtalkStream(cfg, handlers = {}) {
 
   async function connect() {
     while (!stopped) {
+      let session = { uptimeMs: 0 };
       try {
         const { endpoint, ticket } = await openConnection(cfg);
-        reconnectDelay = RECONNECT_INITIAL_MS;
 
         await new Promise((resolve) => {
           ws = connectWebSocket({
             endpoint,
             ticket,
             handlers,
-            onDisconnect: resolve,
+            onDisconnect: (meta) => {
+              session = meta || { uptimeMs: 0 };
+              resolve();
+            },
           });
         });
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error('[DingtalkStream] connection failed:', err?.message || err);
       }
 
       if (!stopped) {
-        // eslint-disable-next-line no-console
+        const stable = Number(session?.uptimeMs || 0) >= STABLE_CONNECTION_MS;
         console.log(`[DingtalkStream] reconnecting in ${reconnectDelay / 1000}s…`);
         await sleep(reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        reconnectDelay = stable
+          ? RECONNECT_INITIAL_MS
+          : Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
       }
     }
   }
@@ -173,7 +220,7 @@ export function startDingtalkStream(cfg, handlers = {}) {
   return {
     stop() {
       stopped = true;
-      try { ws?.close(); } catch { /* ignore */ }
+      try { ws?.close(); } catch {}
     },
   };
 }

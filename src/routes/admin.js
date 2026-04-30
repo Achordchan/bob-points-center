@@ -28,9 +28,15 @@ import { normalizeMallProductInput } from '../services/mallService.js';
 import { deductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify } from '../services/bobOpsService.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { sendRobotPrivateText } from '../services/robotNotifyService.js';
-import { notifyGroupInteractiveCardBySettings, sendGroupInteractiveCard } from '../services/groupCardNotifyService.js';
+import {
+  buildEffectiveGroupCardSettings,
+  mergeGroupCardChannelIntoCfg,
+  notifyGroupInteractiveCardBySettings,
+  sendGroupInteractiveCard,
+} from '../services/groupCardNotifyService.js';
 import { getClientIp, purgeExpiredAuditLogs, safeAppendAuditLog } from '../services/auditLogService.js';
 import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcileAttendanceRewards } from '../services/attendanceRewardService.js';
+import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 import {
   getAttendanceRewardSettings,
   getGroupCardSettings,
@@ -305,6 +311,29 @@ function getAdminSessionPayload(req) {
   return verifySessionToken(secret, token);
 }
 
+function publishMoreChanged(section) {
+  publishMallRealtimeEvent('more_changed', { section });
+}
+
+function publishMallRealtimeResetForUser(userid, reason) {
+  const uid = userid ? String(userid) : '';
+  if (!uid) return;
+  publishMallRealtimeEvent('balance_changed', { userid: uid, reason });
+  publishMallRealtimeEvent('order_updated', { userid: uid, reason });
+  publishMallRealtimeEvent('charity_changed', { userid: uid, reason });
+}
+
+function publishMallRealtimeFullRefresh(reason) {
+  publishMallRealtimeEvent('balance_changed', { reason });
+  publishMallRealtimeEvent('order_updated', { reason });
+  publishMallRealtimeEvent('products_changed', { reason });
+  publishMallRealtimeEvent('charity_changed', { reason });
+  publishMallRealtimeEvent('opening_changed', { reason });
+  publishMallRealtimeEvent('red_packet_changed', { reason });
+  publishMallRealtimeEvent('more_changed', { section: 'all', reason });
+  publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], reason });
+}
+
 async function collectAllDeptIds(cfg) {
   const seen = new Set();
   const queue = [1];
@@ -363,7 +392,8 @@ export function adminRouter() {
       // Use explicitly submitted buttons first, then template buttons, then form buttons array
       const tplButtons = Array.isArray(tpl?.buttons) ? tpl.buttons : [];
       const finalButtons = buttons.length ? buttons : tplButtons;
-      const result = await sendGroupInteractiveCard(cfg, {
+      const runtimeCfg = mergeGroupCardChannelIntoCfg(cfg, groupCardSettings);
+      const result = await sendGroupInteractiveCard(runtimeCfg, {
         title: titleFinal,
         markdown: markdownFinal,
         outTrackId: outTrackId || undefined,
@@ -467,6 +497,8 @@ export function adminRouter() {
       });
 
       const activity = await db.get('SELECT * FROM red_packet_activity WHERE id = ?', [activityId]);
+      publishMallRealtimeEvent('red_packet_changed', { activity_id: Number(activityId) });
+      publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], activity_id: Number(activityId) });
       return res.json({ ok: true, data: activity, server_time: now });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -521,6 +553,8 @@ export function adminRouter() {
         await tx.run('DELETE FROM red_packet_items');
         await tx.run('DELETE FROM red_packet_activity');
       });
+      publishMallRealtimeEvent('red_packet_changed', { reason: 'clear' });
+      publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], reason: 'clear' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -542,6 +576,8 @@ export function adminRouter() {
         }
         return result;
       });
+      publishMallRealtimeEvent('red_packet_changed', { activity_id: activityId, reason: 'delete' });
+      publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], activity_id: activityId, reason: 'delete' });
       return res.json({ ok: true, deleted: r?.changes ?? 0, activity_id: activityId });
     } catch (err) {
       const msg = String(err?.message || err);
@@ -631,6 +667,11 @@ export function adminRouter() {
       await db.run(`UPDATE mall_opening_schedule SET ${sets}, updated_at = unixepoch() WHERE id = 1`, values);
 
       const next = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
+      publishMallRealtimeEvent('opening_changed', {
+        reason: 'admin_update',
+        is_open: Number(next?.is_open ?? 0),
+        next_open_at: next?.next_open_at ?? null,
+      });
       return res.json({ ok: true, data: next || {} });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -655,6 +696,11 @@ export function adminRouter() {
         vars: { open_time: formatTs(now) || '-' },
       });
       const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
+      publishMallRealtimeEvent('opening_changed', {
+        reason: 'open_now',
+        is_open: Number(row?.is_open ?? 0),
+        next_open_at: row?.next_open_at ?? null,
+      });
       return res.json({ ok: true, data: row || {} });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -668,6 +714,11 @@ export function adminRouter() {
       await ensureMallOpeningRow(db);
       await db.run('UPDATE mall_opening_schedule SET is_open = 0, updated_at = unixepoch() WHERE id = 1');
       const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
+      publishMallRealtimeEvent('opening_changed', {
+        reason: 'close_now',
+        is_open: Number(row?.is_open ?? 0),
+        next_open_at: row?.next_open_at ?? null,
+      });
       return res.json({ ok: true, data: row || {} });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -800,6 +851,10 @@ export function adminRouter() {
           },
         });
       }
+      publishMallRealtimeEvent('products_changed', {
+        product_id: String(input.product_id),
+        reason: isCreate ? 'create' : 'update',
+      });
       return res.json({ ok: true, data: row });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -818,6 +873,7 @@ export function adminRouter() {
       if (!r?.changes) {
         return res.status(404).json({ error: 'product not found' });
       }
+      publishMallRealtimeEvent('products_changed', { product_id: productId, reason: 'delete' });
       return res.json({ ok: true, deleted: productId });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -840,6 +896,10 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const row = await saveCharityProject(db, req.body || {});
+      publishMallRealtimeEvent('charity_changed', {
+        project_id: String(row?.project_id || req.body?.project_id || ''),
+        reason: 'save',
+      });
       return res.json({ ok: true, data: row });
     } catch (err) {
       const message = String(err?.message || err);
@@ -1067,6 +1127,14 @@ export function adminRouter() {
         reason: 'admin_deduct',
         awaitNotify: false,
       });
+      for (const row of (result?.results || [])) {
+        if (row?.ok && row?.userid) {
+          publishMallRealtimeEvent('balance_changed', {
+            userid: String(row.userid),
+            reason: 'admin_deduct_batch',
+          });
+        }
+      }
       return res.json(result);
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1262,6 +1330,7 @@ export function adminRouter() {
           [question, answer, sort, isEnabled, id],
         );
         if (!r?.changes) return res.status(400).json({ error: 'faq not found' });
+        publishMoreChanged('faq');
         return res.json({ ok: true, id });
       }
       const r = await db.run(
@@ -1269,6 +1338,7 @@ export function adminRouter() {
          VALUES(?, ?, ?, ?, unixepoch(), unixepoch())`,
         [question, answer, sort, isEnabled],
       );
+      publishMoreChanged('faq');
       return res.json({ ok: true, id: Number(r?.lastID || 0) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1283,6 +1353,7 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const r = await db.run('DELETE FROM content_faq WHERE id = ?', [id]);
       if (!r?.changes) return res.status(400).json({ error: 'faq not found' });
+      publishMoreChanged('faq');
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1328,6 +1399,7 @@ export function adminRouter() {
           [title, content, level, sort, isEnabled, publishAt, id],
         );
         if (!r?.changes) return res.status(400).json({ error: 'announcement not found' });
+        publishMoreChanged('announcements');
         return res.json({ ok: true, id });
       }
       const r = await db.run(
@@ -1335,6 +1407,7 @@ export function adminRouter() {
          VALUES(?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
         [title, content, level, sort, isEnabled, publishAt],
       );
+      publishMoreChanged('announcements');
       return res.json({ ok: true, id: Number(r?.lastID || 0) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1349,6 +1422,7 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const r = await db.run('DELETE FROM content_announcements WHERE id = ?', [id]);
       if (!r?.changes) return res.status(400).json({ error: 'announcement not found' });
+      publishMoreChanged('announcements');
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1407,6 +1481,7 @@ export function adminRouter() {
         [status, reply, actorId, actorName, id],
       );
       if (!r?.changes) return res.status(400).json({ error: 'feedback not found' });
+      publishMoreChanged('feedback');
       return res.json({ ok: true, id });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1447,6 +1522,7 @@ export function adminRouter() {
           [versionName, releaseNotes, isEnabled, publishAt, id],
         );
         if (!r?.changes) return res.status(400).json({ error: 'version not found' });
+        publishMoreChanged('version');
         return res.json({ ok: true, id });
       }
       const r = await db.run(
@@ -1454,6 +1530,7 @@ export function adminRouter() {
          VALUES(?, ?, ?, ?, unixepoch(), unixepoch())`,
         [versionName, releaseNotes, isEnabled, publishAt],
       );
+      publishMoreChanged('version');
       return res.json({ ok: true, id: Number(r?.lastID || 0) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1622,6 +1699,10 @@ export function adminRouter() {
           await ensureAccount(tx, { userid: u.userid, name: u.name });
         }
       });
+      if (users.size > 0) {
+        publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
+        publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
+      }
 
       return res.json({
         ok: true,
@@ -1705,6 +1786,7 @@ export function adminRouter() {
         await tx.run('DELETE FROM charity_contributions WHERE userid = ?', [userid]);
         await tx.run('UPDATE accounts SET balance = 0, updated_at = unixepoch() WHERE userid = ?', [userid]);
       });
+      publishMallRealtimeResetForUser(userid, 'reset_user');
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1725,6 +1807,7 @@ export function adminRouter() {
         await tx.run('DELETE FROM charity_contributions');
         await tx.run('UPDATE accounts SET balance = 0, updated_at = unixepoch()');
       });
+      publishMallRealtimeFullRefresh('reset_all');
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1746,6 +1829,10 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const placeholders = userids.map(() => '?').join(',');
       const result = await db.run(`DELETE FROM users WHERE userid IN (${placeholders})`, userids);
+      if (Number(result?.changes || 0) > 0) {
+        publishMallRealtimeEvent('balance_changed', { reason: 'users_delete' });
+        publishMallRealtimeEvent('charity_changed', { reason: 'users_delete' });
+      }
       return res.json({ ok: true, deleted: result?.changes ?? 0 });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1805,6 +1892,8 @@ export function adminRouter() {
         userid,
         reason: '测试原因',
         product_name: '测试商品',
+        project_id: 'TEST_CHARITY_001',
+        project_name: '测试公益项目',
         amount: '10',
         balance: '100',
         exchange_id: 'TEST_EXCHANGE_001',
@@ -1831,9 +1920,11 @@ export function adminRouter() {
 
   router.get('/settings/group-card', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const data = await getGroupCardSettings(db);
+      const raw = await getGroupCardSettings(db);
+      const data = buildEffectiveGroupCardSettings(cfg, raw);
       return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1842,9 +1933,11 @@ export function adminRouter() {
 
   router.post('/settings/group-card', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const data = await saveGroupCardSettings(db, req.body || {});
+      const saved = await saveGroupCardSettings(db, req.body || {});
+      const data = buildEffectiveGroupCardSettings(cfg, saved);
       return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1967,6 +2060,11 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const result = await grantBatchWithNotify(db, cfg, { userids, amount, reason, refId, awaitNotify: false });
+      for (const row of (result?.results || [])) {
+        if (row?.ok && row?.userid) {
+          publishMallRealtimeEvent('balance_changed', { userid: String(row.userid), reason: 'admin_grant_batch' });
+        }
+      }
       return res.json(result);
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -2011,6 +2109,16 @@ export function adminRouter() {
         bobAmount: payload.bob_amount,
         reason: 'redeem',
         awaitNotify: false,
+      });
+      publishMallRealtimeEvent('order_updated', {
+        userid: String(payload.userid || ''),
+        exchange_id: String(payload.exchange_id || ''),
+        status: 'fulfilled',
+        source: 'admin_redeem_confirm',
+      });
+      publishMallRealtimeEvent('balance_changed', {
+        userid: String(payload.userid || ''),
+        reason: 'admin_redeem_confirm',
       });
 
       return res.json({ ok: true, userid: result.userid, balance: result.balance, exchange_id: result.exchange_id });
@@ -2616,6 +2724,7 @@ export function adminRouter() {
       }
     }
 
+    publishMallRealtimeFullRefresh('backup_import');
     return res.json({ ok: true, mode, report });
   });
 
