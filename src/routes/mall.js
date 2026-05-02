@@ -11,27 +11,16 @@ import { notifyGroupInteractiveCardBySettings } from '../services/groupCardNotif
 import { getRedeemCdkInfo, previewRedeemCdk, redeemCdk } from '../services/cdkService.js';
 import { contributeToCharity, getCharityProjectDetail, listMallCharityProjects } from '../services/charityService.js';
 import { publishMallRealtimeEvent, registerMallRealtimeClient } from '../services/mallRealtimeService.js';
+import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 
 const mallEasterTokens = new Map();
 let redPacketClaimQueue = Promise.resolve();
-const MALL_PRODUCTS_CACHE_TTL_MS = 2500;
-const mallProductsCache = {
-  snapshot: null,
-  cachedAtMs: 0,
-  inflight: null,
-};
-const MALL_PRODUCTS_QUERY =
-  "SELECT product_id, product_name, bob_amount, stock, limit_per_user, limit_round, status, sort, image_url, remark, updated_at FROM mall_products WHERE status = 'on' ORDER BY (sort IS NULL), sort ASC, product_id COLLATE NOCASE";
 
 function enqueueRedPacketClaim(task) {
   const next = redPacketClaimQueue.then(task, task);
   redPacketClaimQueue = next.catch(() => {});
   return next;
-}
-
-async function listMallProducts(db) {
-  return await db.all(MALL_PRODUCTS_QUERY);
 }
 
 function normalizeLimitRound(value) {
@@ -105,66 +94,8 @@ async function attachMallLimitUsage(db, userid, rows) {
   });
 }
 
-async function getMallProductsVersionInfo(db) {
-  const row = await db.get(
-    `SELECT
-       COUNT(1) AS total,
-       COALESCE(MAX(COALESCE(updated_at, 0)), 0) AS updated_max,
-       COALESCE(SUM(COALESCE(updated_at, 0)), 0) AS updated_sum
-     FROM mall_products
-     WHERE status = 'on'`,
-  );
-  const total = Number(row?.total ?? 0);
-  const updatedMax = Number(row?.updated_max ?? 0);
-  const updatedSum = Number(row?.updated_sum ?? 0);
-  return {
-    total,
-    version: `${total}:${updatedMax}:${updatedSum}`,
-  };
-}
-
-function invalidateMallProductsCache() {
-  mallProductsCache.snapshot = null;
-  mallProductsCache.cachedAtMs = 0;
-}
-
 function publishMoreChanged(section, extra = {}) {
   publishMallRealtimeEvent('more_changed', { section, ...extra });
-}
-
-async function getMallProductsSnapshotCached(db, { force = false } = {}) {
-  const nowMs = Date.now();
-  if (
-    !force &&
-    mallProductsCache.snapshot &&
-    (nowMs - mallProductsCache.cachedAtMs) < MALL_PRODUCTS_CACHE_TTL_MS
-  ) {
-    return mallProductsCache.snapshot;
-  }
-  if (!force && mallProductsCache.inflight) {
-    return await mallProductsCache.inflight;
-  }
-  const inflight = (async () => {
-    const [rows, versionInfo] = await Promise.all([
-      listMallProducts(db),
-      getMallProductsVersionInfo(db),
-    ]);
-    const snapshot = {
-      rows: rows || [],
-      versionInfo: versionInfo || { total: 0, version: '0:0:0' },
-    };
-    mallProductsCache.snapshot = snapshot;
-    mallProductsCache.cachedAtMs = Date.now();
-    return snapshot;
-  })();
-  mallProductsCache.inflight = inflight;
-  try {
-    return await inflight;
-  } finally {
-    if (mallProductsCache.inflight === inflight) {
-      mallProductsCache.inflight = null;
-    }
-  }
 }
 
 function nowSec() {

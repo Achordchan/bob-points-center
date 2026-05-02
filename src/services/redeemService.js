@@ -21,6 +21,21 @@ function normalizeLimitRound(value) {
   return n;
 }
 
+async function deductBalanceInTx(db, { userid, amount }) {
+  const updated = await db.get(
+    `UPDATE accounts
+        SET balance = balance - ?, updated_at = unixepoch()
+      WHERE userid = ?
+        AND balance >= ?
+      RETURNING balance`,
+    [amount, String(userid), amount],
+  );
+  if (!updated) {
+    throw new Error('insufficient balance');
+  }
+  return Number(updated.balance ?? 0);
+}
+
 export async function createRedeemOrderInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason, limitRound }) {
   const amount = toInt(bobAmount);
   const round = normalizeLimitRound(limitRound);
@@ -42,12 +57,6 @@ export async function createRedeemOrderInTx(db, { exchangeId, userid, productId,
 
   await ensureAccount(db, { userid });
 
-  const account = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
-  const balance = Number(account?.balance ?? 0);
-  if (balance < amount) {
-    throw new Error('insufficient balance');
-  }
-
   try {
     await db.run(
       'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, limit_round) VALUES(?, ?, ?, ?, ?, NULL, ?)',
@@ -65,17 +74,12 @@ export async function createRedeemOrderInTx(db, { exchangeId, userid, productId,
     [String(userid), -amount, cleanReason, String(exchangeId)],
   );
 
-  await db.run(
-    'UPDATE accounts SET balance = balance - ?, updated_at = unixepoch() WHERE userid = ?',
-    [amount, String(userid)],
-  );
-
-  const row = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
+  const balance = await deductBalanceInTx(db, { userid, amount });
 
   return {
     ok: true,
     userid: String(userid),
-    balance: Number(row?.balance ?? 0),
+    balance,
     exchange_id: String(exchangeId),
   };
 }
@@ -141,12 +145,6 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
     throw new Error('bob_amount must be positive integer');
   }
 
-  const account = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
-  const balance = Number(account?.balance ?? 0);
-  if (balance < amount) {
-    throw new Error('insufficient balance');
-  }
-
   try {
     await db.run(
       'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at) VALUES(?, ?, ?, ?, ?, unixepoch())',
@@ -164,17 +162,12 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
     [String(userid), -amount, cleanReason, String(exchangeId)],
   );
 
-  await db.run(
-    'UPDATE accounts SET balance = balance - ?, updated_at = unixepoch() WHERE userid = ?',
-    [amount, String(userid)],
-  );
-
-  const row = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
+  const balance = await deductBalanceInTx(db, { userid, amount });
 
   return {
     ok: true,
     userid: String(userid),
-    balance: Number(row?.balance ?? 0),
+    balance,
     exchange_id: String(exchangeId),
   };
 }
