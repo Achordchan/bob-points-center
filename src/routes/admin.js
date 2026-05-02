@@ -37,6 +37,7 @@ import {
 import { getClientIp, purgeExpiredAuditLogs, safeAppendAuditLog } from '../services/auditLogService.js';
 import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcileAttendanceRewards } from '../services/attendanceRewardService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
+import { invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import {
   getAttendanceRewardSettings,
   getGroupCardSettings,
@@ -324,6 +325,7 @@ function publishMallRealtimeResetForUser(userid, reason) {
 }
 
 function publishMallRealtimeFullRefresh(reason) {
+  invalidateMallProductsCache();
   publishMallRealtimeEvent('balance_changed', { reason });
   publishMallRealtimeEvent('order_updated', { reason });
   publishMallRealtimeEvent('products_changed', { reason });
@@ -332,6 +334,11 @@ function publishMallRealtimeFullRefresh(reason) {
   publishMallRealtimeEvent('red_packet_changed', { reason });
   publishMallRealtimeEvent('more_changed', { section: 'all', reason });
   publishMallRealtimeEvent('screen_changed', { scopes: ['screen'], reason });
+}
+
+function publishMallProductsChanged(payload = {}) {
+  invalidateMallProductsCache();
+  publishMallRealtimeEvent('products_changed', payload);
 }
 
 async function collectAllDeptIds(cfg) {
@@ -851,7 +858,7 @@ export function adminRouter() {
           },
         });
       }
-      publishMallRealtimeEvent('products_changed', {
+      publishMallProductsChanged({
         product_id: String(input.product_id),
         reason: isCreate ? 'create' : 'update',
       });
@@ -886,7 +893,7 @@ export function adminRouter() {
         }
         return res.status(400).json({ error: '该商品未启用限购' });
       }
-      publishMallRealtimeEvent('products_changed', { product_id: productId, reason: 'limit_round' });
+      publishMallProductsChanged({ product_id: productId, reason: 'limit_round' });
       return res.json({ ok: true, data: row });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -905,7 +912,7 @@ export function adminRouter() {
       if (!r?.changes) {
         return res.status(404).json({ error: 'product not found' });
       }
-      publishMallRealtimeEvent('products_changed', { product_id: productId, reason: 'delete' });
+      publishMallProductsChanged({ product_id: productId, reason: 'delete' });
       return res.json({ ok: true, deleted: productId });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
