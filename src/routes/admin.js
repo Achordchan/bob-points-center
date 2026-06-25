@@ -9,6 +9,7 @@ import {
   buildJsapiConfig,
   getAccessToken,
   getDingtalkOrganizationProfile,
+  getV1AccessToken,
   getUserIdByAuthCode,
   getUserProfile,
   listSubDepartments,
@@ -2918,6 +2919,78 @@ export function adminRouter() {
       const saved = await saveGroupCardSettings(db, req.body || {});
       const data = buildEffectiveGroupCardSettings(cfg, saved);
       return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/settings/group-card/preset', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    const openConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
+    const name = req.body?.name ? String(req.body.name).trim() : '';
+    if (!openConversationId) return res.status(400).json({ error: 'missing openConversationId' });
+    if (!name) return res.status(400).json({ error: 'missing preset name' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const current = await getGroupCardSettings(db);
+      const oldPresets = Array.isArray(current?.channelPresets) ? current.channelPresets : [];
+      const nextPresets = [
+        { name, openConversationId },
+        ...oldPresets.filter((item) => String(item?.openConversationId || '').trim() !== openConversationId),
+      ];
+      const saved = await saveGroupCardSettings(db, {
+        ...current,
+        channelPresets: nextPresets,
+        channel: {
+          ...(current?.channel || {}),
+          openConversationId,
+        },
+      });
+      const data = buildEffectiveGroupCardSettings(cfg, saved);
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/settings/group-card/check', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const dingtalkSettings = await getDingtalkConnectionSettings(db, cfg);
+      applyDingtalkConnectionSettings(cfg, dingtalkSettings);
+      const settings = await getGroupCardSettings(db);
+      const effective = buildEffectiveGroupCardSettings(cfg, settings);
+      const channel = effective?.channel || {};
+      const dingtalk = cfg?.dingtalk || {};
+      const items = [
+        { key: 'appKey', label: '钉钉应用 AppKey', ok: Boolean(String(dingtalk.appKey || '').trim()) },
+        { key: 'appSecret', label: '钉钉应用 AppSecret', ok: Boolean(String(dingtalk.appSecret || '').trim()) },
+        { key: 'agentId', label: '钉钉应用 AgentId', ok: Boolean(String(dingtalk.agentId || '').trim()) },
+        { key: 'robotCode', label: '机器人编码', ok: Boolean(String(dingtalk.robotCode || '').trim()) },
+        { key: 'openConversationId', label: '群会话', ok: Boolean(String(channel.openConversationId || '').trim()) },
+        { key: 'cardTemplateId', label: '卡片模板', ok: Boolean(String(channel.cardTemplateId || '').trim()) },
+        { key: 'operatorUserid', label: '操作人 Userid', ok: Boolean(String(channel.operatorUserid || '').trim()) },
+      ];
+      if (items.find((item) => item.key === 'appKey')?.ok && items.find((item) => item.key === 'appSecret')?.ok) {
+        try {
+          await getV1AccessToken(cfg);
+          items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: true });
+        } catch (err) {
+          items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: false, message: String(err?.message || err) });
+        }
+      }
+      const ok = items.every((item) => item.ok === true);
+      return res.json({
+        ok: true,
+        data: {
+          ok,
+          items,
+          note: '本检测只校验配置完整性和钉钉凭证，不发送真实群消息。',
+        },
+      });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

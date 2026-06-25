@@ -46,6 +46,10 @@ const DEFAULT_NOTIFY_SETTINGS = {
 
 const DEFAULT_GROUP_CARD_SETTINGS = {
   enabled: true,
+  channelPresets: [
+    { name: 'BOB大群', openConversationId: 'cidxEY0ywSnrjDytDeXzEscwg==' },
+    { name: '测试群', openConversationId: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
+  ],
   channel: {
     openConversationId: null,
     cardTemplateId: null,
@@ -209,6 +213,25 @@ function normalizeOptionalRecipients(value) {
     .filter((item) => item);
 }
 
+function normalizeGroupChannelPresets(value, fallback = []) {
+  const source = Array.isArray(value) ? value : fallback;
+  const seen = new Set();
+  return source
+    .map((item) => {
+      const src = item && typeof item === 'object' ? item : {};
+      const openConversationId = normalizeOptionalText(src.openConversationId);
+      if (!openConversationId || seen.has(openConversationId)) return null;
+      seen.add(openConversationId);
+      const name = normalizeOptionalText(src.name) || '未命名群聊';
+      return {
+        name: name.slice(0, 40),
+        openConversationId,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 30);
+}
+
 export function normalizeGroupCardSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const defaults = DEFAULT_GROUP_CARD_SETTINGS.templates || {};
@@ -224,6 +247,7 @@ export function normalizeGroupCardSettings(input) {
   }
   return {
     enabled: toBool(src.enabled, DEFAULT_GROUP_CARD_SETTINGS.enabled),
+    channelPresets: normalizeGroupChannelPresets(src.channelPresets, DEFAULT_GROUP_CARD_SETTINGS.channelPresets),
     channel: {
       openConversationId: normalizeOptionalText(src?.channel?.openConversationId),
       cardTemplateId: normalizeOptionalText(src?.channel?.cardTemplateId),

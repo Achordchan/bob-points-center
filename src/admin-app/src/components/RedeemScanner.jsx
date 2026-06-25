@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CameraOutlined, CheckOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { App, Button, Card, Input, Space, Typography, Upload } from 'antd';
-import { api, translateErrorMessage } from '../api.js';
+import { translateErrorMessage } from '../api.js';
+import { initDingtalkJsapi, isDingtalkClient } from '../utils/dingtalkJsapi.js';
 
-const DINGTALK_JSAPI_SRC = 'https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js';
-let dingtalkScriptPromise = null;
 let barcodeDetector = null;
 
 function normalizeEncoded(raw) {
@@ -16,30 +15,6 @@ function normalizeEncoded(raw) {
   } catch {
     return text;
   }
-}
-
-function loadDingtalkJsapi() {
-  if (window.dd) return Promise.resolve(true);
-  if (dingtalkScriptPromise) return dingtalkScriptPromise;
-  dingtalkScriptPromise = new Promise((resolve) => {
-    const existing = document.querySelector(`script[src="${DINGTALK_JSAPI_SRC}"]`);
-    if (existing) {
-      existing.addEventListener('load', () => resolve(Boolean(window.dd)), { once: true });
-      existing.addEventListener('error', () => resolve(false), { once: true });
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = DINGTALK_JSAPI_SRC;
-    script.async = true;
-    script.onload = () => resolve(Boolean(window.dd));
-    script.onerror = () => resolve(false);
-    document.head.appendChild(script);
-  });
-  return dingtalkScriptPromise;
-}
-
-function isDingtalkClient() {
-  return /DingTalk/i.test(navigator.userAgent || '');
 }
 
 function formatBrowserPermissionError(error, actionText) {
@@ -59,52 +34,19 @@ function formatBrowserPermissionError(error, actionText) {
 
 async function tryDingtalkScan() {
   if (!isDingtalkClient()) return '';
-  const loaded = await loadDingtalkJsapi();
-  const dd = window.dd;
-  if (!loaded || !dd?.biz?.util?.scan) return '';
-
-  let cfg = null;
   try {
-    const url = window.location.href.split('#')[0];
-    cfg = await api(`/admin/config?url=${encodeURIComponent(url)}`);
+    const { dd } = await initDingtalkJsapi(['biz.util.scan']);
+    if (!dd?.biz?.util?.scan) return '';
+    return new Promise((resolve) => {
+      dd.biz.util.scan({
+        type: 'qrCode',
+        onSuccess: (data) => resolve(normalizeEncoded(data?.text || data?.resultStr || '')),
+        onFail: () => resolve(''),
+      });
+    });
   } catch {
     return '';
   }
-  if (cfg?.error) return '';
-
-  const ready = await new Promise((resolve) => {
-    const timer = window.setTimeout(() => resolve(false), 2500);
-    try {
-      dd.config({
-        agentId: cfg.agentId,
-        corpId: cfg.corpId,
-        timeStamp: cfg.timeStamp,
-        nonceStr: cfg.nonceStr,
-        signature: cfg.signature,
-        jsApiList: ['biz.util.scan'],
-      });
-      dd.ready(() => {
-        window.clearTimeout(timer);
-        resolve(true);
-      });
-      dd.error(() => {
-        window.clearTimeout(timer);
-        resolve(false);
-      });
-    } catch {
-      window.clearTimeout(timer);
-      resolve(false);
-    }
-  });
-  if (!ready) return '';
-
-  return new Promise((resolve) => {
-    dd.biz.util.scan({
-      type: 'qrCode',
-      onSuccess: (data) => resolve(normalizeEncoded(data?.text || data?.resultStr || '')),
-      onFail: () => resolve(''),
-    });
-  });
 }
 
 async function createDetector() {

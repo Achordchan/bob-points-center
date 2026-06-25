@@ -270,6 +270,21 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   align-items: end;
 }
 
+.group-channel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 32px;
+}
+
+@media (max-width: 960px) {
+  .group-channel-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 .group-channel-advanced {
   margin-top: 10px;
   border-top: 1px solid rgba(15, 23, 42, .08);
@@ -281,4 +296,37 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
 
 .group-channel-advanced .ant-collapse-content-box {
   padding-inline: 0 !important;
+}
+
+.group-channel-check-list {
+  display: grid;
+  gap: 8px;
+}
+
+.group-channel-check-item {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto;
+  gap: 6px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, .08);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.group-channel-check-item b {
+  font-weight: 600;
+}
+
+.group-channel-check-item.is-ok b {
+  color: #389e0d;
+}
+
+.group-channel-check-item.is-fail b {
+  color: #cf1322;
+}
+
+.group-channel-check-item .ant-typography {
+  grid-column: 1 / -1;
+  margin: 0;
 }

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, App, Button, Card, Collapse, Divider, Form, Input, Modal, Select, Space, Switch, Tabs, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import { hasPermission } from '../permissions.js';
+import { initDingtalkJsapi, isDingtalkClient } from '../utils/dingtalkJsapi.js';
 
 const notifyTemplates = [
   { key: 'grant', label: '发币通知', vars: '{{name}} {{userid}} {{reason}} {{amount}} {{balance}}' },
@@ -30,15 +31,48 @@ const colorOptions = [
   { value: 'red', label: '红色' },
 ];
 
-const groupConversationPresets = [
-  { label: 'BOB大群', value: 'cidxEY0ywSnrjDytDeXzEscwg==' },
-  { label: '测试群', value: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
-  { label: '自定义群', value: '__custom__' },
+const defaultGroupConversationPresets = [
+  { name: 'BOB大群', openConversationId: 'cidxEY0ywSnrjDytDeXzEscwg==' },
+  { name: '测试群', openConversationId: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
 ];
 
-function matchConversationPreset(value) {
+function normalizeChannelPresets(value) {
+  const source = Array.isArray(value) && value.length ? value : defaultGroupConversationPresets;
+  const seen = new Set();
+  return source
+    .map((item) => {
+      const openConversationId = String(item?.openConversationId || '').trim();
+      if (!openConversationId || seen.has(openConversationId)) return null;
+      seen.add(openConversationId);
+      return {
+        name: String(item?.name || '未命名群聊').trim() || '未命名群聊',
+        openConversationId,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildConversationPresetOptions(presets) {
+  return [
+    ...normalizeChannelPresets(presets).map((item) => ({ label: item.name, value: item.openConversationId })),
+    { label: '自定义群', value: '__custom__' },
+  ];
+}
+
+function matchConversationPreset(value, presets) {
   const current = String(value || '').trim();
-  return groupConversationPresets.find((item) => item.value === current)?.value || '__custom__';
+  return buildConversationPresetOptions(presets).find((item) => item.value === current)?.value || '__custom__';
+}
+
+function extractDingtalkConversation(data) {
+  const raw = data && typeof data === 'object' ? data : {};
+  const nested = Array.isArray(raw.chats) ? raw.chats[0] : (raw.data && typeof raw.data === 'object' ? raw.data : null);
+  const source = nested && typeof nested === 'object' ? { ...raw, ...nested } : raw;
+  const openConversationId = String(
+    source.openConversationId || source.cid || source.conversationId || source.chatId || source.id || '',
+  ).trim();
+  const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
+  return { openConversationId, name };
 }
 
 const variableDescriptions = {
@@ -139,16 +173,23 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [selectingGroup, setSelectingGroup] = useState(false);
   const [channelEditing, setChannelEditing] = useState(false);
+  const [channelPresets, setChannelPresets] = useState(defaultGroupConversationPresets);
+  const [inDingtalk, setInDingtalk] = useState(false);
   const [activeField, setActiveField] = useState(null);
   const channelConversationId = Form.useWatch(['channel', 'openConversationId'], form);
-  const channelPreset = matchConversationPreset(channelConversationId);
+  const channelPresetOptions = useMemo(() => buildConversationPresetOptions(channelPresets), [channelPresets]);
+  const channelPreset = matchConversationPreset(channelConversationId, channelPresets);
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await api(loadPath);
-      form.setFieldsValue(data.data || {});
+      const nextData = data.data || {};
+      form.setFieldsValue(nextData);
+      if (withChannel) setChannelPresets(normalizeChannelPresets(nextData.channelPresets));
       setChannelEditing(false);
     } finally {
       setLoading(false);
@@ -156,9 +197,11 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   };
 
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
+  useEffect(() => { setInDingtalk(isDingtalkClient()); }, []);
 
   const save = async () => {
     const payload = await form.validateFields();
+    if (withChannel) payload.channelPresets = channelPresets;
     await api(savePath, { method: 'POST', body: payload });
     message.success(`${title}已保存`);
     setChannelEditing(false);
@@ -169,6 +212,98 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     await api(savePath, { method: 'POST', body: { reset: true } });
     message.success('已恢复默认');
     load();
+  };
+
+  const chooseDingtalkGroup = async () => {
+    if (!canEdit) return;
+    if (!isDingtalkClient()) {
+      message.info('请在钉钉客户端内打开后台后再选择群聊');
+      return;
+    }
+    setSelectingGroup(true);
+    try {
+      const { dd, cfg } = await initDingtalkJsapi(['biz.chat.chooseConversationByCorpId']);
+      if (!dd?.biz?.chat?.chooseConversationByCorpId) {
+        throw new Error('当前钉钉版本不支持选择群聊，请升级钉钉客户端');
+      }
+      const selected = await new Promise((resolve, reject) => {
+        dd.biz.chat.chooseConversationByCorpId({
+          corpId: cfg.corpId,
+          isConfirm: true,
+          onSuccess: resolve,
+          onFail: (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊')),
+        });
+      });
+      const conversation = extractDingtalkConversation(selected);
+      if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
+      let presetName = conversation.name;
+      const confirmed = await new Promise((resolve, reject) => {
+        Modal.confirm({
+          title: '保存群预设',
+          content: <Space direction="vertical" style={{ width: '100%' }}>
+            <Typography.Text type="secondary">已选择群聊，保存后会作为群预设使用。</Typography.Text>
+            <Input defaultValue={presetName} maxLength={40} onChange={(event) => { presetName = event.target.value; }} />
+          </Space>,
+          okText: '保存为预设',
+          cancelText: '取消',
+          onOk: () => {
+            if (!String(presetName || '').trim()) {
+              message.warning('请输入群预设名称');
+              return Promise.reject(new Error('missing name'));
+            }
+            resolve(true);
+            return true;
+          },
+          onCancel: () => reject(new Error('cancel')),
+        });
+      }).catch((err) => {
+        if (String(err?.message || '') === 'cancel') return false;
+        throw err;
+      });
+      if (!confirmed) return;
+      if (!String(presetName || '').trim()) return;
+      const data = await api('/admin/settings/group-card/preset', {
+        method: 'POST',
+        body: { name: presetName, openConversationId: conversation.openConversationId },
+      });
+      const nextPresets = normalizeChannelPresets(data?.data?.channelPresets);
+      setChannelPresets(nextPresets);
+      form.setFieldValue(['channel', 'openConversationId'], conversation.openConversationId);
+      setChannelEditing(false);
+      message.success('群聊已保存为预设');
+    } catch (err) {
+      if (String(err?.message || '') !== 'cancel') message.error(err.message || '选择群聊失败');
+    } finally {
+      setSelectingGroup(false);
+    }
+  };
+
+  const checkGroupCardConfig = async () => {
+    setChecking(true);
+    try {
+      const data = await api('/admin/settings/group-card/check');
+      const result = data.data || {};
+      const items = Array.isArray(result.items) ? result.items : [];
+      Modal.info({
+        title: result.ok ? '群卡配置可用' : '群卡配置需要补全',
+        width: 640,
+        okText: '知道了',
+        content: <Space direction="vertical" style={{ width: '100%' }}>
+          <Typography.Text type="secondary">{result.note || '检测不发送真实消息。'}</Typography.Text>
+          <div className="group-channel-check-list">
+            {items.map((item) => <div key={item.key} className={`group-channel-check-item ${item.ok ? 'is-ok' : 'is-fail'}`}>
+              <span>{item.label}</span>
+              <b>{item.ok ? '正常' : '缺失或不可用'}</b>
+              {item.message ? <Typography.Text type="secondary">{item.message}</Typography.Text> : null}
+            </div>)}
+          </div>
+        </Space>,
+      });
+    } catch (err) {
+      message.error(err.message || '检测失败');
+    } finally {
+      setChecking(false);
+    }
   };
   const insertVariable = (key) => {
     if (!activeField) {
@@ -207,10 +342,18 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
           showIcon
           className="group-channel-config-help"
           message="日常只需要选择群预设"
-          description="钉钉不会直接返回所有普通群的完整卡片投放配置；系统会优先使用已保存的群预设和默认卡片模板。复杂 ID 已收进高级配置，只有换群或换模板时才需要维护。"
+          description={inDingtalk
+            ? '当前在钉钉客户端内打开，可以直接选择群聊并保存为群预设。复杂 ID 已收进高级配置，只有换模板时才需要维护。'
+            : '普通浏览器保留群预设；在钉钉客户端内打开后台后，可以直接选择群聊并保存为群预设。'}
         />
         <div className="group-channel-config-grid group-channel-basic-grid">
-          <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={channelPreset} options={groupConversationPresets} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
+          <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={channelPreset} options={channelPresetOptions} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
+          <div className="group-channel-actions">
+            {inDingtalk
+              ? <Button type="primary" onClick={chooseDingtalkGroup} loading={selectingGroup} disabled={!canEdit}>从钉钉选择群聊</Button>
+              : <Typography.Text type="secondary">钉钉客户端内可选择群聊</Typography.Text>}
+            <Button onClick={checkGroupCardConfig} loading={checking}>检测配置</Button>
+          </div>
           <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
           <Form.Item label="指定接收人" name={['channel', 'recipients']} className="group-channel-span-2"><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={2} placeholder="不填时按默认接收人；多个 Userid 可用换行或逗号分隔" /></Form.Item>
         </div>
