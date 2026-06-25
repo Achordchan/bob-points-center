@@ -3478,12 +3478,19 @@
     const btnNotifyTplReset = document.getElementById('btnNotifyTplReset');
     if (btnNotifyTplReset) btnNotifyTplReset.disabled = false;
 
+    const btnDingtalkSave = document.getElementById('btnDingtalkSave');
+    if (btnDingtalkSave) btnDingtalkSave.disabled = false;
+    const btnDingtalkRefresh = document.getElementById('btnDingtalkRefresh');
+    if (btnDingtalkRefresh) btnDingtalkRefresh.disabled = false;
+
     const btnAttendanceRewardSave = document.getElementById('btnAttendanceRewardSave');
     if (btnAttendanceRewardSave) btnAttendanceRewardSave.disabled = false;
     const btnAttendanceRewardReset = document.getElementById('btnAttendanceRewardReset');
     if (btnAttendanceRewardReset) btnAttendanceRewardReset.disabled = false;
     const btnAttendanceStatusRefresh = document.getElementById('btnAttendanceStatusRefresh');
     if (btnAttendanceStatusRefresh) btnAttendanceStatusRefresh.disabled = false;
+    const btnAttendanceDepartmentsRefresh = document.getElementById('btnAttendanceDepartmentsRefresh');
+    if (btnAttendanceDepartmentsRefresh) btnAttendanceDepartmentsRefresh.disabled = false;
 
     const btnExportSettings = document.getElementById('btnExportSettings');
     if (btnExportSettings) btnExportSettings.disabled = false;
@@ -3719,6 +3726,30 @@
     if (btnGroupCardTplTest) {
       btnGroupCardTplTest.addEventListener('click', async () => {
         await sendGroupCardTemplateTest();
+      });
+    }
+
+    const btnDingtalkSave = document.getElementById('btnDingtalkSave');
+    if (btnDingtalkSave) {
+      btnDingtalkSave.addEventListener('click', async () => {
+        await saveDingtalkConnection();
+      });
+    }
+    const btnDingtalkRefresh = document.getElementById('btnDingtalkRefresh');
+    if (btnDingtalkRefresh) {
+      btnDingtalkRefresh.addEventListener('click', async () => {
+        await loadDingtalkConnection();
+        await loadAttendanceDepartments(getSelectedAttendanceDepartmentIds());
+      });
+    }
+    const attendanceDepartmentAll = document.getElementById('attendanceDepartmentAll');
+    if (attendanceDepartmentAll) attendanceDepartmentAll.addEventListener('change', () => setAttendanceDepartmentMode('all'));
+    const attendanceDepartmentSelected = document.getElementById('attendanceDepartmentSelected');
+    if (attendanceDepartmentSelected) attendanceDepartmentSelected.addEventListener('change', () => setAttendanceDepartmentMode('selected'));
+    const btnAttendanceDepartmentsRefresh = document.getElementById('btnAttendanceDepartmentsRefresh');
+    if (btnAttendanceDepartmentsRefresh) {
+      btnAttendanceDepartmentsRefresh.addEventListener('click', async () => {
+        await loadAttendanceDepartments(getSelectedAttendanceDepartmentIds());
       });
     }
 
@@ -5422,6 +5453,78 @@
     document.getElementById('btnStopScan').disabled = true;
   }
 
+  // ─── 钉钉连接设置 ─────────────────────────────────────────────────────────
+
+  function setDingtalkConnectionToast(text, isError) {
+    setSimpleText('dingtalkConnectionToast', text, Boolean(isError));
+    if (text) showGlobalToast(String(text), isError ? 'error' : 'success');
+  }
+
+  function setDingtalkConnectionErr(text) {
+    setSimpleText('dingtalkConnectionErr', text, true);
+    if (text) showGlobalToast(String(text), 'error');
+  }
+
+  function fillDingtalkConnection(data, connected, error) {
+    const d = data && typeof data === 'object' ? data : {};
+    setInputValue('dingtalkOrganizationName', d.organizationName || '');
+    setInputValue('dingtalkCorpId', d.corpId || '');
+    setInputValue('dingtalkAppKey', d.appKey || '');
+    setInputValue('dingtalkAppSecret', '');
+    setInputValue('dingtalkAgentId', d.agentId || '');
+    setSimpleText('dingtalkConnectionStatus', connected ? '已连接' : '未连接', !connected);
+    const org = d.organizationName || d.corpId || '-';
+    const secretText = d.appSecretConfigured ? `已配置密钥（${d.appSecretMasked || '已隐藏'}）` : '未配置密钥';
+    setSimpleText('dingtalkConnectionHint', connected ? `当前组织：${org}；${secretText}` : `当前组织：${org}；${error || '连接校验失败'}`, !connected);
+    setSimpleText('dingtalkSecretHint', secretText + '；留空保存时沿用当前密钥。', false);
+  }
+
+  async function loadDingtalkConnection() {
+    setDingtalkConnectionErr('');
+    setDingtalkConnectionToast('', false);
+    const r = await fetchJson('/admin/settings/dingtalk');
+    if (!r?.data?.ok) {
+      setDingtalkConnectionErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '加载失败'));
+      return;
+    }
+    fillDingtalkConnection(r.data?.data || {}, r.data?.connected === true, r.data?.error || '');
+  }
+
+  async function saveDingtalkConnection() {
+    setDingtalkConnectionErr('');
+    setDingtalkConnectionToast('', false);
+    const btnSave = document.getElementById('btnDingtalkSave');
+    const btnRefresh = document.getElementById('btnDingtalkRefresh');
+    const prevSave = btnSave ? btnSave.disabled : false;
+    const prevRefresh = btnRefresh ? btnRefresh.disabled : false;
+    if (btnSave) btnSave.disabled = true;
+    if (btnRefresh) btnRefresh.disabled = true;
+    try {
+      const payload = {
+        organizationName: getInputValue('dingtalkOrganizationName').trim(),
+        corpId: getInputValue('dingtalkCorpId').trim(),
+        appKey: getInputValue('dingtalkAppKey').trim(),
+        appSecret: getInputValue('dingtalkAppSecret').trim(),
+        agentId: getInputValue('dingtalkAgentId').trim(),
+      };
+      const r = await fetchJson('/admin/settings/dingtalk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r?.data?.ok) {
+        setDingtalkConnectionErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '保存失败'));
+        return;
+      }
+      await loadDingtalkConnection();
+      await loadAttendanceDepartments(getSelectedAttendanceDepartmentIds());
+      setDingtalkConnectionToast('已保存钉钉连接', false);
+    } finally {
+      if (btnSave) btnSave.disabled = prevSave;
+      if (btnRefresh) btnRefresh.disabled = prevRefresh;
+    }
+  }
+
   // ─── 打卡奖励设置 ─────────────────────────────────────────────────────────
 
   function setAttendanceRewardToast(text, isError) {
@@ -5437,6 +5540,43 @@
     const el = document.getElementById('attendanceRewardErr');
     if (el) el.textContent = String(text || '');
     if (text) showGlobalToast(String(text), 'error');
+  }
+
+  function getSelectedAttendanceDepartmentIds() {
+    const select = document.getElementById('attendanceDepartmentIds');
+    if (!select) return [];
+    return Array.from(select.selectedOptions || []).map((opt) => String(opt.value || '').trim()).filter(Boolean);
+  }
+
+  function setAttendanceDepartmentMode(mode) {
+    const selectedMode = mode === 'selected' ? 'selected' : 'all';
+    const all = document.getElementById('attendanceDepartmentAll');
+    const selected = document.getElementById('attendanceDepartmentSelected');
+    const select = document.getElementById('attendanceDepartmentIds');
+    if (all) all.checked = selectedMode === 'all';
+    if (selected) selected.checked = selectedMode === 'selected';
+    if (select) select.disabled = selectedMode !== 'selected';
+  }
+
+  async function loadAttendanceDepartments(selectedIds = []) {
+    const select = document.getElementById('attendanceDepartmentIds');
+    if (!select) return;
+    const selected = new Set((Array.isArray(selectedIds) ? selectedIds : []).map((id) => String(id)));
+    select.innerHTML = '<option value="">正在加载部门…</option>';
+    const r = await fetchJson('/admin/settings/dingtalk/departments');
+    if (!r?.data?.ok) {
+      select.innerHTML = '';
+      setAttendanceRewardErr(`部门加载失败：${r?.data?.error || r?.status || 'error'}`);
+      return;
+    }
+    const rows = Array.isArray(r.data?.data) ? r.data.data : [];
+    select.innerHTML = rows.map((row) => {
+      const id = row?.dept_id ? String(row.dept_id) : '';
+      const depth = Math.max(0, Number(row?.depth || 0));
+      const prefix = '　'.repeat(depth);
+      const label = `${prefix}${row?.name ? String(row.name) : id}`;
+      return `<option value="${safeText(id)}" ${selected.has(id) ? 'selected' : ''}>${safeText(label)}</option>`;
+    }).join('');
   }
 
   function fillAttendanceRewardSettings(data) {
@@ -5457,6 +5597,7 @@
     if (perDayEl) perDayEl.value = d.maxPerDay ?? 1;
     const onlyEl = document.getElementById('attendanceOnlyCheckin');
     if (onlyEl) onlyEl.checked = d.onlyCheckin !== false;
+    setAttendanceDepartmentMode(d.departmentMode || 'all');
     const reasonEl = document.getElementById('attendanceReason');
     if (reasonEl) reasonEl.value = d.reason || '打卡奖励';
   }
@@ -5469,7 +5610,9 @@
       setAttendanceRewardErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '加载失败'));
       return;
     }
-    fillAttendanceRewardSettings(r.data?.data || {});
+    const data = r.data?.data || {};
+    fillAttendanceRewardSettings(data);
+    await loadAttendanceDepartments(Array.isArray(data.departmentIds) ? data.departmentIds : []);
   }
 
   async function saveAttendanceRewardSettings({ reset = false } = {}) {
@@ -5493,6 +5636,8 @@
             rewardMax: Number(document.getElementById('attendanceRewardMax')?.value) || 5,
             maxPerDay: Number(document.getElementById('attendanceMaxPerDay')?.value) || 1,
             onlyCheckin: document.getElementById('attendanceOnlyCheckin')?.checked !== false,
+            departmentMode: document.getElementById('attendanceDepartmentSelected')?.checked === true ? 'selected' : 'all',
+            departmentIds: getSelectedAttendanceDepartmentIds(),
             reason: document.getElementById('attendanceReason')?.value?.trim() || '打卡奖励',
           };
       const r = await fetchJson('/admin/settings/attendance-reward', {
@@ -5504,7 +5649,9 @@
         setAttendanceRewardErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '保存失败'));
         return;
       }
-      fillAttendanceRewardSettings(r.data?.data || {});
+      const data = r.data?.data || {};
+    fillAttendanceRewardSettings(data);
+    await loadAttendanceDepartments(Array.isArray(data.departmentIds) ? data.departmentIds : []);
       setAttendanceRewardToast(reset ? '已恢复默认' : '已保存', false);
     } finally {
       if (btnSave) btnSave.disabled = prevSave;
@@ -5530,6 +5677,7 @@
     await refreshTokenList();
     await loadNotifySettings();
     await loadGroupCardSettings();
+    await loadDingtalkConnection();
     await loadAttendanceRewardSettings();
     await loadAttendanceStatusList();
     updateCdkBatchOutput([], '');

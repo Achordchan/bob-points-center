@@ -455,6 +455,53 @@
       </section>
 
       <section id="panelSettings" class="hidden">
+        <details class="card" id="dingtalkConnectionDetails" open>
+          <summary>钉钉连接</summary>
+          <div class="help">用于同步通讯录部门和接收打卡事件。连接状态只做接口校验，不发送任何消息。</div>
+          <div style="height:10px"></div>
+          <div class="kv">
+            <label>连接状态</label>
+            <div style="flex:1;">
+              <div id="dingtalkConnectionStatus" style="font-weight:700;">-</div>
+              <div class="help" id="dingtalkConnectionHint" style="margin-top:4px;">正在读取钉钉配置。</div>
+            </div>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkOrganizationName">组织名称</label>
+            <input id="dingtalkOrganizationName" placeholder="例如：徐州巴布工程机械有限公司" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkCorpId">CorpId</label>
+            <input id="dingtalkCorpId" placeholder="钉钉企业 CorpId" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAppKey">AppKey</label>
+            <input id="dingtalkAppKey" placeholder="钉钉应用 AppKey" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAppSecret">AppSecret</label>
+            <div style="flex:1;">
+              <input id="dingtalkAppSecret" type="password" placeholder="留空表示不修改现有密钥" />
+              <div class="help" id="dingtalkSecretHint" style="margin-top:4px;">密钥不会明文回显；留空保存时沿用当前密钥。</div>
+            </div>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAgentId">AgentId</label>
+            <input id="dingtalkAgentId" placeholder="钉钉应用 AgentId" />
+          </div>
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+            <button class="secondary" id="btnDingtalkRefresh" type="button" disabled>刷新状态</button>
+            <button id="btnDingtalkSave" type="button" disabled>保存钉钉连接</button>
+          </div>
+          <div class="toast" id="dingtalkConnectionToast"></div>
+          <div class="error" id="dingtalkConnectionErr"></div>
+        </details>
+
         <details class="card" id="attendanceRewardDetails">
           <summary>钉钉打卡奖励</summary>
           <div class="help">员工准时打卡时自动随机发放 BOB 币奖励，通过 Stream 事件实时触发。需在钉钉开放平台订阅「员工打卡」事件。</div>
@@ -526,6 +573,27 @@
               <input type="checkbox" id="attendanceOnlyCheckin" />
               仅上班打卡触发（忽略下班打卡）
             </label>
+          </div>
+
+          <div style="height:8px"></div>
+
+          <div class="kv">
+            <label>适用部门</label>
+            <div style="flex:1;">
+              <div class="row" style="gap:16px; align-items:center;">
+                <label class="muted publish-row">
+                  <input type="radio" name="attendanceDepartmentMode" id="attendanceDepartmentAll" value="all" />
+                  全部部门
+                </label>
+                <label class="muted publish-row">
+                  <input type="radio" name="attendanceDepartmentMode" id="attendanceDepartmentSelected" value="selected" />
+                  指定部门
+                </label>
+                <button class="secondary" id="btnAttendanceDepartmentsRefresh" type="button" disabled>刷新部门</button>
+              </div>
+              <select id="attendanceDepartmentIds" multiple size="6" style="width:100%; margin-top:8px;"></select>
+              <div class="help" style="margin-top:4px;">选择“指定部门”后，只有所选部门员工的上班打卡会发放奖励；未命中的员工会记录为已跳过，不发送通知。</div>
+            </div>
           </div>
 
           <div style="height:8px"></div>

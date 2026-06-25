@@ -167,12 +167,25 @@ function isOnDutyEligible(normalized, settings) {
   return { ok: true, skipReason: '' };
 }
 
+export function isAttendanceDepartmentAllowed(userProfile, settings) {
+  const mode = String(settings?.departmentMode || 'all');
+  if (mode !== 'selected') return { ok: true, skipReason: '' };
+  const allow = new Set((Array.isArray(settings?.departmentIds) ? settings.departmentIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean));
+  if (allow.size === 0) return { ok: false, skipReason: 'department_not_allowed' };
+  const userDeptIds = Array.isArray(userProfile?.deptIds) ? userProfile.deptIds.map((id) => String(id || '').trim()) : [];
+  const matched = userDeptIds.some((id) => allow.has(id));
+  return matched ? { ok: true, skipReason: '' } : { ok: false, skipReason: 'department_not_allowed' };
+}
+
 function humanizeSkipMessage(skipReason, normalized) {
   const timeSuffix = normalized.check_time_text ? `（${normalized.check_time_text}）` : '';
   if (skipReason === 'skipped_off_duty') return `下班打卡，按设置忽略奖励${timeSuffix}`;
   if (skipReason === 'not_signed') return `未打卡，跳过奖励${timeSuffix}`;
   if (skipReason === 'skipped_late') return `打卡晚于 08:30（含宽限），跳过奖励${timeSuffix}`;
   if (skipReason === 'max_per_day') return `今日已奖励 1 次，跳过${timeSuffix}`;
+  if (skipReason === 'department_not_allowed') return `不在打卡奖励适用部门内，跳过奖励${timeSuffix}`;
   if (skipReason === 'missing_check_time') return '缺少打卡时间，跳过奖励';
   return `未满足奖励条件，跳过${timeSuffix}`;
 }
@@ -238,12 +251,12 @@ async function writeAttendanceAudit(db, { eventType, userid, actorName, message,
   });
 }
 
-async function resolveAttendanceDisplayName(db, cfg, userid) {
+async function resolveAttendanceUserProfile(db, cfg, userid) {
   const localName = await getUserName(db, userid);
-  if (localName && localName !== userid) return localName;
+  const fallback = { name: localName || '', deptIds: [] };
 
   if (!cfg?.dingtalk?.appKey || !cfg?.dingtalk?.appSecret) {
-    return localName || '';
+    return fallback;
   }
 
   try {
@@ -251,20 +264,29 @@ async function resolveAttendanceDisplayName(db, cfg, userid) {
     const profileName = profile?.name ? String(profile.name).trim() : '';
     if (profileName && profileName !== userid) {
       await ensureAccount(db, { userid, name: profileName });
-      return profileName;
     }
+    return {
+      name: profileName || localName || '',
+      deptIds: Array.isArray(profile?.deptIds) ? profile.deptIds.map((id) => String(id)).filter(Boolean) : [],
+    };
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn('[AttendanceReward] resolve user name failed for ' + userid + ':', err?.message || err);
+    console.warn('[AttendanceReward] resolve user profile failed for ' + userid + ':', err?.message || err);
   }
 
-  return localName || '';
+  return fallback;
+}
+
+async function resolveAttendanceDisplayName(db, cfg, userid) {
+  const profile = await resolveAttendanceUserProfile(db, cfg, userid);
+  return profile.name || '';
 }
 
 async function handleAttendanceRecord(db, cfg, settings, record, { eventSource = 'stream', notifyOnReward = false } = {}) {
   const userid = record?.userId ? String(record.userId).trim() : '';
   if (!userid) return { ok: false, skipped: true, reason: 'missing_userid' };
-  const displayName = await resolveAttendanceDisplayName(db, cfg, userid);
+  const userProfile = await resolveAttendanceUserProfile(db, cfg, userid);
+  const displayName = userProfile.name || '';
   const normalized = normalizeAttendanceRecord(record, displayName || userid);
   if (!normalized.user_name_snapshot) normalized.user_name_snapshot = displayName || userid;
 
@@ -280,6 +302,33 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
         rewardReason: existing.reward_reason,
         amount: existing.reward_amount,
       };
+    }
+
+    const deptEligibility = isAttendanceDepartmentAllowed(userProfile, settings);
+    if (!deptEligibility.ok) {
+      await finalizeAttendanceRecord(tx, existing.id, {
+        status: 'skipped',
+        skip_reason: deptEligibility.skipReason,
+        event_source: eventSource,
+      });
+      const message = humanizeSkipMessage(deptEligibility.skipReason, normalized);
+      await writeAttendanceAudit(tx, {
+        eventType: 'attendance_skip',
+        userid,
+        actorName: normalized.user_name_snapshot,
+        message,
+        payload: {
+          reason: deptEligibility.skipReason,
+          userid,
+          name: normalized.user_name_snapshot,
+          checkTimeMs: normalized.check_time_ms,
+          checkTimeText: normalized.check_time_text,
+          userDeptIds: userProfile.deptIds,
+          allowedDepartmentIds: settings.departmentIds,
+          eventSource,
+        },
+      });
+      return { ok: true, skipped: true, reason: deptEligibility.skipReason };
     }
 
     const isTestMode = settings.testMode === true;

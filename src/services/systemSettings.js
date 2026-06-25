@@ -264,6 +264,84 @@ export async function saveGroupCardSettings(db, input) {
   return normalized;
 }
 
+// ─── 钉钉连接设置 ────────────────────────────────────────────────────────────
+
+function maskSecret(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  if (!text) return '';
+  return text.length <= 8 ? '********' : `${text.slice(0, 4)}****${text.slice(-4)}`;
+}
+
+function cleanDingtalkText(value) {
+  return value === null || value === undefined ? '' : String(value).trim();
+}
+
+export function normalizeDingtalkConnectionSettings(input = {}, fallback = {}) {
+  const src = input && typeof input === 'object' ? input : {};
+  return {
+    organizationName: cleanDingtalkText(src.organizationName ?? fallback.organizationName),
+    corpId: cleanDingtalkText(src.corpId ?? fallback.corpId),
+    appKey: cleanDingtalkText(src.appKey ?? fallback.appKey),
+    appSecret: cleanDingtalkText(src.appSecret ?? fallback.appSecret),
+    agentId: cleanDingtalkText(src.agentId ?? fallback.agentId),
+  };
+}
+
+export function toPublicDingtalkConnectionSettings(settings = {}) {
+  return {
+    organizationName: cleanDingtalkText(settings.organizationName),
+    corpId: cleanDingtalkText(settings.corpId),
+    appKey: cleanDingtalkText(settings.appKey),
+    appSecretConfigured: Boolean(cleanDingtalkText(settings.appSecret)),
+    appSecretMasked: maskSecret(settings.appSecret),
+    agentId: cleanDingtalkText(settings.agentId),
+  };
+}
+
+export function applyDingtalkConnectionSettings(cfg, settings = {}) {
+  if (!cfg) return cfg;
+  cfg.dingtalk = {
+    ...(cfg.dingtalk || {}),
+    corpId: cleanDingtalkText(settings.corpId),
+    appKey: cleanDingtalkText(settings.appKey),
+    appSecret: cleanDingtalkText(settings.appSecret),
+    agentId: cleanDingtalkText(settings.agentId),
+    organizationName: cleanDingtalkText(settings.organizationName),
+  };
+  return cfg;
+}
+
+export async function getDingtalkConnectionSettings(db, cfg = {}) {
+  const envFallback = normalizeDingtalkConnectionSettings(cfg?.dingtalk || {});
+  if (!db) return envFallback;
+  const row = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', ['dingtalk_connection_settings']);
+  if (!row?.value) return envFallback;
+  try {
+    const parsed = JSON.parse(String(row.value));
+    return normalizeDingtalkConnectionSettings(parsed, envFallback);
+  } catch {
+    return envFallback;
+  }
+}
+
+export async function saveDingtalkConnectionSettings(db, input = {}, cfg = {}) {
+  const current = await getDingtalkConnectionSettings(db, cfg);
+  const src = input && typeof input === 'object' ? input : {};
+  const nextInput = {
+    organizationName: src.organizationName,
+    corpId: src.corpId,
+    appKey: src.appKey,
+    appSecret: cleanDingtalkText(src.appSecret) ? src.appSecret : current.appSecret,
+    agentId: src.agentId,
+  };
+  const normalized = normalizeDingtalkConnectionSettings(nextInput, current);
+  await db.exec(
+    'INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()',
+    ['dingtalk_connection_settings', JSON.stringify(normalized)],
+  );
+  return normalized;
+}
+
 // ─── 打卡奖励设置 ────────────────────────────────────────────────────────────
 
 const DEFAULT_ATTENDANCE_REWARD_SETTINGS = {
@@ -277,6 +355,18 @@ const DEFAULT_ATTENDANCE_REWARD_SETTINGS = {
   onlyCheckin: true,
   reason: '打卡奖励',
 };
+
+function normalizeDepartmentMode(value) {
+  const mode = value === null || value === undefined ? '' : String(value).trim();
+  return mode === 'selected' ? 'selected' : 'all';
+}
+
+function normalizeDepartmentIds(value) {
+  const raw = Array.isArray(value) ? value : [];
+  return Array.from(new Set(raw
+    .map((id) => (id === null || id === undefined ? '' : String(id).trim()))
+    .filter((id) => /^\d+$/.test(id))));
+}
 
 function toPositiveIntSetting(value, fallback) {
   const n = Number(value);
@@ -298,6 +388,8 @@ export function normalizeAttendanceRewardSettings(input) {
     rewardMax: toPositiveIntSetting(src.rewardMax, def.rewardMax),
     maxPerDay: toPositiveIntSetting(src.maxPerDay, def.maxPerDay),
     onlyCheckin: toBool(src.onlyCheckin, def.onlyCheckin),
+    departmentMode: normalizeDepartmentMode(src.departmentMode),
+    departmentIds: normalizeDepartmentIds(src.departmentIds),
     reason: src.reason && String(src.reason).trim() ? String(src.reason).trim() : def.reason,
   };
 }

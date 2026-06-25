@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   buildJsapiConfig,
+  getAccessToken,
   getUserIdByAuthCode,
   getUserProfile,
   listSubDepartments,
@@ -39,10 +40,14 @@ import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcil
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 import { invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import {
+  applyDingtalkConnectionSettings,
   getAttendanceRewardSettings,
+  getDingtalkConnectionSettings,
   getGroupCardSettings,
   getNotifySettings,
   saveAttendanceRewardSettings,
+  saveDingtalkConnectionSettings,
+  toPublicDingtalkConnectionSettings,
   saveGroupCardSettings,
   saveNotifySettings,
 } from '../services/systemSettings.js';
@@ -408,6 +413,31 @@ async function collectAllDeptIds(cfg) {
       if (!Number.isFinite(subId)) continue;
       if (seen.has(subId)) continue;
       queue.push(subId);
+    }
+  }
+  return out;
+}
+
+async function listDingtalkDepartmentsTree(cfg) {
+  const seen = new Set();
+  const queue = [{ deptId: 1, depth: 0 }];
+  const out = [];
+  while (queue.length) {
+    const item = queue.shift();
+    const deptId = Number(item.deptId);
+    if (!Number.isFinite(deptId) || seen.has(deptId)) continue;
+    seen.add(deptId);
+    const subs = await listSubDepartments(cfg, { deptId });
+    for (const dept of subs) {
+      const id = Number(dept?.dept_id);
+      if (!Number.isFinite(id)) continue;
+      out.push({
+        dept_id: String(id),
+        name: dept?.name ? String(dept.name) : String(id),
+        parent_id: String(deptId),
+        depth: Number(item.depth || 0),
+      });
+      queue.push({ deptId: id, depth: Number(item.depth || 0) + 1 });
     }
   }
   return out;
@@ -2072,6 +2102,55 @@ export function adminRouter() {
         vars,
       });
       return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/settings/dingtalk', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const settings = await getDingtalkConnectionSettings(db, cfg);
+      applyDingtalkConnectionSettings(cfg, settings);
+      let connected = false;
+      let error = '';
+      try {
+        await getAccessToken(cfg);
+        connected = true;
+      } catch (err) {
+        error = String(err?.message || err);
+      }
+      return res.json({ ok: true, connected, error, data: toPublicDingtalkConnectionSettings(settings) });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/settings/dingtalk', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const settings = await saveDingtalkConnectionSettings(db, req.body || {}, cfg);
+      applyDingtalkConnectionSettings(cfg, settings);
+      return res.json({ ok: true, data: toPublicDingtalkConnectionSettings(settings) });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/settings/dingtalk/departments', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const settings = await getDingtalkConnectionSettings(db, cfg);
+      applyDingtalkConnectionSettings(cfg, settings);
+      await getAccessToken(cfg);
+      const data = await listDingtalkDepartmentsTree(cfg);
+      return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

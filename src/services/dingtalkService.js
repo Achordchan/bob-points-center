@@ -63,15 +63,22 @@ function assertDingtalkOk(data, context) {
   }
 }
 
-function getCacheValue(cache) {
+function getDingtalkCacheKey(cfg) {
+  const appKey = cfg?.dingtalk?.appKey ? String(cfg.dingtalk.appKey) : '';
+  const appSecret = cfg?.dingtalk?.appSecret ? String(cfg.dingtalk.appSecret) : '';
+  return `${appKey}:${appSecret}`;
+}
+
+function getCacheValue(cache, key = '') {
   if (!cache) return null;
+  if (key && cache.key !== key) return null;
   if (Date.now() >= cache.expiresAt) return null;
   return cache.value;
 }
 
-function setCache(cacheType, value, expiresInSeconds) {
+function setCache(cacheType, value, expiresInSeconds, key = '') {
   const expiresAt = Date.now() + Math.max(0, Number(expiresInSeconds || 0) - 60) * 1000;
-  const entry = { value, expiresAt };
+  const entry = { value, expiresAt, key };
   if (cacheType === 'access_token') {
     accessTokenCache = entry;
   } else if (cacheType === 'jsapi_ticket') {
@@ -82,7 +89,8 @@ function setCache(cacheType, value, expiresInSeconds) {
 }
 
 export async function getAccessToken(cfg) {
-  const cached = getCacheValue(accessTokenCache);
+  const cacheKey = getDingtalkCacheKey(cfg);
+  const cached = getCacheValue(accessTokenCache, cacheKey);
   if (cached) return cached;
 
   const appKey = cfg?.dingtalk?.appKey;
@@ -96,12 +104,13 @@ export async function getAccessToken(cfg) {
 
   assertDingtalkOk(data, 'gettoken');
 
-  setCache('access_token', data.access_token, data.expires_in);
+  setCache('access_token', data.access_token, data.expires_in, cacheKey);
   return data.access_token;
 }
 
 export async function getV1AccessToken(cfg) {
-  const cached = getCacheValue(v1AccessTokenCache);
+  const cacheKey = getDingtalkCacheKey(cfg);
+  const cached = getCacheValue(v1AccessTokenCache, cacheKey);
   if (cached) return cached;
 
   const appKey = cfg?.dingtalk?.appKey;
@@ -119,7 +128,7 @@ export async function getV1AccessToken(cfg) {
     throw new Error('dingtalk v1 accessToken missing');
   }
 
-  setCache('v1_access_token', token, expireIn);
+  setCache('v1_access_token', token, expireIn, cacheKey);
   return token;
 }
 
@@ -165,7 +174,8 @@ export async function notableListRecords(cfg, {
 }
 
 export async function getJsapiTicket(cfg) {
-  const cached = getCacheValue(jsapiTicketCache);
+  const cacheKey = getDingtalkCacheKey(cfg);
+  const cached = getCacheValue(jsapiTicketCache, cacheKey);
   if (cached) return cached;
 
   const token = await getAccessToken(cfg);
@@ -174,7 +184,7 @@ export async function getJsapiTicket(cfg) {
 
   assertDingtalkOk(data, 'get_jsapi_ticket');
 
-  setCache('jsapi_ticket', data.ticket, data.expires_in);
+  setCache('jsapi_ticket', data.ticket, data.expires_in, cacheKey);
   return data.ticket;
 }
 
@@ -242,12 +252,18 @@ export async function getUserProfile(cfg, userid) {
 
   assertDingtalkOk(data, 'user.get');
 
-  const name = data?.result?.name;
-  const avatar = data?.result?.avatar;
+  const result = data?.result || {};
+  const name = result?.name;
+  const avatar = result?.avatar;
+  const deptIds = Array.isArray(result?.dept_id_list)
+    ? result.dept_id_list.map((id) => String(id)).filter(Boolean)
+    : [];
   return {
     userid: String(userid),
     name: name ? String(name) : '',
     avatar: avatar ? String(avatar) : '',
+    title: result?.title ? String(result.title) : '',
+    deptIds,
   };
 }
 
