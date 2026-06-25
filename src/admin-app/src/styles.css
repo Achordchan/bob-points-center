@@ -241,3 +241,10 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
     justify-content: stretch;
   }
 }
+
+.resource-type-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}

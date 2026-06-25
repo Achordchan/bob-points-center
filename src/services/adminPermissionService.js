@@ -169,6 +169,7 @@ function matchPathPermission(method, path) {
     return 'content:edit';
   }
   if (p.startsWith('/image-optimization/upload')) return ['integrations:edit', 'commerce:edit', 'activities:edit', 'content:edit'];
+  if (p.startsWith('/resources')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
   if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export';

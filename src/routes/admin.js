@@ -74,6 +74,10 @@ import {
   runImageOptimizationBatch,
   saveImageOptimizationSettings,
 } from '../services/imageOptimizationService.js';
+import {
+  saveIgnoredResourcePaths,
+  scanResources,
+} from '../services/resourceAuditService.js';
 
 function getPackageMeta() {
   try {
@@ -2989,6 +2993,32 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const data = await runImageOptimizationBatch(db, { mode: req.body?.mode || 'pending' });
       return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  const scanResourcesResponse = async (req, res, onlyUnused = false) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await scanResources(db);
+      return res.json({ ok: true, data: onlyUnused ? { scannedAt: data.scannedAt, summary: data.summary, unused: data.unused, ignored: data.ignored } : data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  };
+
+  router.get('/resources/overview', requireAdminSession(), (req, res) => scanResourcesResponse(req, res));
+  router.get('/resources/scan', requireAdminSession(), (req, res) => scanResourcesResponse(req, res));
+  router.get('/resources/unused', requireAdminSession(), (req, res) => scanResourcesResponse(req, res, true));
+
+  router.post('/resources/ignore', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const paths = await saveIgnoredResourcePaths(db, req.body?.paths || []);
+      return res.json({ ok: true, data: { paths } });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

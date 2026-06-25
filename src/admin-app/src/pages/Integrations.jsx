@@ -3,6 +3,7 @@ import { App, Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Selec
 import { api } from '../api.js';
 import { formatTs } from '../utils.js';
 import { hasPermission } from '../permissions.js';
+import ResourceManager from '../components/ResourceManager.jsx';
 
 function Tokens({ canEdit }) {
   const { message } = App.useApp(); const [rows, setRows] = useState([]);
@@ -354,5 +355,10 @@ export default function Integrations({ me }) {
   const canEdit = hasPermission(me, 'integrations:edit');
   const canExport = hasPermission(me, 'integrations:export');
   const canImport = me?.isSuperAdmin === true;
-  return <Tabs items={[{ key: 'token', label: 'BOB Token', children: <Tokens canEdit={canEdit} /> }, { key: 'backup', label: '备份', children: <Backup canExport={canExport} canImport={canImport} /> }, { key: 'images', label: '图片优化', children: <ImageOptimization canEdit={canEdit} /> }]} />;
+  return <Tabs items={[
+    { key: 'token', label: 'BOB Token', children: <Tokens canEdit={canEdit} /> },
+    { key: 'backup', label: '备份', children: <Backup canExport={canExport} canImport={canImport} /> },
+    { key: 'images', label: '图片优化', children: <ImageOptimization canEdit={canEdit} /> },
+    { key: 'resources', label: '资源管理', children: <ResourceManager canEdit={canEdit} /> },
+  ]} />;
 }
