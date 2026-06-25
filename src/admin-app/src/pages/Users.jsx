@@ -9,6 +9,7 @@ export default function Users() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
   const [keyword, setKeyword] = useState('');
   const [selected, setSelected] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -20,13 +21,14 @@ export default function Users() {
 
   const normalizeKeyword = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
-  const load = async (nextPage = page, nextKeyword = keyword) => {
+  const load = async (nextPage = page, nextKeyword = keyword, nextPageSize = pageSize) => {
     setLoading(true);
     try {
-      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: 30, keyword: normalizeKeyword(nextKeyword) })}`);
+      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: nextPageSize, keyword: normalizeKeyword(nextKeyword) })}`);
       setRows(data.data || []);
       setTotal(data.total || 0);
       setPage(data.page || nextPage);
+      setPageSize(data.pageSize || nextPageSize);
     } finally {
       setLoading(false);
     }
@@ -106,7 +108,18 @@ export default function Users() {
         columns={columns}
         dataSource={rows}
         rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
-        pagination={{ current: page, pageSize: 30, total, onChange: load, showTotal: (n) => `共 ${n} 人` }}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          pageSizeOptions: [10, 20, 30, 50, 100],
+          onChange: (nextPage, nextPageSize) => {
+            const sizeChanged = nextPageSize !== pageSize;
+            load(sizeChanged ? 1 : nextPage, keyword, nextPageSize);
+          },
+          showTotal: (n) => `共 ${n} 人`,
+        }}
         scroll={{ x: 980 }}
       />
       <Drawer title="用户账户详情" open={Boolean(detail)} onClose={() => setDetail(null)} width={860}>
