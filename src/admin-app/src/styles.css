@@ -53,14 +53,19 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   .redeem-scanner-actions .ant-space-item:nth-child(1) .ant-btn, .redeem-scanner-actions .ant-space-item:nth-child(2) .ant-btn { width: 100%; height: 48px; }
 }
 
-.product-image-editor { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; align-items: stretch; }
-.product-image-preview { min-height: 180px; border: 1px solid rgba(15, 23, 42, .10); border-radius: 12px; background: #f8fafc; overflow: hidden; display: grid; place-items: center; }
-.product-image-preview .ant-image { width: 100%; height: 100%; }
-.product-image-preview-img { width: 100% !important; height: 180px !important; object-fit: cover; display: block; }
+.product-image-editor { display: grid; grid-template-columns: 160px minmax(220px, 300px); gap: 12px; align-items: start; max-width: 480px; }
+.product-image-preview { width: 160px; height: 160px; border: 1px solid rgba(15, 23, 42, .10); border-radius: 12px; background: #f8fafc; overflow: hidden; display: grid; place-items: center; }
+.product-image-preview .ant-image { width: 160px; height: 160px; }
+.product-image-preview-img { width: 160px !important; height: 160px !important; object-fit: cover; display: block; }
 .product-image-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: rgba(15, 23, 42, .42); }
 .product-image-empty .anticon { font-size: 28px; }
-.product-image-controls { width: 100%; justify-content: center; }
-.product-image-dropzone .ant-upload-drag { min-height: 136px; display: flex; align-items: center; justify-content: center; }
+.product-image-controls { width: 100%; }
+.product-image-dropzone .ant-upload-drag { height: 112px; min-height: 112px; display: flex; align-items: center; justify-content: center; }
+.product-image-dropzone .ant-upload-drag-icon { margin-bottom: 6px !important; }
+.product-image-dropzone .ant-upload-text { margin-bottom: 2px !important; font-size: 14px !important; }
+.product-image-dropzone .ant-upload-hint { font-size: 12px !important; }
+.product-image-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.product-image-status { text-align: right; white-space: nowrap; }
 .mall-opening-control-card { border-color: rgba(22, 119, 255, .24); }
 .mall-opening-settings-form { padding: 12px; border: 1px solid rgba(15, 23, 42, .08); border-radius: 10px; background: #f8fafc; }
 .mall-opening-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 10px 14px; }
@@ -68,7 +73,7 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
 .mall-opening-settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(15, 23, 42, .08); }
 @media (max-width: 640px) {
   .product-image-editor { grid-template-columns: 1fr; }
-  .product-image-preview, .product-image-preview-img { min-height: 220px; height: 220px !important; }
+  .product-image-preview, .product-image-preview .ant-image, .product-image-preview-img { width: 220px !important; height: 220px !important; }
   .mall-opening-settings-grid { grid-template-columns: 1fr; }
   .mall-opening-settings-actions { justify-content: stretch; flex-direction: column; }
 }
@@ -247,4 +252,33 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   flex-wrap: wrap;
   gap: 8px;
   margin: 12px 0 8px;
+}
+
+.notify-test-form {
+  align-items: flex-start;
+}
+
+.notify-test-form .ant-form-item {
+  margin-bottom: 8px;
+}
+
+.group-channel-config-help {
+  margin-bottom: 12px;
+}
+
+.group-channel-basic-grid {
+  align-items: end;
+}
+
+.group-channel-advanced {
+  margin-top: 10px;
+  border-top: 1px solid rgba(15, 23, 42, .08);
+}
+
+.group-channel-advanced .ant-collapse-header {
+  padding-inline: 0 !important;
+}
+
+.group-channel-advanced .ant-collapse-content-box {
+  padding-inline: 0 !important;
 }

@@ -2888,6 +2888,9 @@ export function adminRouter() {
         event,
         variables,
       });
+      if (notify?.ok === false) {
+        return res.status(400).json({ ok: false, error: notify.error || '私聊测试发送失败', notify });
+      }
       return res.json({ ok: true, notify });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

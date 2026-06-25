@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Collapse, Divider, Form, Input, Modal, Select, Space, Switch, Tabs, Typography } from 'antd';
+import { Alert, App, Button, Card, Collapse, Divider, Form, Input, Modal, Select, Space, Switch, Tabs, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import { hasPermission } from '../permissions.js';
 
@@ -135,7 +135,7 @@ function TemplateFields({ namePrefix, withButtons = false, canEdit = true, onAct
   </Space>;
 }
 
-function SettingsEditor({ title, loadPath, savePath, templates, withChannel = false, withButtons = false, canEdit = true, extraPanel = null }) {
+function SettingsEditor({ title, loadPath, savePath, templates, withChannel = false, withButtons = false, canEdit = true, topPanel = null, extraPanel = null }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -192,6 +192,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
 
   return <Card loading={loading}>
     <Toolbar onRefresh={load} onReset={reset} onSave={save} canEdit={canEdit} />
+    {topPanel}
     <Form form={form} layout="vertical">
       <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
       {renderVariableHelp(templateVars, insertVariable, canEdit)}
@@ -201,17 +202,34 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
         extra={canEdit ? <Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button> : null}
         style={{ marginBottom: 12 }}
       >
-        <div className="group-channel-config-grid">
+        <Alert
+          type="info"
+          showIcon
+          className="group-channel-config-help"
+          message="日常只需要选择群预设"
+          description="钉钉不会直接返回所有普通群的完整卡片投放配置；系统会优先使用已保存的群预设和默认卡片模板。复杂 ID 已收进高级配置，只有换群或换模板时才需要维护。"
+        />
+        <div className="group-channel-config-grid group-channel-basic-grid">
           <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={channelPreset} options={groupConversationPresets} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
           <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
-          <Form.Item label="群会话 ID" name={['channel', 'openConversationId']} className="group-channel-span-2"><Input readOnly={!channelEditing || channelPreset !== '__custom__'} className={!channelEditing || channelPreset !== '__custom__' ? 'readonly-input' : ''} placeholder={channelPreset === '__custom__' ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
-          <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
-          <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']} className="group-channel-span-2"><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
-          <Form.Item label="搜索图标" name={['channel', 'searchIcon']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="可选，填写图标地址" /></Form.Item>
-          <Form.Item label="标题字段 Key" name={['channel', 'titleKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="留空使用默认标题字段" /></Form.Item>
-          <Form.Item label="内容字段 Key" name={['channel', 'contentKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="例如 spyj_neirong" /></Form.Item>
-          <Form.Item label="指定接收人" name={['channel', 'recipients']} className="group-channel-span-2"><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={2} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
+          <Form.Item label="指定接收人" name={['channel', 'recipients']} className="group-channel-span-2"><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={2} placeholder="不填时按默认接收人；多个 Userid 可用换行或逗号分隔" /></Form.Item>
         </div>
+        <Collapse
+          className="group-channel-advanced"
+          ghost
+          items={[{
+            key: 'advanced',
+            label: '高级配置：群 ID、模板和字段映射',
+            children: <div className="group-channel-config-grid">
+              <Form.Item label="群会话 ID" name={['channel', 'openConversationId']} className="group-channel-span-2"><Input readOnly={!channelEditing || channelPreset !== '__custom__'} className={!channelEditing || channelPreset !== '__custom__' ? 'readonly-input' : ''} placeholder={channelPreset === '__custom__' ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
+              <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+              <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']} className="group-channel-span-2"><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+              <Form.Item label="搜索图标" name={['channel', 'searchIcon']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="可选，填写图标地址" /></Form.Item>
+              <Form.Item label="标题字段 Key" name={['channel', 'titleKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="留空使用默认标题字段" /></Form.Item>
+              <Form.Item label="内容字段 Key" name={['channel', 'contentKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="例如 spyj_neirong" /></Form.Item>
+            </div>,
+          }]}
+        />
       </Card>}
       <Collapse defaultActiveKey={[]} items={items} />
     </Form>
@@ -231,26 +249,18 @@ function NotifyTestPanel({ disabled, canSearchUsers }) {
     setUserOptions((data.data || []).map((row) => ({ value: row.userid, label: row.name ? `${row.name}（${row.userid}）` : row.userid, name: row.name || '' })));
   };
   const submit = async (values) => {
-    Modal.confirm({
-      title: '确认发送私聊测试？',
-      content: '这会向指定用户发送一条测试通知，请只填写内部测试账号。',
-      okText: '确认发送',
-      cancelText: '取消',
-      onOk: async () => {
-        setLoading(true);
-        try {
-          await api('/admin/settings/notify/test', { method: 'POST', body: values });
-          message.success('私聊测试已发送');
-        } catch (err) {
-          message.error(err.message || '私聊测试失败');
-        } finally {
-          setLoading(false);
-        }
-      },
-    });
+    setLoading(true);
+    try {
+      await api('/admin/settings/notify/test', { method: 'POST', body: values });
+      message.success('私聊测试已发送');
+    } catch (err) {
+      message.error(err.message || '私聊测试失败');
+    } finally {
+      setLoading(false);
+    }
   };
-  return <Card size="small" title="私聊测试" style={{ marginTop: 12 }}>
-    <Form form={form} layout="inline" onFinish={submit}>
+  return <Card size="small" title="私聊测试" style={{ margin: '12px 0' }}>
+    <Form form={form} layout="inline" onFinish={submit} className="notify-test-form">
       <Form.Item name="event" rules={[{ required: true, message: '请选择事件' }]}><Select placeholder="选择通知类型" style={{ width: 180 }} options={notifyTemplates.map((item) => ({ value: item.key, label: item.label }))} /></Form.Item>
 {canSearchUsers ? <Form.Item name="userid" rules={[{ required: true, message: '请选择测试用户' }]}><Select showSearch placeholder="搜索并选择内部测试用户" style={{ width: 280 }} filterOption={false} onSearch={searchUsers} options={userOptions} onChange={(userid, option) => form.setFieldsValue({ userid, name: option?.name || '' })} /></Form.Item> : <Form.Item name="userid" rules={[{ required: true, message: '请输入测试用户 Userid' }]}><Input placeholder="内部测试用户 Userid" style={{ width: 220 }} /></Form.Item>}
       <Form.Item name="name"><Input placeholder={canSearchUsers ? "用户姓名" : "可选：用户姓名"} style={{ width: 160 }} readOnly={canSearchUsers} /></Form.Item>
@@ -346,7 +356,7 @@ export default function Messages({ me }) {
   const canTest = hasPermission(me, 'messages:test');
   const canSearchUsers = hasPermission(me, 'users:view');
   return <Tabs items={[
-    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} extraPanel={<NotifyTestPanel disabled={!canTest} canSearchUsers={canSearchUsers} />} /> },
+    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} topPanel={<NotifyTestPanel disabled={!canTest} canSearchUsers={canSearchUsers} />} /> },
     { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons canEdit={canEdit} extraPanel={<GroupCardActions canManual={canEdit} canTest={canTest} />} /> },
   ]} />;
 }

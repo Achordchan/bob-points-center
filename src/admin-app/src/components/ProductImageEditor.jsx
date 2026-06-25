@@ -110,7 +110,7 @@ export default function ProductImageEditor({ value, onChange, emptyText = '未�
 
   return <div className="product-image-editor" onPaste={handlePaste}>
     <div className="product-image-preview">
-      {imageUrl ? <Image src={imageUrl} className="product-image-preview-img" /> : <div className="product-image-empty">
+      {imageUrl ? <Image src={imageUrl} className="product-image-preview-img" preview={{ mask: '预览' }} /> : <div className="product-image-empty">
         <PictureOutlined />
         <Typography.Text type="secondary">{emptyText}</Typography.Text>
       </div>}
@@ -121,10 +121,10 @@ export default function ProductImageEditor({ value, onChange, emptyText = '未�
         <p className="ant-upload-text">{disabled ? '当前权限仅可查看图片' : '点击或拖入图片上传'}</p>
         <p className="ant-upload-hint">上传后自动压缩为 WebP，支持粘贴图片。</p>
       </Upload.Dragger>
-      <Space wrap>
+      <div className="product-image-footer">
         <Button icon={<DeleteOutlined />} disabled={disabled || !imageUrl} onClick={() => onChange('')}>移除图片</Button>
-      </Space>
-      <Typography.Text type="secondary">{imageUrl ? imageSourceType(imageUrl) : disabled ? '当前权限仅可查看图片。' : '支持上传、拖入或粘贴图片，上传前可裁切为 1:1。'}</Typography.Text>
+        <Typography.Text type="secondary" className="product-image-status">{imageUrl ? imageSourceType(imageUrl) : disabled ? '当前权限仅可查看图片' : '支持裁切为 1:1'}</Typography.Text>
+      </div>
     </Space>
     <Modal
       title="图片 1:1 裁切"
