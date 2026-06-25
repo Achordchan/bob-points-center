@@ -49,6 +49,12 @@
     detailRows: [],
   };
 
+  const dingtalkConnectionState = {
+    connected: false,
+    data: null,
+    error: '',
+  };
+
   const contentState = {
     faq: [],
     announcements: [],
@@ -3414,6 +3420,10 @@
     document.getElementById('btnCreateToken').disabled = false;
     document.getElementById('btnRefreshTokens').disabled = false;
     document.getElementById('btnLogout').disabled = false;
+    const btnDingtalkStatus = document.getElementById('btnDingtalkStatus');
+    if (btnDingtalkStatus) btnDingtalkStatus.disabled = false;
+    const btnOverviewDingtalk = document.getElementById('btnOverviewDingtalk');
+    if (btnOverviewDingtalk) btnOverviewDingtalk.disabled = false;
     const btnRedeemHistoryRefresh = document.getElementById('btnRedeemHistoryRefresh');
     if (btnRedeemHistoryRefresh) btnRedeemHistoryRefresh.disabled = false;
 
@@ -3646,6 +3656,8 @@
       });
     }
 
+    const tabOverview = document.getElementById('tabOverview');
+    if (tabOverview) tabOverview.addEventListener('click', () => switchTab('overview'));
     document.getElementById('tabUsers').addEventListener('click', () => switchTab('users'));
     document.getElementById('tabRedeem').addEventListener('click', () => switchTab('redeem'));
     document.getElementById('tabMall').addEventListener('click', () => switchTab('mall'));
@@ -3697,6 +3709,19 @@
 
     document.getElementById('btnCreateToken').addEventListener('click', createBobToken);
     document.getElementById('btnRefreshTokens').addEventListener('click', refreshTokenList);
+
+    const btnDingtalkStatus = document.getElementById('btnDingtalkStatus');
+    if (btnDingtalkStatus) btnDingtalkStatus.addEventListener('click', () => setDingtalkConnectionModalVisible(true));
+    const btnOverviewDingtalk = document.getElementById('btnOverviewDingtalk');
+    if (btnOverviewDingtalk) btnOverviewDingtalk.addEventListener('click', () => setDingtalkConnectionModalVisible(true));
+    const dingtalkModal = document.getElementById('dingtalkConnectionModal');
+    if (dingtalkModal) {
+      dingtalkModal.addEventListener('click', (ev) => {
+        if (ev?.target?.id === 'dingtalkConnectionModal') setDingtalkConnectionModalVisible(false);
+      });
+    }
+    const btnDingtalkClose = document.getElementById('btnDingtalkClose');
+    if (btnDingtalkClose) btnDingtalkClose.addEventListener('click', () => setDingtalkConnectionModalVisible(false));
 
     const btnGroupCardSend = document.getElementById('btnGroupCardSend');
     if (btnGroupCardSend) {
@@ -4543,12 +4568,14 @@
   };
 
   function switchTab(name) {
+    const overviewBtn = document.getElementById('tabOverview');
     const usersBtn = document.getElementById('tabUsers');
     const redeemBtn = document.getElementById('tabRedeem');
     const mallBtn = document.getElementById('tabMall');
     const redPacketBtn = document.getElementById('tabRedPacket');
     const messagesBtn = document.getElementById('tabMessages');
     const settingsBtn = document.getElementById('tabSettings');
+    const overviewPanel = document.getElementById('panelOverview');
     const usersPanel = document.getElementById('panelUsers');
     const redeemPanel = document.getElementById('panelRedeem');
     const mallPanel = document.getElementById('panelMall');
@@ -4556,38 +4583,32 @@
     const messagesPanel = document.getElementById('panelMessages');
     const settingsPanel = document.getElementById('panelSettings');
 
+    const allButtons = [overviewBtn, usersBtn, redeemBtn, mallBtn, redPacketBtn, messagesBtn, settingsBtn].filter(Boolean);
+    const allPanels = [overviewPanel, usersPanel, redeemPanel, mallPanel, redPacketPanel, messagesPanel, settingsPanel].filter(Boolean);
+    const activate = (button, panel) => {
+      allButtons.forEach((btn) => btn.classList.remove('active'));
+      allPanels.forEach((el) => el.classList.add('hidden'));
+      if (button) button.classList.add('active');
+      if (panel) panel.classList.remove('hidden');
+    };
+
+    if (name === 'overview') {
+      stopAuditLogAutoRefresh();
+      stopCamera();
+      activate(overviewBtn, overviewPanel);
+      return;
+    }
+
     if (name === 'redeem') {
       stopAuditLogAutoRefresh();
-      usersBtn.classList.remove('active');
-      redeemBtn.classList.add('active');
-      mallBtn.classList.remove('active');
-      if (redPacketBtn) redPacketBtn.classList.remove('active');
-      if (messagesBtn) messagesBtn.classList.remove('active');
-      settingsBtn.classList.remove('active');
-      usersPanel.classList.add('hidden');
-      redeemPanel.classList.remove('hidden');
-      mallPanel.classList.add('hidden');
-      if (redPacketPanel) redPacketPanel.classList.add('hidden');
-      if (messagesPanel) messagesPanel.classList.add('hidden');
-      settingsPanel.classList.add('hidden');
+      activate(redeemBtn, redeemPanel);
       return;
     }
 
     if (name === 'mall') {
       stopAuditLogAutoRefresh();
       stopCamera();
-      usersBtn.classList.remove('active');
-      redeemBtn.classList.remove('active');
-      mallBtn.classList.add('active');
-      if (redPacketBtn) redPacketBtn.classList.remove('active');
-      if (messagesBtn) messagesBtn.classList.remove('active');
-      settingsBtn.classList.remove('active');
-      usersPanel.classList.add('hidden');
-      redeemPanel.classList.add('hidden');
-      mallPanel.classList.remove('hidden');
-      if (redPacketPanel) redPacketPanel.classList.add('hidden');
-      if (messagesPanel) messagesPanel.classList.add('hidden');
-      settingsPanel.classList.add('hidden');
+      activate(mallBtn, mallPanel);
       setMallToast('', false);
       setMallMode('self');
       loadMallProducts();
@@ -4598,53 +4619,21 @@
     if (name === 'redPacket') {
       stopAuditLogAutoRefresh();
       stopCamera();
-      usersBtn.classList.remove('active');
-      redeemBtn.classList.remove('active');
-      mallBtn.classList.remove('active');
-      if (redPacketBtn) redPacketBtn.classList.add('active');
-      if (messagesBtn) messagesBtn.classList.remove('active');
-      settingsBtn.classList.remove('active');
-      usersPanel.classList.add('hidden');
-      redeemPanel.classList.add('hidden');
-      mallPanel.classList.add('hidden');
-      if (redPacketPanel) redPacketPanel.classList.remove('hidden');
-      if (messagesPanel) messagesPanel.classList.add('hidden');
-      settingsPanel.classList.add('hidden');
+      activate(redPacketBtn, redPacketPanel);
       loadRedPacketStatus();
       return;
     }
 
     if (name === 'messages') {
+      stopAuditLogAutoRefresh();
       stopCamera();
-      usersBtn.classList.remove('active');
-      redeemBtn.classList.remove('active');
-      mallBtn.classList.remove('active');
-      if (redPacketBtn) redPacketBtn.classList.remove('active');
-      if (messagesBtn) messagesBtn.classList.add('active');
-      settingsBtn.classList.remove('active');
-      usersPanel.classList.add('hidden');
-      redeemPanel.classList.add('hidden');
-      mallPanel.classList.add('hidden');
-      if (redPacketPanel) redPacketPanel.classList.add('hidden');
-      if (messagesPanel) messagesPanel.classList.remove('hidden');
-      settingsPanel.classList.add('hidden');
+      activate(messagesBtn, messagesPanel);
       return;
     }
 
     if (name === 'settings') {
       stopCamera();
-      usersBtn.classList.remove('active');
-      redeemBtn.classList.remove('active');
-      mallBtn.classList.remove('active');
-      if (redPacketBtn) redPacketBtn.classList.remove('active');
-      if (messagesBtn) messagesBtn.classList.remove('active');
-      settingsBtn.classList.add('active');
-      usersPanel.classList.add('hidden');
-      redeemPanel.classList.add('hidden');
-      mallPanel.classList.add('hidden');
-      if (redPacketPanel) redPacketPanel.classList.add('hidden');
-      if (messagesPanel) messagesPanel.classList.add('hidden');
-      settingsPanel.classList.remove('hidden');
+      activate(settingsBtn, settingsPanel);
       loadCdkProducts();
       loadCdkList();
       refreshTokenList();
@@ -4659,19 +4648,7 @@
 
     stopAuditLogAutoRefresh();
     stopCamera();
-
-    redeemBtn.classList.remove('active');
-    mallBtn.classList.remove('active');
-    if (redPacketBtn) redPacketBtn.classList.remove('active');
-    if (messagesBtn) messagesBtn.classList.remove('active');
-    settingsBtn.classList.remove('active');
-    usersBtn.classList.add('active');
-    redeemPanel.classList.add('hidden');
-    mallPanel.classList.add('hidden');
-    if (redPacketPanel) redPacketPanel.classList.add('hidden');
-    if (messagesPanel) messagesPanel.classList.add('hidden');
-    settingsPanel.classList.add('hidden');
-    usersPanel.classList.remove('hidden');
+    activate(usersBtn, usersPanel);
   }
 
   async function syncUsers() {
@@ -5465,8 +5442,32 @@
     if (text) showGlobalToast(String(text), 'error');
   }
 
+  function setDingtalkConnectionModalVisible(visible) {
+    setHidden('dingtalkConnectionModal', !visible);
+  }
+
+  function updateDingtalkConnectionSummary(data, connected, error) {
+    const d = data && typeof data === 'object' ? data : {};
+    const org = d.organizationName || d.corpId || '未配置组织';
+    const statusText = connected ? `钉钉：${org}` : '钉钉：未连接';
+    const hintText = connected ? '连接正常，通讯录、打卡和消息能力可用。' : (error || '请先完成钉钉连接。');
+    const btn = document.getElementById('btnDingtalkStatus');
+    if (btn) {
+      btn.textContent = statusText;
+      btn.classList.toggle('status-ok', Boolean(connected));
+      btn.classList.toggle('status-bad', !connected);
+      btn.title = hintText;
+    }
+    setSimpleText('overviewDingtalkStatus', statusText, !connected);
+    setSimpleText('overviewDingtalkHint', hintText, !connected);
+  }
+
   function fillDingtalkConnection(data, connected, error) {
     const d = data && typeof data === 'object' ? data : {};
+    dingtalkConnectionState.connected = Boolean(connected);
+    dingtalkConnectionState.data = d;
+    dingtalkConnectionState.error = error || '';
+    updateDingtalkConnectionSummary(d, dingtalkConnectionState.connected, dingtalkConnectionState.error);
     setInputValue('dingtalkOrganizationName', d.organizationName || '');
     setInputValue('dingtalkCorpId', d.corpId || '');
     setInputValue('dingtalkAppKey', d.appKey || '');
@@ -5484,7 +5485,9 @@
     setDingtalkConnectionToast('', false);
     const r = await fetchJson('/admin/settings/dingtalk');
     if (!r?.data?.ok) {
-      setDingtalkConnectionErr(r?.data?.error || (r?.status ? `HTTP ${r.status}` : '加载失败'));
+      const message = r?.data?.error || (r?.status ? `HTTP ${r.status}` : '加载失败');
+      fillDingtalkConnection(dingtalkConnectionState.data || {}, false, message);
+      setDingtalkConnectionErr(message);
       return;
     }
     fillDingtalkConnection(r.data?.data || {}, r.data?.connected === true, r.data?.error || '');
@@ -5507,6 +5510,16 @@
         appSecret: getInputValue('dingtalkAppSecret').trim(),
         agentId: getInputValue('dingtalkAgentId').trim(),
       };
+      const current = dingtalkConnectionState.data || {};
+      const changedOrg = payload.organizationName !== String(current.organizationName || '')
+        || payload.corpId !== String(current.corpId || '')
+        || payload.appKey !== String(current.appKey || '')
+        || payload.agentId !== String(current.agentId || '')
+        || Boolean(payload.appSecret);
+      if (changedOrg) {
+        const ok = window.confirm('确认修改钉钉连接吗？\n\n这会影响通讯录同步、打卡奖励、钉钉消息和部门选择。AppSecret 留空时会沿用当前密钥。');
+        if (!ok) return;
+      }
       const r = await fetchJson('/admin/settings/dingtalk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5555,21 +5568,31 @@
     const select = document.getElementById('attendanceDepartmentIds');
     if (all) all.checked = selectedMode === 'all';
     if (selected) selected.checked = selectedMode === 'selected';
-    if (select) select.disabled = selectedMode !== 'selected';
+    if (select) select.disabled = selectedMode !== 'selected' || !dingtalkConnectionState.connected;
   }
 
   async function loadAttendanceDepartments(selectedIds = []) {
     const select = document.getElementById('attendanceDepartmentIds');
     if (!select) return;
     const selected = new Set((Array.isArray(selectedIds) ? selectedIds : []).map((id) => String(id)));
+    if (!dingtalkConnectionState.connected) {
+      select.innerHTML = '<option value="">请先完成钉钉连接</option>';
+      select.disabled = true;
+      return;
+    }
     select.innerHTML = '<option value="">正在加载部门…</option>';
     const r = await fetchJson('/admin/settings/dingtalk/departments');
     if (!r?.data?.ok) {
-      select.innerHTML = '';
-      setAttendanceRewardErr(`部门加载失败：${r?.data?.error || r?.status || 'error'}`);
+      select.innerHTML = '<option value="">请先完成钉钉连接</option>';
+      select.disabled = true;
       return;
     }
     const rows = Array.isArray(r.data?.data) ? r.data.data : [];
+    if (rows.length === 0) {
+      select.innerHTML = '<option value="">未获取到部门</option>';
+      setAttendanceDepartmentMode(document.getElementById('attendanceDepartmentSelected')?.checked === true ? 'selected' : 'all');
+      return;
+    }
     select.innerHTML = rows.map((row) => {
       const id = row?.dept_id ? String(row.dept_id) : '';
       const depth = Math.max(0, Number(row?.depth || 0));
@@ -5577,6 +5600,7 @@
       const label = `${prefix}${row?.name ? String(row.name) : id}`;
       return `<option value="${safeText(id)}" ${selected.has(id) ? 'selected' : ''}>${safeText(label)}</option>`;
     }).join('');
+    setAttendanceDepartmentMode(document.getElementById('attendanceDepartmentSelected')?.checked === true ? 'selected' : 'all');
   }
 
   function fillAttendanceRewardSettings(data) {

@@ -15,27 +15,63 @@
           <h1>BOB币 - 管理端</h1>
           <div class="muted" id="userHint">-</div>
         </div>
-        <div class="row">
+        <div class="row headerActions">
+          <button class="dingtalk-status" id="btnDingtalkStatus" type="button" disabled>钉钉：检查中</button>
           <a class="muted" href="/docs" target="_blank" rel="noreferrer">API 文档</a>
           <button class="secondary" id="btnLogout" disabled>退出登录</button>
         </div>
       </header>
 
       <div class="tabs">
-        <button class="tabbtn active" id="tabUsers">用户管理</button>
-        <button class="tabbtn" id="tabRedeem">核销管理</button>
-        <button class="tabbtn" id="tabMall">商城管理</button>
-        <button class="tabbtn" id="tabRedPacket">红包管理</button>
-        <button class="tabbtn" id="tabMessages">消息管理</button>
-        <button class="tabbtn" id="tabSettings">高级设置</button>
+        <button class="tabbtn active" id="tabOverview">首页概览</button>
+        <button class="tabbtn" id="tabUsers">用户与余额</button>
+        <button class="tabbtn" id="tabRedeem">核销与订单</button>
+        <button class="tabbtn" id="tabMall">商城</button>
+        <button class="tabbtn" id="tabRedPacket">活动</button>
+        <button class="tabbtn" id="tabMessages">消息</button>
+        <button class="tabbtn" id="tabSettings">系统设置</button>
       </div>
 
-      <section id="panelUsers">
+      <section id="panelOverview">
+        <section class="card overview-card">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h2 style="margin:0 0 6px; font-size:18px;">运营概览</h2>
+              <div class="help">从这里确认系统基础连接和主要业务入口。钉钉断连会影响通讯录、打卡奖励和钉钉消息。</div>
+            </div>
+            <button class="secondary" id="btnOverviewDingtalk" type="button" disabled>查看钉钉连接</button>
+          </div>
+          <div class="overview-grid" style="margin-top:14px;">
+            <div class="overview-tile">
+              <div class="muted">基础连接</div>
+              <div class="overview-title" id="overviewDingtalkStatus">钉钉：检查中</div>
+              <div class="help" id="overviewDingtalkHint">正在读取连接状态。</div>
+            </div>
+            <div class="overview-tile">
+              <div class="muted">用户与余额</div>
+              <div class="overview-title">通讯录、余额、批量调整</div>
+              <div class="help">统一管理用户、BOB 币余额和批量消息。</div>
+            </div>
+            <div class="overview-tile">
+              <div class="muted">核销与订单</div>
+              <div class="overview-title">扫码核销、历史对账</div>
+              <div class="help">处理商城订单、CDK 兑换和核销记录。</div>
+            </div>
+            <div class="overview-tile">
+              <div class="muted">活动与商城</div>
+              <div class="overview-title">商品、红包、公益助力</div>
+              <div class="help">配置商城、红包活动和公益项目。</div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="panelUsers" class="hidden">
         <section class="card">
           <div class="row" style="justify-content: space-between;">
             <div>
-              <h2 style="margin:0 0 6px; font-size:18px;">用户列表</h2>
-              <div class="help">支持搜索、查看余额、选择多用户批量发币/删除。</div>
+              <h2 style="margin:0 0 6px; font-size:18px;">用户与余额</h2>
+              <div class="help">支持搜索、查看余额、批量发放、扣回和消息触达。</div>
             </div>
             <div class="row">
               <button class="secondary" id="btnSyncUsers" disabled>同步通讯录</button>
@@ -62,8 +98,6 @@
               <button class="secondary" id="btnBulkDeduct" disabled>批量减币</button>
               <button class="secondary" id="btnBulkNotify" disabled>批量发消息</button>
               <button class="secondary" id="btnBulkDelete" disabled>删除</button>
-              <button class="secondary" id="btnResetUserData" disabled>清空该用户</button>
-              <button class="secondary" id="btnResetAllData" disabled>清空全部</button>
               <button class="secondary" id="btnUserPrev" disabled>上一页</button>
               <button class="secondary" id="btnUserNext" disabled>下一页</button>
             </div>
@@ -88,6 +122,15 @@
               <tbody id="userTable"></tbody>
             </table>
           </div>
+
+          <details class="danger-zone" style="margin-top:14px;">
+            <summary>危险区</summary>
+            <div class="help">这些操作会影响用户数据，默认收起以减少误触。</div>
+            <div class="row" style="margin-top:10px; gap:10px;">
+              <button class="secondary" id="btnResetUserData" disabled>清空所选用户数据</button>
+              <button class="secondary danger-button" id="btnResetAllData" disabled>清空全部用户数据</button>
+            </div>
+          </details>
         </section>
       </section>
 
@@ -148,7 +191,6 @@
             </div>
             <div class="row">
               <button class="secondary" id="btnRedPacketHistoryRefresh" disabled>刷新</button>
-              <button class="secondary" id="btnRedPacketHistoryClear" disabled>清空历史</button>
             </div>
           </div>
 
@@ -171,6 +213,13 @@
               <tbody id="redPacketHistoryTable"></tbody>
             </table>
           </div>
+          <details class="danger-zone" style="margin-top:12px;">
+            <summary>危险区</summary>
+            <div class="help">清空后会移除红包历史展示数据，操作前请确认已完成对账。</div>
+            <div class="row" style="margin-top:10px;">
+              <button class="secondary danger-button" id="btnRedPacketHistoryClear" disabled>清空历史</button>
+            </div>
+          </details>
         </section>
       </section>
 
@@ -203,7 +252,6 @@
             <div class="row">
               <button class="secondary" id="btnRedeemHistoryRefresh" disabled>刷新</button>
               <button class="secondary" id="btnRedeemHistoryMore" disabled>加载更多</button>
-              <button class="secondary" id="btnRedeemHistoryClear" disabled>清空已核销</button>
             </div>
           </div>
           <div style="height:10px"></div>
@@ -216,12 +264,19 @@
                   <th style="width:160px;">姓名</th>
                   <th style="width:240px;">兑换单号</th>
                   <th>商品</th>
-                  <th style="width:120px;">扣减</th>
+                  <th style="width:120px;">金额</th>
                 </tr>
               </thead>
               <tbody id="redeemHistoryTable"></tbody>
             </table>
           </div>
+          <details class="danger-zone" style="margin-top:12px;">
+            <summary>危险区</summary>
+            <div class="help">清空已核销记录会影响历史核销查询，操作前请确认不再需要追溯。</div>
+            <div class="row" style="margin-top:10px;">
+              <button class="secondary danger-button" id="btnRedeemHistoryClear" disabled>清空已核销</button>
+            </div>
+          </details>
         </details>
 
         <details class="card" id="redeemPendingDetails" style="margin-top:12px;">
@@ -244,7 +299,7 @@
                   <th style="width:160px;">姓名</th>
                   <th style="width:240px;">兑换单号</th>
                   <th>商品</th>
-                  <th style="width:120px;">扣减</th>
+                  <th style="width:120px;">金额</th>
                 </tr>
               </thead>
               <tbody id="redeemPendingTable"></tbody>
@@ -255,7 +310,7 @@
 
       <section id="panelMall" class="hidden">
         <section class="card mall-hero">
-          <h2 style="margin:0 0 10px; font-size:18px;">商城管理</h2>
+          <h2 style="margin:0 0 10px; font-size:18px;">商城</h2>
           <div class="help">支持三种版本：宜搭版 / AI表格版 / 自建版。同一时间只使用一个数据源。</div>
 
           <div style="height:12px"></div>
@@ -354,7 +409,7 @@
                 <tr>
                   <th style="width:190px;">商品ID</th>
                   <th>名称</th>
-                  <th style="width:120px;">扣减</th>
+                  <th style="width:120px;">金额</th>
                   <th style="width:120px;">库存</th>
                   <th style="width:120px;">限购</th>
                   <th style="width:120px;">CDK兑换</th>
@@ -455,53 +510,6 @@
       </section>
 
       <section id="panelSettings" class="hidden">
-        <details class="card" id="dingtalkConnectionDetails" open>
-          <summary>钉钉连接</summary>
-          <div class="help">用于同步通讯录部门和接收打卡事件。连接状态只做接口校验，不发送任何消息。</div>
-          <div style="height:10px"></div>
-          <div class="kv">
-            <label>连接状态</label>
-            <div style="flex:1;">
-              <div id="dingtalkConnectionStatus" style="font-weight:700;">-</div>
-              <div class="help" id="dingtalkConnectionHint" style="margin-top:4px;">正在读取钉钉配置。</div>
-            </div>
-          </div>
-          <div style="height:8px"></div>
-          <div class="kv">
-            <label for="dingtalkOrganizationName">组织名称</label>
-            <input id="dingtalkOrganizationName" placeholder="例如：徐州巴布工程机械有限公司" />
-          </div>
-          <div style="height:8px"></div>
-          <div class="kv">
-            <label for="dingtalkCorpId">CorpId</label>
-            <input id="dingtalkCorpId" placeholder="钉钉企业 CorpId" />
-          </div>
-          <div style="height:8px"></div>
-          <div class="kv">
-            <label for="dingtalkAppKey">AppKey</label>
-            <input id="dingtalkAppKey" placeholder="钉钉应用 AppKey" />
-          </div>
-          <div style="height:8px"></div>
-          <div class="kv">
-            <label for="dingtalkAppSecret">AppSecret</label>
-            <div style="flex:1;">
-              <input id="dingtalkAppSecret" type="password" placeholder="留空表示不修改现有密钥" />
-              <div class="help" id="dingtalkSecretHint" style="margin-top:4px;">密钥不会明文回显；留空保存时沿用当前密钥。</div>
-            </div>
-          </div>
-          <div style="height:8px"></div>
-          <div class="kv">
-            <label for="dingtalkAgentId">AgentId</label>
-            <input id="dingtalkAgentId" placeholder="钉钉应用 AgentId" />
-          </div>
-          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
-            <button class="secondary" id="btnDingtalkRefresh" type="button" disabled>刷新状态</button>
-            <button id="btnDingtalkSave" type="button" disabled>保存钉钉连接</button>
-          </div>
-          <div class="toast" id="dingtalkConnectionToast"></div>
-          <div class="error" id="dingtalkConnectionErr"></div>
-        </details>
-
         <details class="card" id="attendanceRewardDetails">
           <summary>钉钉打卡奖励</summary>
           <div class="help">员工准时打卡时自动随机发放 BOB 币奖励，通过 Stream 事件实时触发。需在钉钉开放平台订阅「员工打卡」事件。</div>
@@ -1421,7 +1429,7 @@
           <div style="height:8px"></div>
           <div class="kv"><div class="muted">商品</div><div id="redeemModalProduct">-</div></div>
           <div style="height:8px"></div>
-          <div class="kv"><div class="muted">扣减数量</div><div id="redeemModalAmount">-</div></div>
+          <div class="kv"><div class="muted">金额</div><div id="redeemModalAmount">-</div></div>
 
           <div style="height:12px"></div>
           <div class="muted" style="margin-bottom:6px;">二维码内容 encoded</div>
@@ -1453,7 +1461,7 @@
           </div>
           <div style="height:10px"></div>
           <div class="kv">
-            <label for="mallProductAmount">扣减数量</label>
+            <label for="mallProductAmount">商品金额</label>
             <input id="mallProductAmount" value="10" />
           </div>
           <div style="height:10px"></div>
@@ -1738,6 +1746,61 @@
 
       <div class="error" id="err"></div>
     </div>
+
+
+      <div class="modal hidden" id="dingtalkConnectionModal">
+        <div class="modalBox dingtalk-modal-box">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h3 class="modalTitle">钉钉连接</h3>
+              <div class="help">钉钉是通讯录、打卡奖励和消息触达的基础连接。连接校验只读，不发送任何消息。</div>
+            </div>
+            <button class="secondary" id="btnDingtalkClose" type="button">关闭</button>
+          </div>
+          <div style="height:12px"></div>
+          <div class="kv">
+            <label>连接状态</label>
+            <div style="flex:1;">
+              <div id="dingtalkConnectionStatus" style="font-weight:700;">-</div>
+              <div class="help" id="dingtalkConnectionHint" style="margin-top:4px;">正在读取钉钉配置。</div>
+            </div>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkOrganizationName">组织名称</label>
+            <input id="dingtalkOrganizationName" placeholder="例如：徐州巴布工程机械有限公司" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkCorpId">CorpId</label>
+            <input id="dingtalkCorpId" placeholder="钉钉企业 CorpId" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAppKey">AppKey</label>
+            <input id="dingtalkAppKey" placeholder="钉钉应用 AppKey" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAppSecret">AppSecret</label>
+            <div style="flex:1;">
+              <input id="dingtalkAppSecret" type="password" placeholder="留空表示不修改现有密钥" />
+              <div class="help" id="dingtalkSecretHint" style="margin-top:4px;">密钥不会明文回显；留空保存时沿用当前密钥。</div>
+            </div>
+          </div>
+          <div style="height:8px"></div>
+          <div class="kv">
+            <label for="dingtalkAgentId">AgentId</label>
+            <input id="dingtalkAgentId" placeholder="钉钉应用 AgentId" />
+          </div>
+          <div class="row" style="margin-top:12px; justify-content:flex-end; gap:10px;">
+            <button class="secondary" id="btnDingtalkRefresh" type="button" disabled>刷新状态</button>
+            <button id="btnDingtalkSave" type="button" disabled>保存钉钉连接</button>
+          </div>
+          <div class="toast" id="dingtalkConnectionToast"></div>
+          <div class="error" id="dingtalkConnectionErr"></div>
+        </div>
+      </div>
 
     <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js"></script>
     <script src="/assets/base.js"></script>
