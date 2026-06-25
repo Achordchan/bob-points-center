@@ -9,16 +9,28 @@
     "deploy:baota": "bash scripts/deploy-baota.sh",
     "db:tunnel": "bash scripts/pg-tunnel.sh",
     "pg:up": "npm run db:tunnel",
-    "pg:down": "echo '当前使用 SSH 数据库隧道；在运行 pg:up 的终端按 Ctrl+C 关闭。'"
+    "pg:down": "echo '当前使用 SSH 数据库隧道；在运行 pg:up 的终端按 Ctrl+C 关闭。'",
+    "build": "npm run admin:build",
+    "admin:build": "vite build --config src/admin-app/vite.config.js",
+    "admin:dev": "vite --config src/admin-app/vite.config.js --host 0.0.0.0"
   },
   "dependencies": {
     "@alicloud/dingtalk": "latest",
     "@alicloud/openapi-client": "latest",
     "@alicloud/tea-typescript": "latest",
     "@alicloud/tea-util": "latest",
+    "@ant-design/icons": "^6.2.5",
+    "@ant-design/pro-components": "^2.8.10",
+    "antd": "^5.29.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "pg": "^8.19.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.0"
   }
 }

@@ -5443,7 +5443,9 @@
   }
 
   function setDingtalkConnectionModalVisible(visible) {
-    setHidden('dingtalkConnectionModal', !visible);
+    const modal = document.getElementById('dingtalkConnectionModal');
+    if (!modal) return;
+    modal.classList.toggle('hidden', !visible);
   }
 
   function updateDingtalkConnectionSummary(data, connected, error) {

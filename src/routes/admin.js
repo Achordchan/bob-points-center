@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -446,6 +447,7 @@ async function listDingtalkDepartmentsTree(cfg) {
 export function adminRouter() {
   const router = Router();
   const pagesRoot = fileURLToPath(new URL('../pages/', import.meta.url));
+  const adminAppIndex = fileURLToPath(new URL('../pages/admin-app-dist/index.html', import.meta.url));
 
   router.get('/', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -1193,6 +1195,14 @@ export function adminRouter() {
     if (!payload) {
       return res.redirect(302, '/admin/login');
     }
+    if (existsSync(adminAppIndex)) {
+      return res.type('html').sendFile(adminAppIndex);
+    }
+    return res.type('html').sendFile('admin.html', { root: pagesRoot });
+  });
+
+  router.get('/legacy', requireAdminSession(), (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     return res.type('html').sendFile('admin.html', { root: pagesRoot });
   });
 
@@ -1209,6 +1219,125 @@ export function adminRouter() {
         return res.status(401).json({ error: 'unauthorized' });
       }
       return res.json({ ok: true, name: payload.name || '', userid: payload.userid || '' });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/dashboard/summary', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const [usersRow, balanceRow, pendingRow, fulfilledRow, productRow, cdkRow, charityRow] = await Promise.all([
+        db.get('SELECT COUNT(1) AS c FROM users'),
+        db.get('SELECT COALESCE(SUM(balance), 0) AS c FROM accounts'),
+        db.get('SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NULL'),
+        db.get('SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NOT NULL AND COALESCE(hidden, 0) = 0'),
+        db.get("SELECT COUNT(1) AS c FROM mall_products WHERE status = 'on'"),
+        db.get("SELECT COUNT(1) AS c FROM redeem_cdks WHERE status = 'unused'"),
+        db.get('SELECT COALESCE(SUM(bob_amount), 0) AS c FROM charity_contributions'),
+      ]);
+      const settings = await getDingtalkConnectionSettings(db, cfg);
+      return res.json({
+        ok: true,
+        data: {
+          users: Number(usersRow?.c || 0),
+          balanceTotal: Number(balanceRow?.c || 0),
+          pendingOrders: Number(pendingRow?.c || 0),
+          fulfilledOrders: Number(fulfilledRow?.c || 0),
+          activeProducts: Number(productRow?.c || 0),
+          unusedCdks: Number(cdkRow?.c || 0),
+          charityTotal: Number(charityRow?.c || 0),
+          dingtalk: toPublicDingtalkConnectionSettings(settings),
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/users/:userid', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    const userid = req.params?.userid ? String(req.params.userid).trim() : '';
+    if (!userid) return res.status(400).json({ error: 'missing userid' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const user = await db.get(
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at
+         FROM users u
+         LEFT JOIN accounts a ON a.userid = u.userid
+         WHERE u.userid = ?
+         LIMIT 1`,
+        [userid],
+      );
+      if (!user) return res.status(404).json({ error: 'user not found' });
+      const ledger = await db.all(
+        'SELECT id, userid, delta, reason, ref_id, created_at FROM ledger WHERE userid = ? ORDER BY created_at DESC, id DESC LIMIT 120',
+        [userid],
+      );
+      const redeems = await db.all(
+        `SELECT r.exchange_id, r.userid, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
+                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                c.product_bob_amount AS cdk_product_bob_amount
+         FROM redeems r
+         LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
+         WHERE r.userid = ?
+         ORDER BY r.created_at DESC
+         LIMIT 80`,
+        [userid],
+      );
+      const contributions = await db.all(
+        `SELECT c.id, c.project_id, p.project_name, c.user_name_snapshot, c.bob_amount, c.created_at
+         FROM charity_contributions c
+         LEFT JOIN charity_projects p ON p.project_id = c.project_id
+         WHERE c.userid = ?
+         ORDER BY c.created_at DESC
+         LIMIT 80`,
+        [userid],
+      );
+      const fixedAdmin = isFixedAdmin(cfg, userid);
+      return res.json({
+        ok: true,
+        data: {
+          user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0 },
+          account: { balance: Number(user.balance || 0), updated_at: user.updated_at },
+          ledger,
+          redeems,
+          contributions,
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/orders/:exchangeId', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const exchangeId = req.params?.exchangeId ? String(req.params.exchangeId).trim() : '';
+    if (!exchangeId) return res.status(400).json({ error: 'missing exchange_id' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const order = await db.get(
+        `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
+                r.bob_amount, r.fulfilled_at, r.created_at,
+                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                c.product_bob_amount AS cdk_product_bob_amount,
+                c.cdk_code, c.batch_id
+         FROM redeems r
+         LEFT JOIN users u ON u.userid = r.userid
+         LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
+         WHERE r.exchange_id = ?
+         LIMIT 1`,
+        [exchangeId],
+      );
+      if (!order) return res.status(404).json({ error: 'order not found' });
+      const ledger = await db.all(
+        'SELECT id, userid, delta, reason, ref_id, created_at FROM ledger WHERE ref_id = ? ORDER BY created_at DESC, id DESC LIMIT 20',
+        [exchangeId],
+      );
+      return res.json({ ok: true, data: { order, ledger } });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

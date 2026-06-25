@@ -21,6 +21,8 @@ export function createApp({ db, cfg } = {}) {
 
   const pagesAssetsRoot = fileURLToPath(new URL('./pages/assets/', import.meta.url));
   app.use('/assets', express.static(pagesAssetsRoot, { maxAge: 0 }));
+  const adminAppRoot = fileURLToPath(new URL('./pages/admin-app-dist/', import.meta.url));
+  app.use('/admin-app', express.static(adminAppRoot, { maxAge: 0 }));
 
   app.locals.db = db;
   app.locals.cfg = cfg;
