@@ -11,6 +11,16 @@ const charityStatusText = { active: '启用', paused: '暂停', archived: '归�
 const executionStatusText = { pending: '待执行', in_progress: '执行中', completed: '已完成' };
 const attendanceStatusText = { rewarded: '已奖励', skipped: '已跳过', error: '异常', pending: '待处理' };
 const attendanceSourceText = { stream: '实时推送', reconcile: '自动补发/对账', audit_seed: '历史补录', historical: '历史记录' };
+const attendanceCheckTypeText = { on_duty: '上班打卡', off_duty: '下班打卡' };
+const attendanceReasonText = {
+  skipped_off_duty: '下班打卡按规则不发放',
+  skip_not_on_duty: '非上班打卡按规则不发放',
+  not_on_duty: '非上班打卡按规则不发放',
+  skipped_late: '迟到打卡不发放',
+  late: '迟到打卡不发放',
+  duplicate: '当天已发放，重复打卡不再发放',
+  department_not_matched: '不在适用部门范围内',
+};
 
 function statusText(map, value) {
   return map[value] || value || '-';
@@ -80,6 +90,14 @@ function attendanceUser(row) {
   const userid = String(row?.userid || '').trim();
   if (name && userid && name !== userid) return `${name} (${userid})`;
   return name || userid || '-';
+}
+
+function attendanceNote(row) {
+  const raw = row?.error_message || row?.skip_reason || row?.reward_reason || '';
+  const key = String(raw || '').trim();
+  if (attendanceReasonText[key]) return attendanceReasonText[key];
+  if (row?.check_type === 'off_duty' && row?.status === 'skipped') return '下班打卡按规则不发放';
+  return key || '-';
 }
 
 function AttendanceRewards({ dingtalk }) {
@@ -176,17 +194,23 @@ function AttendanceRewards({ dingtalk }) {
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     {!dingtalk?.connected && <Alert type="warning" showIcon message="钉钉未连接，部门选择和实时打卡奖励不可用。" />}
     <Card title="打卡奖励配置" extra={<Button type="primary" loading={saving} onClick={() => form.submit()}>保存</Button>} loading={loading}>
-      <Form form={form} layout="vertical" onFinish={save} className="settings-form">
-        <Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" /></Form.Item>
-        <Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} /></Form.Item>
-        <Form.Item label="奖励范围"><Space><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} /></Form.Item><span>—</span><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} /></Form.Item></Space></Form.Item>
-        <Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} /></Form.Item>
-        <Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item label="适用部门"><Select value={mode} onChange={setMode} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} style={{ width: 160 }} /></Form.Item>
-        {mode === 'selected' && <Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item>}
-        <Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" /></Form.Item>
+      <Form form={form} layout="vertical" onFinish={save} className="attendance-settings-form">
+        <Row gutter={[16, 8]} align="middle">
+          <Col xs={24} md={8} lg={6}><Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch /></Form.Item></Col>
+        </Row>
+        <Row gutter={[16, 8]}>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item label="奖励范围"><Space.Compact style={{ width: '100%' }}><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} style={{ width: '50%' }} /></Form.Item><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} style={{ width: '50%' }} /></Form.Item></Space.Compact></Form.Item></Col>
+        </Row>
+        <Row gutter={[16, 8]}>
+          <Col xs={24} md={8} lg={6}><Form.Item label="适用部门"><Select value={mode} onChange={setMode} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} /></Form.Item></Col>
+          {mode === 'selected' && <Col xs={24} md={16} lg={10}><Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item></Col>}
+          <Col xs={24} md={mode === 'selected' ? 24 : 16} lg={mode === 'selected' ? 8 : 12}><Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" /></Form.Item></Col>
+        </Row>
       </Form>
     </Card>
 
@@ -223,11 +247,11 @@ function AttendanceRewards({ dingtalk }) {
         <Table rowKey={(row) => `${row.userid}_${row.check_time_ms}`} size="small" dataSource={detailRows} pagination={localTablePagination('条记录')} scroll={{ x: 960 }} columns={[
           { title: '打卡时间', dataIndex: 'check_time_text', width: 160 },
           { title: '用户', render: (_, row) => attendanceUser(row), width: 220 },
-          { title: '类型', dataIndex: 'check_type', width: 120 },
+          { title: '类型', dataIndex: 'check_type', width: 120, render: (v) => attendanceCheckTypeText[v] || v || '-' },
           { title: '来源', dataIndex: 'event_source', width: 130, render: (v) => attendanceSourceText[v] || v || '-' },
           { title: '状态', dataIndex: 'status', width: 110, render: (v) => <Tag color={v === 'rewarded' ? 'green' : v === 'error' ? 'red' : 'default'}>{attendanceStatusText[v] || v || '-'}</Tag> },
           { title: '奖励', dataIndex: 'reward_amount', width: 110, render: (v, row) => row.status === 'rewarded' ? amountText(v) : '-' },
-          { title: '说明', render: (_, row) => row.error_message || row.skip_reason || row.reward_reason || '-' },
+          { title: '说明', render: (_, row) => attendanceNote(row) },
         ]} />
       </Space>}
     </Drawer>

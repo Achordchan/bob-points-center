@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CameraOutlined, CheckOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { App, Button, Card, Input, Space, Typography, Upload } from 'antd';
-import { api } from '../api.js';
+import { api, translateErrorMessage } from '../api.js';
 
 const DINGTALK_JSAPI_SRC = 'https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js';
 let dingtalkScriptPromise = null;
@@ -40,6 +40,21 @@ function loadDingtalkJsapi() {
 
 function isDingtalkClient() {
   return /DingTalk/i.test(navigator.userAgent || '');
+}
+
+function formatBrowserPermissionError(error, actionText) {
+  const raw = String(error?.name || error?.message || error || '').trim();
+  const lower = raw.toLowerCase();
+  if (lower.includes('notallowederror') || lower.includes('permission denied') || lower.includes('permission dismissed')) {
+    return `${actionText}权限未开启，请在浏览器地址栏允许后重试。`;
+  }
+  if (lower.includes('notfounderror') || lower.includes('no camera') || lower.includes('not found')) {
+    return '没有检测到可用摄像头，请上传二维码图片或粘贴 encoded 内容。';
+  }
+  if (lower.includes('notreadableerror') || lower.includes('could not start')) {
+    return '摄像头被其他应用占用，请关闭占用程序后重试。';
+  }
+  return translateErrorMessage(error?.message || error) || '操作失败';
 }
 
 async function tryDingtalkScan() {
@@ -213,7 +228,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
       }
       frameRef.current = window.requestAnimationFrame(scanVideoFrame);
     } catch (err) {
-      message.error(err.message || '无法打开扫码');
+      message.error(formatBrowserPermissionError(err, '摄像头'));
       stopCamera();
     } finally {
       setDetecting(false);
@@ -253,7 +268,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
       }
       message.warning('剪贴板中没有二维码图片或 encoded 内容');
     } catch (err) {
-      message.warning(err.message || '无法读取剪贴板');
+      message.warning(formatBrowserPermissionError(err, '剪贴板'));
     } finally {
       setDetecting(false);
     }

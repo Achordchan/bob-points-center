@@ -2,12 +2,30 @@ import { useEffect, useState } from 'react';
 import { App, Button, Card, Descriptions, Drawer, Form, Input, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
+import RichTextEditor from '../components/RichTextEditor.jsx';
 import { formatTs, toUnix } from '../utils.js';
 
 const feedbackStatusText = { pending: '待处理', processing: '处理中', resolved: '已处理', rejected: '已驳回' };
 const feedbackCategoryText = { bug: '问题反馈', question: '咨询问题', rule: '规则相关', suggestion: '建议', other: '其他' };
 const announcementLevelText = { info: '普通', warning: '提醒', danger: '重要' };
 const announcementLevelColor = { info: 'blue', warning: 'orange', danger: 'red' };
+
+function richTextIsEmpty(value) {
+  const text = String(value || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, '').trim();
+  return !text;
+}
+
+function plainText(value) {
+  return String(value || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+}
+
+function FeedbackMessageContent({ item }) {
+  const content = String(item?.content || '');
+  if (item?.sender_type === 'admin' && /^\s*</.test(content)) {
+    return <div className="feedback-message-content rich-content" dangerouslySetInnerHTML={{ __html: content }} />;
+  }
+  return <div className="feedback-message-content">{content || '-'}</div>;
+}
 
 function Faq() {
   const { message } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
@@ -51,7 +69,22 @@ function Feedback() {
   const load = async () => setRows((await api(`/admin/content/feedback?${qs({ limit: 200, status, keyword })}`)).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, [status]);
   const open = (row) => { form.resetFields(); setHandling(row); form.setFieldsValue({ status: row.status || 'pending', reply: '' }); };
-  const save = async (values) => { await api('/admin/content/feedback/handle', { method: 'POST', body: { id: handling.id, status: values.status, reply: values.reply || '' } }); message.success(values.reply ? '回复已追加' : '状态已更新'); setHandling(null); form.resetFields(); load(); };
+  const saveStatus = async () => {
+    const values = await form.validateFields(['status']);
+    await api('/admin/content/feedback/handle', { method: 'POST', body: { id: handling.id, status: values.status, reply: '' } });
+    message.success('状态已保存');
+    await load();
+  };
+  const sendReply = async () => {
+    const values = await form.validateFields(['status']);
+    const reply = form.getFieldValue('reply') || '';
+    if (richTextIsEmpty(reply)) return message.warning('请先填写回复内容');
+    await api('/admin/content/feedback/handle', { method: 'POST', body: { id: handling.id, status: values.status, reply } });
+    message.success('回复已发送');
+    form.setFieldValue('reply', '');
+    setHandling(null);
+    await load();
+  };
   const messages = (row) => {
     const list = Array.isArray(row?.messages) ? row.messages : [];
     if (list.length) return list;
@@ -66,11 +99,11 @@ function Feedback() {
       { title: '类型', dataIndex: 'category', render: (v) => feedbackCategoryText[v] || v || '-' },
       { title: '内容', dataIndex: 'content', ellipsis: true },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'resolved' ? 'green' : v === 'rejected' ? 'red' : v === 'processing' ? 'blue' : 'default'}>{feedbackStatusText[v] || v || '-'}</Tag> },
-      { title: '回复', dataIndex: 'reply', ellipsis: true, render: (v) => v || '-' },
+      { title: '回复', dataIndex: 'reply', ellipsis: true, render: (v) => plainText(v) || '-' },
       { title: '时间', dataIndex: 'created_at', render: formatTs },
       { title: '操作', render: (_, r) => <Button onClick={() => open(r)}>处理</Button> },
     ]} />
-    <Drawer title="处理反馈" open={Boolean(handling)} onClose={() => { setHandling(null); form.resetFields(); }} width={720} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
+    <Drawer title="处理反馈" open={Boolean(handling)} onClose={() => { setHandling(null); form.resetFields(); }} width={760}>
       {handling && <Space direction="vertical" style={{ width: '100%' }} size={16}>
         <Descriptions bordered column={1} items={[
           { key: 'user', label: '用户', children: handling.name ? `${handling.name} (${handling.userid})` : handling.userid },
@@ -84,13 +117,19 @@ function Feedback() {
           <div className="feedback-message-list">
             {messages(handling).map((item, index) => <div className={`feedback-message ${item.sender_type === 'admin' ? 'is-admin' : 'is-user'}`} key={item.id || index}>
               <div className="feedback-message-meta">{item.sender_type === 'admin' ? '后台回复' : '用户反馈'} · {item.sender_name || '-'} · {formatTs(item.created_at)}</div>
-              <div className="feedback-message-content">{item.content || '-'}</div>
+              <FeedbackMessageContent item={item} />
             </div>)}
           </div>
         </Card>
-        <Form form={form} layout="vertical" onFinish={save}>
-          <Form.Item label="处理状态" name="status" rules={[{ required: true, message: '请选择状态' }]}><Select options={[{ value: 'pending', label: '待处理' }, { value: 'processing', label: '处理中' }, { value: 'resolved', label: '已处理' }, { value: 'rejected', label: '已驳回' }]} /></Form.Item>
-          <Form.Item label="追加回复" name="reply"><Input.TextArea rows={5} placeholder="填写本次回复内容，保存后会追加到对话记录" /></Form.Item>
+        <Form form={form} layout="vertical">
+          <Form.Item label="处理状态" required>
+            <Space.Compact style={{ width: '100%' }}>
+              <Form.Item name="status" noStyle rules={[{ required: true, message: '请选择状态' }]}><Select options={[{ value: 'pending', label: '待处理' }, { value: 'processing', label: '处理中' }, { value: 'resolved', label: '已处理' }, { value: 'rejected', label: '已驳回' }]} /></Form.Item>
+              <Button onClick={saveStatus}>保存状态</Button>
+            </Space.Compact>
+          </Form.Item>
+          <Form.Item label="追加回复" name="reply"><RichTextEditor minHeight={150} /></Form.Item>
+          <div className="feedback-reply-actions"><Button type="primary" onClick={sendReply}>发送回复</Button></div>
         </Form>
       </Space>}
     </Drawer>

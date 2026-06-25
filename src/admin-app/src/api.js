@@ -1,3 +1,45 @@
+const errorTextMap = {
+  'Permission denied': '权限不足，无法执行该操作',
+  permission_denied: '权限不足，无法执行该操作',
+  forbidden: '权限不足，无法执行该操作',
+  unauthorized: '登录状态已失效，请重新登录',
+  'missing id': '缺少记录 ID',
+  'feedback not found': '反馈记录不存在',
+  'missing content': '请填写内容',
+  'content too long': '内容过长',
+  'missing userid': '缺少用户 ID',
+  'missing product_id': '缺少商品 ID',
+  'missing product_name': '缺少商品名称',
+  'invalid amount': '金额无效',
+  'amount must be positive integer': '金额必须是正整数',
+  'insufficient balance': '余额不足',
+  'product not found': '商品不存在',
+  'product not on sale': '商品未上架',
+  'out of stock': '库存不足',
+  'purchase_limit_reached': '已达到限购次数',
+  'cdk not found': 'CDK 不存在',
+  'cdk already redeemed': 'CDK 已兑换',
+  'redeemed cdk cannot be deleted': '已兑换的 CDK 不能删除',
+  'exchange already redeemed': '该订单已核销',
+  'payload mismatch': '核销内容不匹配',
+};
+
+export function translateErrorMessage(error) {
+  const raw = String(error || '').trim();
+  if (!raw) return '操作失败';
+  if (errorTextMap[raw]) return errorTextMap[raw];
+  const lower = raw.toLowerCase();
+  if (errorTextMap[lower]) return errorTextMap[lower];
+  if (lower.includes('permission denied')) return '权限不足，无法执行该操作';
+  if (lower.includes('unauthorized')) return '登录状态已失效，请重新登录';
+  if (lower.includes('failed to fetch') || lower.includes('network')) return '网络异常，请稍后重试';
+  if (lower.startsWith('http 401')) return '登录状态已失效，请重新登录';
+  if (lower.startsWith('http 403')) return '权限不足，无法执行该操作';
+  if (lower.startsWith('http 404')) return '请求的资源不存在';
+  if (lower.startsWith('http 500')) return '服务器异常，请稍后重试';
+  return raw;
+}
+
 export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   let body = options.body;
@@ -13,7 +55,7 @@ export async function api(path, options = {}) {
     data = null;
   }
   if (!res.ok || data?.ok === false || data?.error) {
-    throw new Error(data?.error || `HTTP ${res.status}`);
+    throw new Error(translateErrorMessage(data?.error || `HTTP ${res.status}`));
   }
   return data;
 }
