@@ -2,11 +2,22 @@ import { Router } from 'express';
 
 import { requireAdminSession } from '../middleware/requireAdminSession.js';
 import { createBobToken, deleteBobToken, listBobTokens, revokeBobToken } from '../services/bobTokenService.js';
+import { hasAdminPermission } from '../services/adminPermissionService.js';
+
+
+function requireIntegrationPermission(permission) {
+  return (req, res, next) => {
+    if (!hasAdminPermission(req.adminAccess, permission)) {
+      return res.status(403).json({ error: '权限不足，无法执行该操作' });
+    }
+    return next();
+  };
+}
 
 export function bobTokenRouter() {
   const router = Router();
 
-  router.get('/list', requireAdminSession(), async (req, res) => {
+  router.get('/list', requireAdminSession(), requireIntegrationPermission('integrations:view'), async (req, res) => {
     try {
       const db = req.app.locals.db;
       const includeRevoked = req.query.includeRevoked !== '0' && req.query.includeRevoked !== 'false';
@@ -18,7 +29,7 @@ export function bobTokenRouter() {
     }
   });
 
-  router.post('/create', requireAdminSession(), async (req, res) => {
+  router.post('/create', requireAdminSession(), requireIntegrationPermission('integrations:edit'), async (req, res) => {
     try {
       const db = req.app.locals.db;
       const result = await createBobToken(db);
@@ -28,7 +39,7 @@ export function bobTokenRouter() {
     }
   });
 
-  router.post('/revoke', requireAdminSession(), async (req, res) => {
+  router.post('/revoke', requireAdminSession(), requireIntegrationPermission('integrations:edit'), async (req, res) => {
     try {
       const db = req.app.locals.db;
       const id = req.body?.tokenId;
@@ -41,7 +52,7 @@ export function bobTokenRouter() {
     }
   });
 
-  router.post('/delete', requireAdminSession(), async (req, res) => {
+  router.post('/delete', requireAdminSession(), requireIntegrationPermission('integrations:edit'), async (req, res) => {
     try {
       const db = req.app.locals.db;
       const id = req.body?.tokenId;

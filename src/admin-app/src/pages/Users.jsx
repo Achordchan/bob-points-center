@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Switch, Table, Tabs, Tag } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import { amountText, formatTs } from '../utils.js';
+import { hasPermission } from '../permissions.js';
 
-export default function Users() {
+export default function Users({ me }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
@@ -18,9 +19,15 @@ export default function Users() {
   const [op, setOp] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState([]);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [roles, setRoles] = useState([]);
   const [form] = Form.useForm();
 
   const normalizeKeyword = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const canGrant = hasPermission(me, 'users:grant');
+  const canDeduct = hasPermission(me, 'users:deduct');
+  const canDelete = me?.isSuperAdmin === true;
+  const canEdit = hasPermission(me, 'users:edit');
+  const canAssignRole = me?.isSuperAdmin === true;
 
   const load = async (nextPage = page, nextKeyword = keyword, nextPageSize = pageSize) => {
     setLoading(true);
@@ -49,6 +56,11 @@ export default function Users() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [keyword]);
+
+  useEffect(() => {
+    if (!canAssignRole) return;
+    api('/admin/roles').then((data) => setRoles((data.data || []).filter((role) => Number(role.is_enabled) === 1))).catch(() => null);
+  }, [canAssignRole]);
 
   const openDetail = async (userid) => {
     const data = await api(`/admin/users/${encodeURIComponent(userid)}`);
@@ -91,10 +103,21 @@ export default function Users() {
     if (detail?.user?.userid) await openDetail(detail.user.userid);
   };
 
-  const setAdmin = async (record, checked) => {
-    await api('/admin/users/set-admin', { method: 'POST', body: { userid: record.userid, isAdmin: checked } });
-    message.success('管理员权限已更新');
-    load();
+  const assignRole = async (record, roleId) => {
+    const role = roles.find((item) => String(item.id) === String(roleId));
+    const roleName = role?.name || '无后台角色';
+    Modal.confirm({
+      title: '确认修改后台角色？',
+      content: `将把 ${record.name || record.userid} 的后台角色改为「${roleName}」，权限会立即生效。`,
+      okText: '确认修改',
+      cancelText: '取消',
+      onOk: async () => {
+        await api('/admin/users/assign-role', { method: 'POST', body: { userid: record.userid, roleId: roleId || null } });
+        message.success('后台角色已更新');
+        await load();
+        if (detail?.user?.userid === record.userid) await openDetail(record.userid);
+      },
+    });
   };
 
   const deleteUsers = (userids) => {
@@ -121,19 +144,19 @@ export default function Users() {
     { title: '姓名', dataIndex: 'name', render: (v, r) => <Button type="link" onClick={() => openDetail(r.userid)}>{v || '-'}</Button> },
     { title: 'Userid', dataIndex: 'userid', ellipsis: true },
     { title: '余额', dataIndex: 'balance', render: amountText, sorter: (a, b) => Number(a.balance) - Number(b.balance) },
-    { title: '管理员', render: (_, r) => <Switch size="small" checked={Number(r.is_admin) === 1} disabled={Number(r.is_fixed_admin) === 1} onChange={(v) => setAdmin(r, v)} /> },
+    { title: '后台角色', render: (_, r) => r.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (canAssignRole ? <Select size="small" value={r.role?.id || null} placeholder="无后台角色" style={{ width: 150 }} options={[{ value: null, label: '无后台角色' }, ...roles.map((role) => ({ value: role.id, label: role.name }))]} onChange={(v) => assignRole(r, v)} /> : (r.role?.name ? <Tag color="blue">{r.role.name}</Tag> : '-')) },
     { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
-    { title: '操作', fixed: 'right', render: (_, r) => <Space><Button onClick={() => { setOp({ type: 'grant', userid: r.userid }); form.resetFields(); }}>发币</Button><Button onClick={() => { setOp({ type: 'deduct', userid: r.userid }); form.resetFields(); }}>减币</Button></Space> },
+    { title: '操作', fixed: 'right', render: (_, r) => <Space>{canGrant && <Button onClick={() => { setOp({ type: 'grant', userid: r.userid }); form.resetFields(); }}>发币</Button>}{canDeduct && <Button onClick={() => { setOp({ type: 'deduct', userid: r.userid }); form.resetFields(); }}>减币</Button>}</Space> },
   ];
 
   return (
     <Card>
       <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1, keyword)} searchPlaceholder="搜索姓名 / Userid">
-        <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>
+        {canEdit && <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>}
         {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
-        <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>
-        <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>
-        <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>
+        {canGrant && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>}
+        {canDeduct && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>}
+        {canDelete && <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>}
         <Button disabled={!selected.length} onClick={clearSelected}>清空选择</Button>
       </DataToolbar>
       <Table
@@ -162,10 +185,11 @@ export default function Users() {
             { key: 'name', label: '姓名', children: detail.user?.name || '-' },
             { key: 'userid', label: 'Userid', children: detail.user?.userid || '-' },
             { key: 'balance', label: '余额', children: amountText(detail.account?.balance) },
-            { key: 'admin', label: '管理员', children: Number(detail.user?.is_admin) === 1 ? <Tag color="blue">是</Tag> : '否' },
+            { key: 'admin', label: '后台角色', children: detail.user?.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (detail.user?.role?.name ? <Tag color="blue">{detail.user.role.name}</Tag> : '无后台角色') },
           ]} /> },
           { key: 'ledger', label: '余额流水', children: <Table rowKey="id" size="small" dataSource={detail.ledger || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '金额', dataIndex: 'delta', render: amountText }, { title: '原因', dataIndex: 'reason' }, { title: '单号', dataIndex: 'ref_id' }]} /> },
           { key: 'orders', label: '订单记录', children: <Table rowKey="exchange_id" size="small" dataSource={detail.redeems || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '商品', dataIndex: 'product_name' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }, { title: '状态', render: (_, r) => r.fulfilled_at ? '已核销' : '未核销' }]} /> },
+          { key: 'ops', label: '最近操作', children: <Table rowKey="id" size="small" dataSource={detail.operations || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '操作', dataIndex: 'event_label' }, { title: '状态', dataIndex: 'status_code' }, { title: '说明', dataIndex: 'message', ellipsis: true }]} /> },
         ]} />}
       </Drawer>
       <Modal title={op?.type === 'grant' ? '发币' : '减币'} open={Boolean(op)} onCancel={() => setOp(null)} onOk={() => form.submit()} okText="确认" cancelText="取消">

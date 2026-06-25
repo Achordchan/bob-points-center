@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { ensureAdminRoles } from '../services/adminPermissionService.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -128,6 +129,29 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type);
+
+CREATE TABLE IF NOT EXISTS admin_roles (
+  id BIGSERIAL PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  permissions TEXT NOT NULL DEFAULT '[]',
+  is_builtin INTEGER NOT NULL DEFAULT 0,
+  is_enabled INTEGER NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  updated_at BIGINT NOT NULL DEFAULT (${nowExpr})
+);
+CREATE INDEX IF NOT EXISTS idx_admin_roles_enabled ON admin_roles(is_enabled, id);
+
+CREATE TABLE IF NOT EXISTS admin_user_roles (
+  userid TEXT PRIMARY KEY,
+  role_id BIGINT NOT NULL,
+  assigned_by TEXT,
+  assigned_name TEXT,
+  assigned_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE,
+  FOREIGN KEY (role_id) REFERENCES admin_roles(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_admin_user_roles_role_id ON admin_user_roles(role_id);
 
 CREATE TABLE IF NOT EXISTS content_faq (
   id BIGSERIAL PRIMARY KEY,
@@ -576,6 +600,10 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_by TEXT");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_name TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
+  await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '[]'");
+  await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_builtin INTEGER NOT NULL DEFAULT 0");
+  await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_enabled INTEGER NOT NULL DEFAULT 1");
+  await ensureAdminRoles(db);
   await db.exec(`INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
     SELECT f.id, 'user', f.userid, COALESCE(f.name, ''), f.content, f.created_at
     FROM user_feedback f

@@ -3,6 +3,7 @@ import { App as AntApp, Modal, Spin } from 'antd';
 import { api } from './api.js';
 import AppShell from './components/AppShell.jsx';
 import DingtalkModal from './components/DingtalkModal.jsx';
+import { canAccessNav } from './permissions.js';
 
 const pages = {
   dashboard: lazy(() => import('./pages/Dashboard.jsx')),
@@ -14,6 +15,7 @@ const pages = {
   content: lazy(() => import('./pages/ContentOps.jsx')),
   integrations: lazy(() => import('./pages/Integrations.jsx')),
   audit: lazy(() => import('./pages/AuditSecurity.jsx')),
+  myOperations: lazy(() => import('./pages/MyOperations.jsx')),
 };
 
 export default function AdminApp() {
@@ -43,6 +45,12 @@ export default function AdminApp() {
     loadMe().catch(() => window.location.replace('/admin/login'));
     loadDingtalk();
   }, [loadMe, loadDingtalk]);
+
+  useEffect(() => {
+    if (!me || activeKey === 'myOperations' || canAccessNav(me, activeKey)) return;
+    const fallback = ['dashboard', 'users', 'orders', 'commerce', 'activities', 'messages', 'content', 'integrations', 'audit'].find((key) => canAccessNav(me, key));
+    setActiveKey(fallback || 'myOperations');
+  }, [activeKey, me]);
 
   const saveDingtalk = async (values) => {
     const current = dingtalk.data || {};
@@ -79,7 +87,7 @@ export default function AdminApp() {
   };
 
   const Page = pages[activeKey] || pages.dashboard;
-  const common = { onOpenDingtalk: () => setModalOpen(true), dingtalk, reloadDingtalk: loadDingtalk, onNavigate: setActiveKey };
+  const common = { onOpenDingtalk: () => setModalOpen(true), dingtalk, reloadDingtalk: loadDingtalk, onNavigate: setActiveKey, me };
 
   return (
     <>

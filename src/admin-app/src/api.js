@@ -8,6 +8,8 @@ const errorTextMap = {
   'missing content': '请填写内容',
   'content too long': '内容过长',
   'missing userid': '缺少用户 ID',
+  'missing role name': '请输入角色名称',
+  '角色不存在或已停用': '角色不存在或已停用',
   'missing product_id': '缺少商品 ID',
   'missing product_name': '缺少商品名称',
   'invalid amount': '金额无效',

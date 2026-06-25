@@ -57,6 +57,15 @@ import {
 } from '../services/systemSettings.js';
 import { getUserName, sendOrQueueNotify } from '../services/notifyOpsService.js';
 import { requireAdminSession } from '../middleware/requireAdminSession.js';
+import {
+  ADMIN_PERMISSION_CATALOG,
+  adminAccessMiddleware,
+  getAdminAccess,
+  hasAdminPermission,
+  isSuperAdminSession,
+  normalizePermissions,
+  serializeRole,
+} from '../services/adminPermissionService.js';
 import { verifyEncoded, QRSignError } from '../utils/qr.js';
 import {
   getImageOptimizationOverview,
@@ -137,8 +146,16 @@ async function isAdmin(db, cfg, userid) {
   const uid = String(userid || '').trim();
   if (!uid) return false;
   if (allow.includes(uid)) return true;
-  const row = await db.get('SELECT is_admin FROM users WHERE userid = ? LIMIT 1', [uid]);
-  return Number(row?.is_admin) === 1;
+  const row = await db.get(
+    `SELECT u.is_admin, r.is_enabled
+     FROM users u
+     LEFT JOIN admin_user_roles ur ON ur.userid = u.userid
+     LEFT JOIN admin_roles r ON r.id = ur.role_id
+     WHERE u.userid = ?
+     LIMIT 1`,
+    [uid],
+  );
+  return Number(row?.is_admin) === 1 || Number(row?.is_enabled) === 1;
 }
 
 function isFixedAdmin(cfg, userid) {
@@ -175,6 +192,26 @@ function parseAuditPayload(payload) {
   } catch {
     return null;
   }
+}
+
+function classifyAdminAudit(row = {}) {
+  const path = String(row.path || '');
+  const method = String(row.method || '').toUpperCase();
+  if (path.includes('/ledger/grant-batch')) return { event_group: 'grant', event_label: '后台发币' };
+  if (path.includes('/redeem/deduct-batch')) return { event_group: 'deduct', event_label: '后台减币' };
+  if (path.includes('/redeem/confirm')) return { event_group: 'redeem', event_label: '订单核销' };
+  if (path.includes('/backup/export')) return { event_group: 'backup', event_label: '导出备份' };
+  if (path.includes('/backup/import')) return { event_group: 'backup', event_label: '导入备份' };
+  if (path.includes('/users/assign-role') || path.includes('/roles/')) return { event_group: 'role', event_label: '角色权限变更' };
+  if (path.includes('/users/delete')) return { event_group: 'danger', event_label: '删除用户' };
+  if (path.includes('/data/reset') || path.includes('/history/clear')) return { event_group: 'danger', event_label: '危险操作' };
+  if (method === 'POST') return { event_group: 'write', event_label: '后台操作' };
+  return { event_group: 'read', event_label: '查看' };
+}
+
+function serializeAuditRow(row = {}) {
+  const classified = classifyAdminAudit(row);
+  return { ...row, ...classified, payload: parseAuditPayload(row.payload) || row.payload };
 }
 
 async function enrichRedeemConfirmAuditRows(db, rows) {
@@ -574,6 +611,8 @@ export function adminRouter() {
     res.setHeader('Cache-Control', 'no-store');
     return res.redirect(302, '/admin/login');
   });
+
+  router.use(adminAccessMiddleware());
 
   router.post('/notify/group-card', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
@@ -1341,7 +1380,16 @@ export function adminRouter() {
       }
       const db = req.app?.locals?.db;
       const name = await resolveAdminDisplayName(db, cfg, payload);
-      return res.json({ ok: true, name, userid: payload.userid || '', mode: payload.mode || '' });
+      const access = await getAdminAccess(db, cfg, { ...payload, name });
+      return res.json({
+        ok: true,
+        name,
+        userid: payload.userid || '',
+        mode: payload.mode || '',
+        isSuperAdmin: access.isSuperAdmin === true,
+        role: access.role,
+        permissions: access.permissions || [],
+      });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -1398,9 +1446,12 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const user = await db.get(
-        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at,
+                r.id AS role_id, r.name AS role_name, r.permissions AS role_permissions, r.is_enabled AS role_enabled
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
+         LEFT JOIN admin_user_roles ur ON ur.userid = u.userid
+         LEFT JOIN admin_roles r ON r.id = ur.role_id
          WHERE u.userid = ?
          LIMIT 1`,
         [userid],
@@ -1431,15 +1482,27 @@ export function adminRouter() {
          LIMIT 80`,
         [userid],
       );
+      const operations = await db.all(
+        `SELECT id, event_type, actor_type, actor_id, actor_name, ip, method, path, status_code, message, payload, created_at
+         FROM audit_logs
+         WHERE actor_id = ?
+         ORDER BY id DESC
+         LIMIT 20`,
+        [userid],
+      );
       const fixedAdmin = isFixedAdmin(cfg, userid);
+      const role = fixedAdmin
+        ? { id: null, code: 'super_admin', name: '超级管理员', permissions: [] }
+        : (user.role_id ? { id: user.role_id, name: user.role_name, permissions: normalizePermissions(parseAuditPayload(user.role_permissions) || []) } : null);
       return res.json({
         ok: true,
         data: {
-          user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0 },
+          user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 || role ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0, role },
           account: { balance: Number(user.balance || 0), updated_at: user.updated_at },
           ledger,
           redeems,
           contributions,
+          operations: (operations || []).map(serializeAuditRow),
         },
       });
     } catch (err) {
@@ -1513,6 +1576,7 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
+      req.auditLogPayload = { userids, amount, product_name: productName };
 
       const baseExchangeId = `ADMIN_DEDUCT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const result = await adminDeductBatchWithNotify(db, cfg, {
@@ -1684,6 +1748,116 @@ export function adminRouter() {
       if (!r?.changes) {
         return res.status(400).json({ error: 'user not found' });
       }
+      if (isAdminFlag) {
+        const role = await db.get("SELECT id FROM admin_roles WHERE code = 'admin' LIMIT 1");
+        if (role?.id) {
+          await db.exec(
+            `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+             VALUES(?, ?, ?, ?, unixepoch())
+             ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+            [userid, role.id, req.adminSession?.userid || '', req.adminSession?.name || ''],
+          );
+        }
+      } else {
+        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/permissions/catalog', requireAdminSession(), async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, data: ADMIN_PERMISSION_CATALOG });
+  });
+
+  router.get('/roles', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const rows = await db.all(
+        `SELECT r.*, COUNT(ur.userid) AS user_count
+         FROM admin_roles r
+         LEFT JOIN admin_user_roles ur ON ur.role_id = r.id
+         GROUP BY r.id
+         ORDER BY r.is_builtin DESC, r.id ASC`,
+      );
+      return res.json({ ok: true, data: (rows || []).map(serializeRole) });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/roles/save', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const id = toOptionalInt(req.body?.id);
+    const name = req.body?.name ? String(req.body.name).trim() : '';
+    const permissions = normalizePermissions(req.body?.permissions || []);
+    if (!name) return res.status(400).json({ error: 'missing role name' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      let roleId = id;
+      if (roleId) {
+        const r = await db.run(
+          'UPDATE admin_roles SET name = ?, permissions = ?, updated_at = unixepoch() WHERE id = ?',
+          [name, JSON.stringify(permissions), roleId],
+        );
+        if (!r?.changes) return res.status(404).json({ error: '角色不存在' });
+      } else {
+        const code = `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const r = await db.run(
+          'INSERT INTO admin_roles(code, name, permissions, is_builtin, is_enabled, created_at, updated_at) VALUES(?, ?, ?, 0, 1, unixepoch(), unixepoch())',
+          [code, name, JSON.stringify(permissions)],
+        );
+        roleId = r.lastID;
+      }
+      return res.json({ ok: true, id: roleId });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/roles/disable', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const id = toInt(req.body?.id);
+    if (!id) return res.status(400).json({ error: 'missing id' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const count = await db.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
+      if (Number(count?.c || 0) > 0) return res.status(400).json({ error: '该角色已有用户使用，请先调整用户角色' });
+      const r = await db.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
+      if (!r?.changes) return res.status(404).json({ error: '角色不存在' });
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/users/assign-role', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    const userid = req.body?.userid ? String(req.body.userid).trim() : '';
+    const roleId = toOptionalInt(req.body?.roleId);
+    if (!userid) return res.status(400).json({ error: 'missing userid' });
+    if (isFixedAdmin(cfg, userid)) return res.status(400).json({ error: '超级管理员不能修改角色' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      req.auditLogPayload = { userid, roleId };
+      if (roleId) {
+        const role = await db.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
+        if (!role || Number(role.is_enabled) !== 1) return res.status(400).json({ error: '角色不存在或已停用' });
+        await db.exec(
+          `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+           VALUES(?, ?, ?, ?, unixepoch())
+           ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+          [userid, roleId, req.adminSession?.userid || '', req.adminSession?.name || ''],
+        );
+        await db.run('UPDATE users SET is_admin = 1 WHERE userid = ?', [userid]);
+      } else {
+        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
+        await db.run('UPDATE users SET is_admin = 0 WHERE userid = ?', [userid]);
+      }
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1707,6 +1881,48 @@ export function adminRouter() {
       const rows = await db.all(sql, hasLimit ? [minCreatedAt, limit] : [minCreatedAt]);
       await enrichRedeemConfirmAuditRows(db, rows);
       return res.json({ ok: true, days, limit, data: rows || [] });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/my/operations', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const days = Math.min(90, Math.max(1, toPositiveInt(req.query?.days, 30)));
+    const limit = Math.min(500, Math.max(1, toPositiveInt(req.query?.limit, 120)));
+    const eventGroup = String(req.query?.event_group || '').trim();
+    const minCreatedAt = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
+    const actorId = String(req.adminSession?.userid || '').trim();
+    if (!actorId) return res.json({ ok: true, data: [] });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const where = [
+        'created_at >= ?',
+        'actor_id = ?',
+        `(path LIKE '%/ledger/grant-batch%' OR path LIKE '%/redeem/deduct-batch%' OR path LIKE '%/redeem/confirm%' OR path LIKE '%/backup/export%' OR path LIKE '%/backup/import%' OR path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%' OR path LIKE '%/users/assign-role%' OR path LIKE '%/roles/%')`,
+      ];
+      const params = [minCreatedAt, actorId];
+      if (eventGroup) {
+        const groupSql = {
+          grant: "path LIKE '%/ledger/grant-batch%'",
+          deduct: "path LIKE '%/redeem/deduct-batch%'",
+          redeem: "path LIKE '%/redeem/confirm%'",
+          backup: "(path LIKE '%/backup/export%' OR path LIKE '%/backup/import%')",
+          role: "(path LIKE '%/roles/%' OR path LIKE '%/users/assign-role%')",
+          danger: "(path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%')",
+        }[eventGroup];
+        if (groupSql) where.push(groupSql);
+      }
+      const rows = await db.all(
+        `SELECT id, event_type, actor_type, actor_id, actor_name, ip, method, path, status_code, message, payload, created_at
+         FROM audit_logs
+         WHERE ${where.join(' AND ')}
+         ORDER BY id DESC
+         LIMIT ?`,
+        [...params, limit],
+      );
+      await enrichRedeemConfirmAuditRows(db, rows);
+      return res.json({ ok: true, days, limit, data: (rows || []).map(serializeAuditRow) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -2183,9 +2399,12 @@ export function adminRouter() {
       const total = Number(totalRow?.c) || 0;
 
       const rows = await db.all(
-        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at,
+                r.id AS role_id, r.name AS role_name, r.is_enabled AS role_enabled
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
+         LEFT JOIN admin_user_roles ur ON ur.userid = u.userid
+         LEFT JOIN admin_roles r ON r.id = ur.role_id
          ${whereSql}
          ORDER BY (u.name IS NULL), u.name COLLATE NOCASE, u.userid COLLATE NOCASE
          LIMIT ? OFFSET ?`,
@@ -2198,8 +2417,9 @@ export function adminRouter() {
         const isAdminFlag = fixedAdmin || Number(u?.is_admin) === 1;
         return {
           ...u,
-          is_admin: isAdminFlag ? 1 : 0,
+          is_admin: isAdminFlag || u.role_id ? 1 : 0,
           is_fixed_admin: fixedAdmin ? 1 : 0,
+          role: fixedAdmin ? { id: null, name: '超级管理员' } : (u.role_id ? { id: u.role_id, name: u.role_name, is_enabled: u.role_enabled } : null),
         };
       });
 
@@ -2613,6 +2833,7 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
+      req.auditLogPayload = { userids, amount, reason: reason || '后台发币' };
       const result = await grantBatchWithNotify(db, cfg, { userids, amount, reason, refId, awaitNotify: false });
       for (const row of (result?.results || [])) {
         if (row?.ok && row?.userid) {
@@ -2715,6 +2936,7 @@ export function adminRouter() {
     'content_faq',
     'content_announcements',
     'system_versions',
+    'admin_roles',
   ];
 
   // 全量表：包含用户数据（顺序决定导入顺序，users 必须最先）
@@ -2738,6 +2960,8 @@ export function adminRouter() {
     'user_feedback',
     'user_feedback_messages',
     'audit_logs',
+    'admin_roles',
+    'admin_user_roles',
     'system_settings',
   ];
 

@@ -4,8 +4,9 @@ import { api } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
 import { amountText, downloadText, formatTs } from '../utils.js';
+import { hasPermission } from '../permissions.js';
 
-function Products() {
+function Products({ me }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -16,6 +17,8 @@ function Products() {
   const [stockFilter, setStockFilter] = useState('all');
   const [limitFilter, setLimitFilter] = useState('all');
   const [form] = Form.useForm();
+  const canEdit = hasPermission(me, 'commerce:edit');
+  const canDelete = me?.isSuperAdmin === true;
   const load = async () => {
     setLoading(true);
     try {
@@ -134,14 +137,14 @@ function Products() {
     });
   };
   return <>
-    <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={load} onCreate={() => open({ product_id: `P${Date.now().toString(36).toUpperCase()}`, status: 'on', cdk_enabled: false })} createText="新增商品" searchPlaceholder="搜索商品名称 / ID">
+    <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={load} onCreate={canEdit ? () => open({ product_id: `P${Date.now().toString(36).toUpperCase()}`, status: 'on', cdk_enabled: false }) : null} createText="新增商品" searchPlaceholder="搜索商品名称 / ID">
       <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 120 }} options={[{ value: 'all', label: '全部状态' }, { value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} />
       <Select value={stockFilter} onChange={setStockFilter} style={{ width: 130 }} options={[{ value: 'all', label: '全部库存' }, { value: 'available', label: '可售库存' }, { value: 'empty', label: '库存为 0' }, { value: 'limited', label: '限库存' }]} />
       <Select value={limitFilter} onChange={setLimitFilter} style={{ width: 130 }} options={[{ value: 'all', label: '全部限购' }, { value: 'limited', label: '已限购' }, { value: 'unlimited', label: '不限购' }]} />
       {selected.length > 0 && <Tag color="blue">已选 {selected.length} 个</Tag>}
-      <Button disabled={!selected.length} onClick={() => batchSetStatus('on')}>批量上架</Button>
-      <Button disabled={!selected.length} onClick={() => batchSetStatus('off')}>批量下架</Button>
-      <Button danger disabled={!selected.length} onClick={batchRemove}>批量删除</Button>
+      {canEdit && <Button disabled={!selected.length} onClick={() => batchSetStatus('on')}>批量上架</Button>}
+      {canEdit && <Button disabled={!selected.length} onClick={() => batchSetStatus('off')}>批量下架</Button>}
+      {canDelete && <Button danger disabled={!selected.length} onClick={batchRemove}>批量删除</Button>}
       <Button disabled={!selected.length} onClick={() => setSelected([])}>清空选择</Button>
     </DataToolbar>
     <Table
@@ -158,7 +161,7 @@ function Products() {
       { title: '库存', render: (_, r) => r.stock ?? '不限' },
       { title: '限购', render: (_, r) => Number(r.limit_per_user) > 0 ? `每人 ${Number(r.limit_per_user)} · 第 ${Math.max(1, Number(r.limit_round || 1))} 轮` : '不限' },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'on' ? 'success' : 'default'}>{v === 'on' ? '上架' : '下架'}</Tag> },
-      { title: '操作', fixed: 'right', render: (_, r) => <Space><Button onClick={() => open(r)}>编辑</Button><Button danger onClick={() => remove(r)}>删除</Button></Space> },
+      { title: '操作', fixed: 'right', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> },
     ]}
     />
     <Drawer title={savedEditing ? "商品编辑" : "新增商品"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={620} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
@@ -185,7 +188,7 @@ function Products() {
   </>;
 }
 
-function Cdks() {
+function Cdks({ me }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [products, setProducts] = useState([]);
@@ -193,6 +196,7 @@ function Cdks() {
   const [generated, setGenerated] = useState(null);
   const [generatedOpen, setGeneratedOpen] = useState(false);
   const [form] = Form.useForm();
+  const canCdk = hasPermission(me, 'commerce:cdk');
   const load = async () => {
     setLoading(true);
     try {
@@ -232,7 +236,7 @@ function Cdks() {
   };
   const remove = (id) => Modal.confirm({ title: '危险区：删除 CDK', content: '仅未兑换 CDK 可删除。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/cdks/delete', { method: 'POST', body: { ids: [id] } }); message.success('已删除'); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
-    <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true, message: '请选择商品' }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true, message: '请输入生成数量' }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item><Button type="primary" htmlType="submit">生成并导出</Button><Button onClick={load}>刷新</Button></Form></Card>
+    <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true, message: '请选择商品' }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true, message: '请输入生成数量' }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item>{canCdk && <Button type="primary" htmlType="submit">生成并导出</Button>}<Button onClick={load}>刷新</Button></Form></Card>
     <Modal
       title={`本次生成：${generated?.codes?.length || 0} 个 CDK`}
       open={generatedOpen}
@@ -247,11 +251,13 @@ function Cdks() {
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'unused' ? 'success' : v === 'redeemed' ? 'red' : 'default'}>{v === 'unused' ? '未兑换' : v === 'redeemed' ? '已兑换' : v}</Tag> },
       { title: '创建人', dataIndex: 'created_name' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs },
       { title: '兑换人', dataIndex: 'redeemed_name' }, { title: '兑换订单', dataIndex: 'redeem_exchange_id', ellipsis: true },
-      { title: '操作', render: (_, r) => <Button danger disabled={r.status !== 'unused'} onClick={() => remove(r.id)}>删除</Button> },
+      { title: '操作', render: (_, r) => canCdk ? <Button danger disabled={r.status !== 'unused'} onClick={() => remove(r.id)}>删除</Button> : '-' },
     ]} />
   </Space>;
 }
 
-export default function Commerce() {
-  return <Card><Tabs items={[{ key: 'products', label: '商品管理', children: <Products /> }, { key: 'cdk', label: 'CDK 管理', children: <Cdks /> }]} /></Card>;
+export default function Commerce({ me }) {
+  const items = [{ key: 'products', label: '商品管理', children: <Products me={me} /> }];
+  if (hasPermission(me, 'commerce:cdk')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
+  return <Card><Tabs items={items} /></Card>;
 }

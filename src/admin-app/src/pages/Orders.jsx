@@ -3,6 +3,7 @@ import { App, Button, Card, Descriptions, Drawer, Modal, Space, Table, Tabs } fr
 import { api } from '../api.js';
 import { amountText, formatTs, orderAmount } from '../utils.js';
 import RedeemScanner from '../components/RedeemScanner.jsx';
+import { hasPermission } from '../permissions.js';
 
 function verifierText(row) {
   const name = String(row?.fulfilled_name || '').trim();
@@ -39,7 +40,7 @@ function RedeemCenter({ onRedeemed }) {
   return <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} onRedeem={confirmRedeem} redeeming={redeeming} />;
 }
 
-function OrderTable({ type, onOpen, reloadKey }) {
+function OrderTable({ type, onOpen, reloadKey, me }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -68,24 +69,23 @@ function OrderTable({ type, onOpen, reloadKey }) {
   columns.push({ title: '操作', render: (_, r) => <Button onClick={() => onOpen(r.exchange_id)}>详情</Button> });
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    <Space><Button onClick={load}>刷新</Button>{type === 'history' && <Button danger onClick={() => Modal.confirm({ title: '危险区：清空已核销历史', content: '该操作会隐藏历史核销记录，请确认不再需要追溯。', okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => { await api('/admin/redeem/history/clear', { method: 'POST', body: { confirm: 'CLEAR_REDEEM_HISTORY' } }); message.success('已清空'); load(); } })}>危险区：清空历史</Button>}</Space>
+    <Space><Button onClick={load}>刷新</Button>{type === 'history' && me?.isSuperAdmin && <Button danger onClick={() => Modal.confirm({ title: '危险区：清空已核销历史', content: '该操作会隐藏历史核销记录，请确认不再需要追溯。', okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => { await api('/admin/redeem/history/clear', { method: 'POST', body: { confirm: 'CLEAR_REDEEM_HISTORY' } }); message.success('已清空'); load(); } })}>危险区：清空历史</Button>}</Space>
     <Table rowKey="exchange_id" loading={loading} dataSource={rows} scroll={{ x: type === 'history' ? 1120 : 980 }} columns={columns} />
   </Space>;
 }
 
-export default function Orders() {
+export default function Orders({ me }) {
   const [detail, setDetail] = useState(null);
   const [redeemVersion, setRedeemVersion] = useState(0);
   const open = async (id) => setDetail((await api(`/admin/orders/${encodeURIComponent(id)}`)).data);
+  const items = [];
+  if (hasPermission(me, 'orders:redeem')) items.push({ key: 'redeem', label: '核销中心', children: <RedeemCenter onRedeemed={() => setRedeemVersion((v) => v + 1)} /> });
+  items.push(
+    { key: 'pending', label: '未核销', children: <OrderTable type="pending" onOpen={open} reloadKey={redeemVersion} me={me} /> },
+    { key: 'history', label: '已核销', children: <OrderTable type="history" onOpen={open} reloadKey={redeemVersion} me={me} /> },
+  );
   return <Card>
-    <Tabs
-      defaultActiveKey="redeem"
-      items={[
-        { key: 'redeem', label: '核销中心', children: <RedeemCenter onRedeemed={() => setRedeemVersion((v) => v + 1)} /> },
-        { key: 'pending', label: '未核销', children: <OrderTable type="pending" onOpen={open} reloadKey={redeemVersion} /> },
-        { key: 'history', label: '已核销', children: <OrderTable type="history" onOpen={open} reloadKey={redeemVersion} /> },
-      ]}
-    />
+    <Tabs defaultActiveKey={items[0]?.key} items={items} />
     <Drawer title="订单详情" open={Boolean(detail)} onClose={() => setDetail(null)} width={720}>
       {detail && <Descriptions bordered column={1} items={[
         { key: 'id', label: '兑换单号', children: detail.order?.exchange_id },
