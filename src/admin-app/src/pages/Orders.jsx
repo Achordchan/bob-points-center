@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Input, Modal, Space, Table, Tabs, Tag } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Modal, Space, Table, Tabs, Tag } from 'antd';
 import { api } from '../api.js';
 import { amountText, formatTs, orderAmount } from '../utils.js';
+import RedeemScanner from '../components/RedeemScanner.jsx';
 
 function OrderTable({ type, onOpen }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [encoded, setEncoded] = useState('');
+  const [redeeming, setRedeeming] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -23,15 +25,27 @@ function OrderTable({ type, onOpen }) {
   useEffect(() => { load(); }, [type]);
 
   const confirmRedeem = async () => {
-    if (!encoded.trim()) return message.warning('请输入二维码 encoded 内容');
-    await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: encoded.trim() } });
-    message.success('核销完成');
-    setEncoded('');
-    load();
+    if (!encoded.trim()) {
+      message.warning('请输入二维码 encoded 内容');
+      return false;
+    }
+    setRedeeming(true);
+    try {
+      await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: encoded.trim() } });
+      message.success('核销完成');
+      setEncoded('');
+      load();
+      return true;
+    } catch (err) {
+      message.error(err.message || '核销失败');
+      return false;
+    } finally {
+      setRedeeming(false);
+    }
   };
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    {type === 'pending' && <Card size="small" title="手动核销" extra={<Button type="primary" onClick={confirmRedeem}>核销</Button>}><Input.TextArea value={encoded} onChange={(e) => setEncoded(e.target.value)} placeholder="粘贴二维码 encoded 内容" rows={3} /></Card>}
+    {type === 'pending' && <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} onRedeem={confirmRedeem} redeeming={redeeming} />}
     <Space><Button onClick={load}>刷新</Button>{type === 'history' && <Button danger onClick={() => Modal.confirm({ title: '危险区：清空已核销历史', content: '该操作会隐藏历史核销记录，请确认不再需要追溯。', okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => { await api('/admin/redeem/history/clear', { method: 'POST', body: { confirm: 'CLEAR_REDEEM_HISTORY' } }); message.success('已清空'); load(); } })}>危险区：清空历史</Button>}</Space>
     <Table rowKey="exchange_id" loading={loading} dataSource={rows} scroll={{ x: 980 }} columns={[
       { title: '时间', dataIndex: type === 'history' ? 'fulfilled_at' : 'created_at', render: formatTs },
@@ -48,7 +62,7 @@ function OrderTable({ type, onOpen }) {
 export default function Orders() {
   const [detail, setDetail] = useState(null);
   const open = async (id) => setDetail((await api(`/admin/orders/${encodeURIComponent(id)}`)).data);
-  return <Card title="订单与核销">
+  return <Card>
     <Tabs items={[
       { key: 'pending', label: '未核销', children: <OrderTable type="pending" onOpen={open} /> },
       { key: 'history', label: '已核销', children: <OrderTable type="history" onOpen={open} /> },

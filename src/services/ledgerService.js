@@ -86,6 +86,51 @@ export async function grantBob(db, { userid, amount, reason, refId, name }) {
   return await run(db);
 }
 
+export async function deductBob(db, { userid, amount, reason, refId, name }) {
+  const delta = toInt(amount);
+  if (delta === null || delta <= 0) {
+    throw new Error('amount must be positive integer');
+  }
+
+  const cleanReason = reason ? String(reason) : 'deduct';
+
+  const run = async (tx) => {
+    await ensureAccount(tx, { userid, name });
+
+    const updated = await tx.get(
+      `UPDATE accounts
+          SET balance = balance - ?, updated_at = unixepoch()
+        WHERE userid = ?
+          AND balance >= ?
+        RETURNING balance`,
+      [delta, String(userid), delta],
+    );
+    if (!updated) {
+      throw new Error('insufficient balance');
+    }
+
+    const insert = await tx.run(
+      'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
+      [String(userid), -delta, cleanReason, refId ? String(refId) : null],
+    );
+
+    return {
+      userid: String(userid),
+      balance: Number(updated.balance ?? 0),
+      ledgerId: insert?.lastID ?? null,
+      refId: refId ? String(refId) : null,
+    };
+  };
+
+  if (db?.__txScoped === true) {
+    return await run(db);
+  }
+  if (typeof db.transaction === 'function') {
+    return await db.transaction(run);
+  }
+  return await run(db);
+}
+
 export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name }) {
   if (!userid) {
     throw new Error('missing userid');

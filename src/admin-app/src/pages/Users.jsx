@@ -14,12 +14,16 @@ export default function Users() {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [op, setOp] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState([]);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async (nextPage = page) => {
+  const normalizeKeyword = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+  const load = async (nextPage = page, nextKeyword = keyword) => {
     setLoading(true);
     try {
-      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: 30, keyword })}`);
+      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: 30, keyword: normalizeKeyword(nextKeyword) })}`);
       setRows(data.data || []);
       setTotal(data.total || 0);
       setPage(data.page || nextPage);
@@ -28,7 +32,12 @@ export default function Users() {
     }
   };
 
-  useEffect(() => { load(1).catch((e) => message.error(e.message)); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load(1, keyword).catch((e) => message.error(e.message));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
 
   const openDetail = async (userid) => {
     const data = await api(`/admin/users/${encodeURIComponent(userid)}`);
@@ -54,12 +63,25 @@ export default function Users() {
     load();
   };
 
-  const deleteUsers = (userids) => Modal.confirm({
-    title: '确认删除用户？',
-    content: `将删除 ${userids.length} 个用户及关联数据，此操作不可撤销。`,
-    okText: '确认删除', okButtonProps: { danger: true }, cancelText: '取消',
-    onOk: async () => { await api('/admin/users/delete', { method: 'POST', body: { userids } }); message.success('已删除'); setSelected([]); load(); },
-  });
+  const deleteUsers = (userids) => {
+    if (!userids.length) return;
+    setDeleteTarget(userids);
+  };
+
+  const confirmDeleteUsers = async () => {
+    setDeleteLoading(true);
+    try {
+      const data = await api('/admin/users/delete', { method: 'POST', body: { userids: deleteTarget } });
+      message.success(`已删除 ${data.deleted || deleteTarget.length} 个用户`);
+      setSelected([]);
+      setDeleteTarget([]);
+      await load(1, keyword);
+    } catch (err) {
+      message.error(err.message || '删除失败');
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
 
   const columns = [
     { title: '姓名', dataIndex: 'name', render: (v, r) => <Button type="link" onClick={() => openDetail(r.userid)}>{v || '-'}</Button> },
@@ -71,8 +93,9 @@ export default function Users() {
   ];
 
   return (
-    <Card title="用户与账户" extra={<Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1); })}>同步通讯录</Button>}>
-      <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1)}>
+    <Card>
+      <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1, keyword)} searchPlaceholder="搜索姓名 / Userid">
+        <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>
         <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>
         <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>
         <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>
@@ -103,6 +126,18 @@ export default function Users() {
           <Form.Item label="金额" name="amount" rules={[{ required: true, message: '请输入金额' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
           <Form.Item label="原因" name="reason"><Input placeholder={op?.type === 'grant' ? '后台发币' : '后台减币'} /></Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title="确认删除用户？"
+        open={deleteTarget.length > 0}
+        onCancel={() => setDeleteTarget([])}
+        onOk={confirmDeleteUsers}
+        confirmLoading={deleteLoading}
+        okText="确认删除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+      >
+        将删除 {deleteTarget.length} 个用户及关联账户、余额流水、核销记录，此操作不可撤销。
       </Modal>
     </Card>
   );

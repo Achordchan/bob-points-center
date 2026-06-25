@@ -1,4 +1,4 @@
-import { grantBob } from './ledgerService.js';
+import { deductBob, grantBob } from './ledgerService.js';
 import { confirmRedeem } from './redeemService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 
@@ -145,6 +145,56 @@ export async function deductBatchWithNotify(db, cfg, { userids, baseExchangeId, 
       );
     } catch (err) {
       results.push({ ok: false, userid: String(userid), error: String(err?.message || err), exchange_id: exchangeId });
+    }
+  }
+
+  const ok = results.every((x) => x.ok);
+  return { ok, count: results.length, results };
+}
+
+
+export async function adminDeductBatchWithNotify(db, cfg, { userids, baseExchangeId, productName, bobAmount, reason, awaitNotify } = {}) {
+  const ids = Array.isArray(userids) ? userids : [];
+  const results = [];
+
+  for (const userid of ids) {
+    const exchangeId = `${String(baseExchangeId)}_${String(userid)}`;
+    try {
+      const r = await deductBob(db, {
+        userid,
+        amount: bobAmount,
+        reason: reason || 'admin_deduct',
+        refId: exchangeId,
+      });
+
+      const displayName = await getUserName(db, userid);
+      const title = displayName ? `【BOB币中心】余额变动通知 ${displayName}` : '【BOB币中心】余额变动通知';
+      const notify = await sendOrQueueNotify({
+        db,
+        cfg,
+        userid,
+        title,
+        lines: [`类型：支出`, `原因：${productName || '-'}`, `金额：${String(bobAmount)} BOB 币`, `当前余额：${r.balance} BOB 币`, `单号：${exchangeId}`],
+        awaitNotify,
+        event: 'deduct',
+        variables: {
+          name: displayName || userid,
+          userid,
+          reason: productName || '-',
+          amount: String(bobAmount),
+          balance: String(r.balance),
+          exchange_id: exchangeId,
+          product_name: productName || '后台减币',
+        },
+      });
+
+      results.push(
+        awaitNotify
+          ? { ok: true, userid: String(userid), balance: r.balance, ledgerId: r.ledgerId, ref_id: exchangeId, notify }
+          : { ok: true, userid: String(userid), balance: r.balance, ledgerId: r.ledgerId, ref_id: exchangeId },
+      );
+    } catch (err) {
+      results.push({ ok: false, userid: String(userid), error: String(err?.message || err), ref_id: exchangeId });
     }
   }
 

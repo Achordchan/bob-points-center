@@ -46,6 +46,7 @@ export function loadConfig() {
     adminUserids,
     adminFallbackUserid,
     adminFallbackUsername: (process.env.ADMIN_FALLBACK_USERNAME || 'admin').trim(),
+    adminFallbackName: (process.env.ADMIN_FALLBACK_NAME || '').trim(),
     adminFallbackPassword: process.env.ADMIN_FALLBACK_PASSWORD || '',
     adminSessionSecret: process.env.ADMIN_SESSION_SECRET || '',
     webSessionSecret: process.env.WEB_SESSION_SECRET || process.env.ADMIN_SESSION_SECRET || '',

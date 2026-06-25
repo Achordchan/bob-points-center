@@ -1,10 +1,13 @@
 import { Router } from 'express';
-import { existsSync } from 'node:fs';
+import dns from 'node:dns/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
   buildJsapiConfig,
   getAccessToken,
+  getDingtalkOrganizationProfile,
   getUserIdByAuthCode,
   getUserProfile,
   listSubDepartments,
@@ -27,7 +30,7 @@ import {
   saveCharityProject,
 } from '../services/charityService.js';
 import { normalizeMallProductInput } from '../services/mallService.js';
-import { deductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify } from '../services/bobOpsService.js';
+import { adminDeductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify } from '../services/bobOpsService.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { sendRobotPrivateText } from '../services/robotNotifyService.js';
 import {
@@ -55,6 +58,59 @@ import {
 import { getUserName, sendOrQueueNotify } from '../services/notifyOpsService.js';
 import { requireAdminSession } from '../middleware/requireAdminSession.js';
 import { verifyEncoded, QRSignError } from '../utils/qr.js';
+
+function getPackageMeta() {
+  try {
+    const raw = readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8');
+    const pkg = JSON.parse(raw);
+    return { name: pkg?.name || 'bob', version: pkg?.version || '0.0.0' };
+  } catch {
+    return { name: 'bob', version: '0.0.0' };
+  }
+}
+
+async function resolveHostIp(host) {
+  const target = host ? String(host).trim() : '';
+  if (!target || target === 'localhost') return '';
+  try {
+    const result = await dns.lookup(target, { family: 4 });
+    return result?.address || '';
+  } catch {
+    return '';
+  }
+}
+
+async function getServerInfo(req, cfg) {
+  const packageMeta = getPackageMeta();
+  const interfaces = os.networkInterfaces();
+  const ips = Object.values(interfaces)
+    .flat()
+    .filter((item) => item && item.family === 'IPv4' && !item.internal)
+    .map((item) => item.address)
+    .filter(Boolean);
+  const host = req.hostname || '';
+  return {
+    service: 'BOB 币管理端',
+    version: packageMeta.version,
+    author: 'Achord',
+    host,
+    ip: process.env.SERVER_PUBLIC_IP || process.env.BAOTA_HOST || await resolveHostIp(host) || ips[0] || '',
+    node: process.version,
+    runtime: `Node.js ${process.version} / Express`,
+    frontend: 'React + Vite + Ant Design',
+    database: cfg?.db?.kind === 'postgres' ? 'PostgreSQL' : String(cfg?.db?.kind || '-'),
+    platform: `${os.type()} ${os.release()}`,
+    uptimeSeconds: Math.floor(process.uptime()),
+  };
+}
+
+async function resolveDingtalkOrganizationName(cfg, settings) {
+  const profile = await getDingtalkOrganizationProfile(cfg);
+  const organizationName = String(profile?.name || '').trim();
+  if (!organizationName) return settings;
+  if (organizationName === String(settings?.organizationName || '').trim()) return settings;
+  return { ...settings, organizationName };
+}
 
 async function isAdmin(db, cfg, userid) {
   const allow = cfg?.adminUserids || [];
@@ -360,6 +416,30 @@ function normalizeNotableProductRecordFields(fields) {
 
 function isActiveFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+async function resolveAdminDisplayName(db, cfg, payload = {}) {
+  const userid = payload?.userid ? String(payload.userid).trim() : '';
+  if (db && userid) {
+    const row = await db.get('SELECT name FROM users WHERE userid = ? LIMIT 1', [userid]);
+    const name = row?.name ? String(row.name).trim() : '';
+    if (name) return name;
+  }
+  const configuredName = cfg?.adminFallbackName ? String(cfg.adminFallbackName).trim() : '';
+  if (configuredName) return configuredName;
+  const payloadName = payload?.name ? String(payload.name).trim() : '';
+  if (payloadName && payloadName !== '管理员') return payloadName;
+  const username = payload?.username ? String(payload.username).trim() : '';
+  return username || payloadName || '管理员';
+}
+
+
+function normalizeUserSearchKeyword(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function compactUserSearchKeyword(value) {
+  return normalizeUserSearchKeyword(value).toLowerCase().replace(/[\s_\-@.]+/g, '');
 }
 
 function getAdminSessionPayload(req) {
@@ -1218,7 +1298,19 @@ export function adminRouter() {
       if (!payload) {
         return res.status(401).json({ error: 'unauthorized' });
       }
-      return res.json({ ok: true, name: payload.name || '', userid: payload.userid || '' });
+      const db = req.app?.locals?.db;
+      const name = await resolveAdminDisplayName(db, cfg, payload);
+      return res.json({ ok: true, name, userid: payload.userid || '', mode: payload.mode || '' });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/system/info', requireAdminSession(), async (req, res) => {
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ok: true, data: await getServerInfo(req, cfg) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -1232,8 +1324,8 @@ export function adminRouter() {
       const [usersRow, balanceRow, pendingRow, fulfilledRow, productRow, cdkRow, charityRow] = await Promise.all([
         db.get('SELECT COUNT(1) AS c FROM users'),
         db.get('SELECT COALESCE(SUM(balance), 0) AS c FROM accounts'),
-        db.get('SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NULL'),
-        db.get('SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NOT NULL AND COALESCE(hidden, 0) = 0'),
+        db.get("SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NULL AND COALESCE(product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')"),
+        db.get("SELECT COUNT(1) AS c FROM redeems WHERE fulfilled_at IS NOT NULL AND COALESCE(hidden, 0) = 0 AND COALESCE(product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')"),
         db.get("SELECT COUNT(1) AS c FROM mall_products WHERE status = 'on'"),
         db.get("SELECT COUNT(1) AS c FROM redeem_cdks WHERE status = 'unused'"),
         db.get('SELECT COALESCE(SUM(bob_amount), 0) AS c FROM charity_contributions'),
@@ -1284,6 +1376,7 @@ export function adminRouter() {
          FROM redeems r
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
          WHERE r.userid = ?
+           AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')
          ORDER BY r.created_at DESC
          LIMIT 80`,
         [userid],
@@ -1329,6 +1422,7 @@ export function adminRouter() {
          LEFT JOIN users u ON u.userid = r.userid
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
          WHERE r.exchange_id = ?
+           AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')
          LIMIT 1`,
         [exchangeId],
       );
@@ -1368,10 +1462,9 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
 
       const baseExchangeId = `ADMIN_DEDUCT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const result = await deductBatchWithNotify(db, cfg, {
+      const result = await adminDeductBatchWithNotify(db, cfg, {
         userids,
         baseExchangeId,
-        productId: 'ADMIN_DEDUCT',
         productName,
         bobAmount: amount,
         reason: 'admin_deduct',
@@ -1421,7 +1514,9 @@ export function adminRouter() {
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
-         WHERE r.fulfilled_at IS NOT NULL AND COALESCE(r.hidden, 0) = 0${whereCursorSql}
+         WHERE r.fulfilled_at IS NOT NULL
+           AND COALESCE(r.hidden, 0) = 0
+           AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')${whereCursorSql}
          ORDER BY r.fulfilled_at DESC, r.exchange_id DESC
          LIMIT ?`,
         [...params, limit],
@@ -1469,7 +1564,8 @@ export function adminRouter() {
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
-         WHERE r.fulfilled_at IS NULL${whereCursorSql}
+         WHERE r.fulfilled_at IS NULL
+           AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')${whereCursorSql}
          ORDER BY r.created_at DESC, r.exchange_id DESC
          LIMIT ?`,
         [...params, limit],
@@ -1495,7 +1591,7 @@ export function adminRouter() {
 
     try {
       const r = await runInTransaction(db, async (tx) => (
-        await tx.run('UPDATE redeems SET hidden = 1 WHERE fulfilled_at IS NOT NULL AND COALESCE(hidden, 0) = 0')
+        await tx.run("UPDATE redeems SET hidden = 1 WHERE fulfilled_at IS NOT NULL AND COALESCE(hidden, 0) = 0 AND COALESCE(product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')")
       ));
       return res.json({ ok: true, cleared: r?.changes ?? 0 });
     } catch (err) {
@@ -1832,9 +1928,10 @@ export function adminRouter() {
     }
 
     const userid = cfg?.adminFallbackUserid || '';
-    const name = '管理员';
+    const db = req.app?.locals?.db;
+    const name = await resolveAdminDisplayName(db, cfg, { userid, username });
     const secret = `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
-    const token = createSessionToken(secret, { userid, name, mode: 'password' }, 8 * 3600);
+    const token = createSessionToken(secret, { userid, name, username, mode: 'password' }, 8 * 3600);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', [buildClearLegacyAdminPathCookie(), buildSessionCookie(token)]);
     safeAppendAuditLog(req.app?.locals?.db, {
@@ -1978,7 +2075,7 @@ export function adminRouter() {
   router.get('/users', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
-    const keyword = req.query.keyword ? String(req.query.keyword).trim() : '';
+    const keyword = normalizeUserSearchKeyword(req.query.keyword);
     const page = toPositiveInt(req.query.page, 1);
     const pageSize = Math.min(100, toPositiveInt(req.query.pageSize, 30));
     const offset = (page - 1) * pageSize;
@@ -1989,9 +2086,21 @@ export function adminRouter() {
       const where = [];
       const params = [];
       if (keyword) {
-        where.push('(u.userid LIKE ? OR u.name LIKE ?)');
-        const kw = `%${keyword}%`;
-        params.push(kw, kw);
+        const tokens = keyword.toLowerCase().split(/\s+/g).filter(Boolean).slice(0, 6);
+        for (const token of tokens) {
+          const kw = `%${token}%`;
+          const compactToken = compactUserSearchKeyword(token);
+          const group = [
+            "LOWER(COALESCE(u.userid, '')) LIKE ?",
+            "LOWER(COALESCE(u.name, '')) LIKE ?",
+          ];
+          params.push(kw, kw);
+          if (compactToken) {
+            group.push("REPLACE(REPLACE(REPLACE(REPLACE(LOWER(COALESCE(u.userid, '') || COALESCE(u.name, '')), ' ', ''), '-', ''), '_', ''), '.', '') LIKE ?");
+            params.push(`%${compactToken}%`);
+          }
+          where.push(`(${group.join(' OR ')})`);
+        }
       }
 
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -2241,13 +2350,19 @@ export function adminRouter() {
     const cfg = req.app?.locals?.cfg;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const settings = await getDingtalkConnectionSettings(db, cfg);
+      let settings = await getDingtalkConnectionSettings(db, cfg);
       applyDingtalkConnectionSettings(cfg, settings);
       let connected = false;
       let error = '';
       try {
         await getAccessToken(cfg);
         connected = true;
+        try {
+          settings = await resolveDingtalkOrganizationName(cfg, settings);
+          applyDingtalkConnectionSettings(cfg, settings);
+        } catch (err) {
+          error = String(err?.message || err);
+        }
       } catch (err) {
         error = String(err?.message || err);
       }
@@ -2262,8 +2377,19 @@ export function adminRouter() {
     const cfg = req.app?.locals?.cfg;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const settings = await saveDingtalkConnectionSettings(db, req.body || {}, cfg);
+      const input = { ...(req.body || {}) };
+      delete input.organizationName;
+      let settings = await saveDingtalkConnectionSettings(db, input, cfg);
       applyDingtalkConnectionSettings(cfg, settings);
+      try {
+        settings = await resolveDingtalkOrganizationName(cfg, settings);
+        if (settings.organizationName) {
+          settings = await saveDingtalkConnectionSettings(db, settings, cfg);
+        }
+        applyDingtalkConnectionSettings(cfg, settings);
+      } catch (err) {
+        // 连接配置仍可保存；组织名称会在权限恢复或下次校验成功后自动补齐。
+      }
       return res.json({ ok: true, data: toPublicDingtalkConnectionSettings(settings) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

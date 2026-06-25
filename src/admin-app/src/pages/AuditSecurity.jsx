@@ -25,7 +25,6 @@ export default function AuditSecurity() {
       <Table rowKey="id" dataSource={rows} scroll={{ x: 1180 }} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '事件', dataIndex: 'event_type', render: (v) => <Tag>{v}</Tag> }, { title: '操作者', render: (_, r) => r.actor_name || r.actor_id || r.actor_type }, { title: '路径', dataIndex: 'path', ellipsis: true }, { title: '状态', dataIndex: 'status_code' }, { title: '说明', dataIndex: 'message', ellipsis: true }]} />
     </Card>
     <Card title="危险区" className="danger-card">
-      <Typography.Paragraph type="secondary">清空、覆盖、删除历史这类不可逆操作集中放在这里，避免散落在普通业务区误触。</Typography.Paragraph>
       <Button danger onClick={resetAll}>清空全部用户业务数据</Button>
     </Card>
   </Space>;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Col, Progress, Row, Space, Statistic, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Row, Space, Statistic, Tag, Typography } from 'antd';
 import { AuditOutlined, GiftOutlined, LinkOutlined, ReloadOutlined, SafetyOutlined, ShoppingOutlined, UserOutlined } from '@ant-design/icons';
 import { ProCard } from '@ant-design/pro-components';
 import { api } from '../api.js';
@@ -11,12 +11,18 @@ function metricValue(value) {
 
 export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
   const [summary, setSummary] = useState(null);
+  const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
-      setSummary((await api('/admin/dashboard/summary')).data || {});
+      const [summaryData, infoData] = await Promise.all([
+        api('/admin/dashboard/summary'),
+        api('/admin/system/info').catch(() => ({ data: null })),
+      ]);
+      setSummary(summaryData.data || {});
+      setSystemInfo(infoData.data || null);
     } finally {
       setLoading(false);
     }
@@ -36,17 +42,26 @@ export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
     { key: 'product', label: '上架商品', ok: activeProducts > 0, value: `${activeProducts} 个`, action: '管理商品', onClick: () => onNavigate?.('commerce') },
   ], [activeProducts, connected, onNavigate, onOpenDingtalk, pendingOrders, unusedCdks]);
 
-  const completion = Math.round(((connected ? 1 : 0) + (activeProducts > 0 ? 1 : 0) + (fulfilledOrders > 0 ? 1 : 0) + (metricValue(summary?.users) > 0 ? 1 : 0)) / 4 * 100);
-
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert
-        type={connected ? 'success' : 'warning'}
-        showIcon
-        message={connected ? `钉钉已连接：${dingtalk?.data?.organizationName || dingtalk?.data?.corpId || '-'}` : '钉钉未连接'}
-        description="钉钉断连只影响通讯录、打卡奖励、钉钉消息和部门选择，不阻断用户、商城、订单等本地管理能力。"
-        action={<Button icon={<LinkOutlined />} onClick={onOpenDingtalk}>查看钉钉连接</Button>}
-      />
+      {!connected && (
+        <Alert
+          type="warning"
+          showIcon
+          message="钉钉未连接"
+          action={<Button icon={<LinkOutlined />} onClick={onOpenDingtalk}>查看连接</Button>}
+        />
+      )}
+
+      <Card title="快捷入口">
+        <Space wrap>
+          <Button icon={<UserOutlined />} onClick={() => onNavigate?.('users')}>用户与账户</Button>
+          <Button icon={<AuditOutlined />} onClick={() => onNavigate?.('orders')}>订单与核销</Button>
+          <Button icon={<ShoppingOutlined />} onClick={() => onNavigate?.('commerce')}>商城与 CDK</Button>
+          <Button icon={<GiftOutlined />} onClick={() => onNavigate?.('activities')}>活动与公益</Button>
+          <Button icon={<SafetyOutlined />} onClick={() => onNavigate?.('audit')}>审计安全</Button>
+        </Space>
+      </Card>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} lg={6}><Card loading={loading}><Statistic title="用户数" value={metricValue(summary?.users)} suffix="人" prefix={<UserOutlined />} /></Card></Col>
@@ -55,26 +70,19 @@ export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
         <Col xs={24} sm={12} lg={6}><Card loading={loading}><Statistic title="上架商品" value={activeProducts} prefix={<ShoppingOutlined />} /></Card></Col>
       </Row>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={14}>
-          <ProCard title="运营概览" extra={<Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>} bordered>
+      <Row gutter={[16, 16]} align="stretch" className="dashboard-main-row">
+        <Col xs={24} lg={14} className="dashboard-main-col">
+          <ProCard className="dashboard-equal-card" title="运营概览" extra={<Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>} bordered>
             <Row gutter={[16, 16]}>
               <Col xs={24} sm={8}><Statistic title="已核销订单" value={fulfilledOrders} /></Col>
               <Col xs={24} sm={8}><Statistic title="未兑换 CDK" value={unusedCdks} /></Col>
               <Col xs={24} sm={8}><Statistic title="公益助力" value={metricValue(summary?.charityTotal)} suffix="BOB" prefix={<GiftOutlined />} /></Col>
             </Row>
-            <div className="dashboard-progress">
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text strong>运营数据完整度</Typography.Text>
-                <Progress percent={completion} status={completion >= 75 ? 'success' : 'active'} />
-                <Typography.Text type="secondary">按钉钉连接、商品、订单、用户四个基础项计算，用于快速判断后台是否具备日常运营条件。</Typography.Text>
-              </Space>
-            </div>
           </ProCard>
         </Col>
 
-        <Col xs={24} lg={10}>
-          <Card title="待办与健康检查" extra={<Tag color={connected ? 'success' : 'warning'}>{connected ? '基础正常' : '需要处理'}</Tag>}>
+        <Col xs={24} lg={10} className="dashboard-main-col">
+          <Card className="dashboard-equal-card" title="待办与健康检查" extra={<Tag color={connected ? 'success' : 'warning'}>{connected ? '基础正常' : '需要处理'}</Tag>}>
             <Space direction="vertical" style={{ width: '100%' }}>
               {healthItems.map((item) => (
                 <div className="health-row" key={item.key}>
@@ -93,15 +101,19 @@ export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
         </Col>
       </Row>
 
-      <Card title="快捷入口">
-        <Space wrap>
-          <Button icon={<UserOutlined />} onClick={() => onNavigate?.('users')}>用户与账户</Button>
-          <Button icon={<AuditOutlined />} onClick={() => onNavigate?.('orders')}>订单与核销</Button>
-          <Button icon={<ShoppingOutlined />} onClick={() => onNavigate?.('commerce')}>商城与 CDK</Button>
-          <Button icon={<GiftOutlined />} onClick={() => onNavigate?.('activities')}>活动与公益</Button>
-          <Button icon={<SafetyOutlined />} onClick={() => onNavigate?.('audit')}>审计安全</Button>
-        </Space>
+      <Card title="系统信息">
+        <div className="system-info-grid">
+          <div><Typography.Text type="secondary">服务器 IP</Typography.Text><b>{systemInfo?.ip || '-'}</b></div>
+          <div><Typography.Text type="secondary">访问域名</Typography.Text><b>{systemInfo?.host || '-'}</b></div>
+          <div><Typography.Text type="secondary">技术栈</Typography.Text><b>{systemInfo?.frontend || '-'}</b></div>
+          <div><Typography.Text type="secondary">后端</Typography.Text><b>{systemInfo?.runtime || '-'}</b></div>
+          <div><Typography.Text type="secondary">数据库</Typography.Text><b>{systemInfo?.database || '-'}</b></div>
+          <div><Typography.Text type="secondary">版本号</Typography.Text><b>{systemInfo?.version || '-'}</b></div>
+          <div><Typography.Text type="secondary">作者</Typography.Text><b>{systemInfo?.author || '-'}</b></div>
+          <div><Typography.Text type="secondary">系统</Typography.Text><b>{systemInfo?.platform || '-'}</b></div>
+        </div>
       </Card>
+
     </Space>
   );
 }

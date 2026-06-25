@@ -1,34 +1,121 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Form, Input, Space, Switch, Tabs, Typography } from 'antd';
+import { App, Button, Card, Collapse, Divider, Form, Input, Select, Space, Switch, Tabs, Typography } from 'antd';
 import { api } from '../api.js';
 
-function JsonSettings({ title, loadPath, savePath }) {
+const notifyTemplates = [
+  { key: 'grant', label: '发币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}}' },
+  { key: 'deduct', label: '减币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}} {{exchange_id}}' },
+  { key: 'redeem', label: '核销通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}} {{exchange_id}}' },
+  { key: 'mall_buy', label: '下单通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}}' },
+  { key: 'transfer_out', label: '转出通知', vars: '{{name}} {{to_name}} {{amount}} {{balance}}' },
+  { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{from_name}} {{amount}} {{balance}}' },
+  { key: 'red_packet', label: '红包通知', vars: '{{name}} {{amount}} {{balance}} {{activity_id}}' },
+  { key: 'charity', label: '公益通知', vars: '{{name}} {{project_name}} {{amount}} {{balance}}' },
+];
+
+const groupTemplates = [
+  { key: 'manual', label: '手动群通知', vars: '{{title}} {{content}}' },
+  { key: 'mall_open', label: '商城开启', vars: '{{open_time}}' },
+  { key: 'mall_open_remind', label: '商城开启提醒', vars: '{{open_time}}' },
+  { key: 'mall_close_remind', label: '商城关闭提醒', vars: '{{close_time}}' },
+  { key: 'stock_low', label: '库存告急', vars: '{{product_name}} {{stock}}' },
+  { key: 'stock_soldout', label: '售罄通知', vars: '{{product_name}}' },
+  { key: 'new_product', label: '新品上架', vars: '{{product_name}} {{amount}} {{stock}}' },
+];
+
+const colorOptions = [
+  { value: 'blue', label: '蓝色' },
+  { value: 'gray', label: '灰色' },
+  { value: 'red', label: '红色' },
+];
+
+function Toolbar({ onRefresh, onReset, onSave }) {
+  return <Space className="table-toolbar" wrap>
+    <Button onClick={onRefresh}>刷新</Button>
+    <Button danger onClick={onReset}>恢复默认</Button>
+    <Button type="primary" onClick={onSave}>保存</Button>
+  </Space>;
+}
+
+function TemplateFields({ namePrefix, vars, withButtons = false }) {
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch /></Form.Item>
+    <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
+    <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} /></Form.Item>
+    <Typography.Text type="secondary">可用变量：{vars}</Typography.Text>
+    {withButtons && <>
+      <Divider style={{ margin: '4px 0' }} />
+      <Form.List name={[...namePrefix, 'buttons']}>
+        {(fields, { add, remove }) => <Space direction="vertical" style={{ width: '100%' }} size={10}>
+          <Space><Typography.Text strong>按钮</Typography.Text><Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button></Space>
+          {fields.map((field) => <Card size="small" key={field.key}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input /></Form.Item>
+              <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input /></Form.Item>
+              <Form.Item label="颜色" name={[field.name, 'color']}><Select options={colorOptions} /></Form.Item>
+              <Button danger onClick={() => remove(field.name)}>删除按钮</Button>
+            </Space>
+          </Card>)}
+        </Space>}
+      </Form.List>
+    </>}
+  </Space>;
+}
+
+function SettingsEditor({ title, loadPath, savePath, templates, withChannel = false, withButtons = false }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+
   const load = async () => {
     setLoading(true);
     try {
       const data = await api(loadPath);
-      form.setFieldsValue({ json: JSON.stringify(data.data || {}, null, 2) });
-    } finally { setLoading(false); }
+      form.setFieldsValue(data.data || {});
+    } finally {
+      setLoading(false);
+    }
   };
+
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
-  const save = async ({ json }) => {
-    const payload = JSON.parse(json || '{}');
+
+  const save = async () => {
+    const payload = await form.validateFields();
     await api(savePath, { method: 'POST', body: payload });
     message.success(`${title}已保存`);
     load();
   };
-  return <Card title={title} loading={loading} extra={<Space><Button onClick={load}>刷新</Button><Button danger onClick={() => api(savePath, { method: 'POST', body: { reset: true } }).then(() => { message.success('已恢复默认'); load(); })}>恢复默认</Button><Button type="primary" onClick={() => form.submit()}>保存</Button></Space>}>
-    <Typography.Paragraph type="secondary">测试发送入口已从新版后台隐藏，避免误触真实消息；需要测试时使用内部测试流程。</Typography.Paragraph>
-    <Form form={form} onFinish={save} layout="vertical"><Form.Item name="json" rules={[{ required: true }]}><Input.TextArea rows={18} className="code-editor" /></Form.Item></Form>
+
+  const reset = async () => {
+    await api(savePath, { method: 'POST', body: { reset: true } });
+    message.success('已恢复默认');
+    load();
+  };
+
+  const items = templates.map((item) => ({
+    key: item.key,
+    label: item.label,
+    children: <TemplateFields namePrefix={['templates', item.key]} vars={item.vars} withButtons={withButtons} />,
+  }));
+
+  return <Card loading={loading}>
+    <Toolbar onRefresh={load} onReset={reset} onSave={save} />
+    <Form form={form} layout="vertical">
+      <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch /></Form.Item>
+      {withChannel && <Card size="small" title="群发送配置" style={{ marginBottom: 12 }}>
+        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input /></Form.Item>
+        <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input /></Form.Item>
+        <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input /></Form.Item>
+        <Form.Item label="指定接收人" name={['channel', 'recipients']}><Input.TextArea rows={3} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
+      </Card>}
+      <Collapse defaultActiveKey={[templates[0]?.key]} items={items} />
+    </Form>
   </Card>;
 }
 
 export default function Messages() {
   return <Tabs items={[
-    { key: 'notify', label: '私聊通知模板', children: <JsonSettings title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" /> },
-    { key: 'group', label: '群卡片模板', children: <JsonSettings title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" /> },
+    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} /> },
+    { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons /> },
   ]} />;
 }

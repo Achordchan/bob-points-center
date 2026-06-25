@@ -13,7 +13,7 @@ import {
   ShoppingOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { Button, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd';
+import { Button, Dropdown, Layout, Menu, Space, Typography } from 'antd';
 
 const { Header, Sider, Content } = Layout;
 
@@ -40,16 +40,13 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDi
       <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed} width={232}>
         <div className="brand">
           <div className="brand-mark">B</div>
-          {!collapsed && <div><b>BOB 管理端</b><span>企业运营后台</span></div>}
+          {!collapsed && <div><b>BOB 管理端</b></div>}
         </div>
         <Menu theme="dark" mode="inline" selectedKeys={[activeKey]} items={navItems} onClick={({ key }) => onChange(key)} />
       </Sider>
       <Layout>
         <Header className="topbar">
-          <div>
-            <Typography.Title level={4} className="page-title">{selected?.label || '首页概览'}</Typography.Title>
-            <Typography.Text type="secondary">清晰处理用户、订单、商城、活动、内容与系统集成</Typography.Text>
-          </div>
+          <Typography.Title level={4} className="page-title">{selected?.label || '首页概览'}</Typography.Title>
           <Space wrap>
             <Button className="dingtalk-pill" type={connected ? 'primary' : 'default'} ghost={connected} onClick={onOpenDingtalk}>
               钉钉：{connected ? org : '未连接'}
@@ -58,7 +55,6 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDi
             <Dropdown menu={{ items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
               <Button icon={<SettingOutlined />}>{user?.name || '管理员'}</Button>
             </Dropdown>
-            <Tag color={connected ? 'success' : 'error'}>{connected ? '基础连接正常' : '需连接钉钉'}</Tag>
           </Space>
         </Header>
         <Content className="content-wrap">{children}</Content>

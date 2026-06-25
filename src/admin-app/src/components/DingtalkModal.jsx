@@ -8,13 +8,12 @@ export default function DingtalkModal({ open, state, loading, onCancel, onRefres
   useEffect(() => {
     if (!open) return;
     form.setFieldsValue({
-      organizationName: data.organizationName || '',
       corpId: data.corpId || '',
       appKey: data.appKey || '',
       appSecret: '',
       agentId: data.agentId || '',
     });
-  }, [open, data.organizationName, data.corpId, data.appKey, data.agentId, form]);
+  }, [open, data.corpId, data.appKey, data.agentId, form]);
 
   return (
     <Modal
@@ -37,7 +36,9 @@ export default function DingtalkModal({ open, state, loading, onCancel, onRefres
         />
         <Typography.Text type="secondary">AppSecret 不会明文回显；留空保存表示沿用当前密钥。</Typography.Text>
         <Form form={form} layout="vertical" onFinish={onSave}>
-          <Form.Item label="组织名称" name="organizationName"><Input placeholder="例如：徐州巴布工程机械有限公司" /></Form.Item>
+          <Form.Item label="组织名称" extra="保存并校验连接后，系统会从钉钉自动识别组织名称。">
+            <Input disabled readOnly value={data.organizationName || ''} placeholder="保存并校验连接后自动识别" />
+          </Form.Item>
           <Form.Item label="CorpId" name="corpId"><Input placeholder="钉钉企业 CorpId" /></Form.Item>
           <Form.Item label="AppKey" name="appKey"><Input placeholder="钉钉应用 AppKey" /></Form.Item>
           <Form.Item label="AppSecret" name="appSecret" extra={data.appSecretConfigured ? `当前已配置：${data.appSecretMasked || '已隐藏'}` : '当前未配置密钥'}>

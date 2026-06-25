@@ -46,7 +46,7 @@ export default function AdminApp() {
 
   const saveDingtalk = async (values) => {
     const current = dingtalk.data || {};
-    const changed = ['organizationName', 'corpId', 'appKey', 'agentId'].some((key) => String(values?.[key] || '') !== String(current?.[key] || '')) || Boolean(values?.appSecret);
+    const changed = ['corpId', 'appKey', 'agentId'].some((key) => String(values?.[key] || '') !== String(current?.[key] || '')) || Boolean(values?.appSecret);
     if (changed) {
       const ok = await new Promise((resolve) => {
         Modal.confirm({

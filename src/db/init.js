@@ -335,6 +335,89 @@ function normalizeSql(rawSql, { forRun = false } = {}) {
   return sql;
 }
 
+const defaultSystemVersions = [
+  {
+    version_name: 'v2026.6.25',
+    publish_at: 1782316800,
+    release_notes: [
+      '管理端升级为 React + Ant Design 企业后台，完成首页概览、用户与账户、订单与核销、商城与 CDK、消息中心、内容运营、系统集成、审计安全的信息架构重组。',
+      '钉钉连接提升为全局状态能力，支持组织识别、连接面板、部门选择和打卡奖励适用范围控制。',
+      '订单核销补齐扫码、图片上传、剪贴板识别和手动 encoded 兜底；修复 CDK 金额显示、历史核销日志金额和管理员减币误入订单列表。',
+      '商城商品补齐图片预览/编辑器、限购轮次、加载状态和核心 CRUD 体验，登录页与后台视觉统一商用化。',
+    ].join('\n'),
+  },
+  {
+    version_name: 'v2026.5.2',
+    publish_at: 1777651200,
+    release_notes: [
+      '修复商城商品缓存失效和前台余额显示一致性问题。',
+      '余额扣减改为数据库原子更新，避免并发下余额被重复读取或超扣。',
+      '完善商城限购提交审查流程并保留生产部署校验记录。',
+    ].join('\n'),
+  },
+  {
+    version_name: 'v2026.4.30',
+    publish_at: 1777478400,
+    release_notes: [
+      '完成宝塔 Node 项目与 PostgreSQL 生产环境迁移，确认 bob.baymaxgroup.com 健康检查正常。',
+      '接入 GitHub Actions 自动部署到宝塔项目，保留服务器项目目录和面板管理链路。',
+      '新增商城限购轮次，付费购买计入当前轮次，CDK 兑换不占用限购名额。',
+      '补齐部署文档、备份导入导出和生产运行校验流程。',
+    ].join('\n'),
+  },
+  {
+    version_name: 'v2026.4.5',
+    publish_at: 1775318400,
+    release_notes: [
+      '修复公益项目赞助后无推送事件的问题，公益助力后前端可及时刷新。',
+      '前端实时更新从轮询改为 SSE 连接推送。',
+      '新增打卡奖励自动对账补发能力，降低漏发奖励风险。',
+    ].join('\n'),
+  },
+  {
+    version_name: 'v2026.3.11',
+    publish_at: 1773158400,
+    release_notes: [
+      '初始化 BOB 积分中心代码仓库，补齐 README、运行说明和基础部署文档。',
+      '新增打卡奖励对账指引，明确奖励补发和异常排查流程。',
+    ].join('\n'),
+  },
+  {
+    version_name: 'v2026.3.2',
+    publish_at: 1772441160,
+    release_notes: '增加转账、提现（占位）等功能；修复已知问题；新增大富翁板块；后台优化；前端调优。',
+  },
+  {
+    version_name: 'v2026.2.27',
+    publish_at: 1772153040,
+    release_notes: '数据库更换为 PostgreSQL；针对并发场景优化；新增多项功能；修复已知问题。',
+  },
+  {
+    version_name: 'v2026.2.3',
+    publish_at: 1770056820,
+    release_notes: '针对系统进行自检修复；引入代码审计；修复已知问题。',
+  },
+  {
+    version_name: 'v2026.1.29',
+    publish_at: 1769676180,
+    release_notes: '发行第一版：余额、抢红包、商城等核心功能初版上线。',
+  },
+];
+
+async function seedSystemVersions(db) {
+  await db.exec("UPDATE system_versions SET version_name = regexp_replace(version_name, '^v26\\.', 'v2026.') WHERE version_name ~ '^v26\\.'");
+  await db.exec("UPDATE system_versions SET version_name = 'v2026.2.3' WHERE version_name = 'v2.0' AND NOT EXISTS (SELECT 1 FROM system_versions WHERE version_name = 'v2026.2.3')");
+  await db.exec("UPDATE system_versions SET version_name = 'v2026.1.29' WHERE version_name = 'v1.0' AND NOT EXISTS (SELECT 1 FROM system_versions WHERE version_name = 'v2026.1.29')");
+  for (const item of defaultSystemVersions) {
+    await db.run(
+      `INSERT INTO system_versions(version_name, release_notes, is_enabled, publish_at, created_at, updated_at)
+       SELECT ?, ?, 1, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM system_versions WHERE version_name = ?)`,
+      [item.version_name, item.release_notes, item.publish_at, item.publish_at, item.publish_at, item.version_name],
+    );
+  }
+}
+
 class PgDb {
   constructor(pool) {
     this.pool = pool;
@@ -465,5 +548,6 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
   await db.run('INSERT INTO mall_opening_schedule(id, is_open, auto_enabled) VALUES(1, 1, 0) ON CONFLICT DO NOTHING');
+  await seedSystemVersions(db);
   return db;
 }

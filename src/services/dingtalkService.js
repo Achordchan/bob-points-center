@@ -63,6 +63,70 @@ function assertDingtalkOk(data, context) {
   }
 }
 
+
+function firstText(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+export async function getRootDepartmentProfile(cfg, { language = 'zh_CN' } = {}) {
+  const token = await getAccessToken(cfg);
+  const url = `https://oapi.dingtalk.com/topapi/v2/department/get?access_token=${encodeURIComponent(token)}`;
+  const data = await httpJson('POST', url, {
+    dept_id: 1,
+    language: String(language || 'zh_CN'),
+  });
+
+  assertDingtalkOk(data, 'department.get');
+
+  return data?.result && typeof data.result === 'object' ? data.result : {};
+}
+
+async function getOrganizationAuthInfo(cfg) {
+  const token = await getV1AccessToken(cfg);
+  const corpId = cfg?.dingtalk?.corpId ? String(cfg.dingtalk.corpId).trim() : '';
+  const suffix = corpId ? `?targetCorpId=${encodeURIComponent(corpId)}` : '';
+  const data = await httpJsonWithHeaders('GET', `https://api.dingtalk.com/v1.0/contact/organizations/authInfos${suffix}`, {
+    headers: { 'x-acs-dingtalk-access-token': token },
+  });
+  return data && typeof data === 'object' ? data : {};
+}
+
+export async function getDingtalkOrganizationProfile(cfg) {
+  try {
+    const rootDept = await getRootDepartmentProfile(cfg);
+    const rootName = firstText(rootDept.name, rootDept.dept_name);
+    if (rootName) {
+      return { name: rootName, source: 'root_department' };
+    }
+  } catch (err) {
+    // 部门权限是当前系统的基础权限；失败后再尝试新版企业信息接口。
+  }
+
+  const authInfo = await getOrganizationAuthInfo(cfg);
+  const result = authInfo?.result && typeof authInfo.result === 'object' ? authInfo.result : {};
+  const name = firstText(
+    authInfo.organizationName,
+    authInfo.corpName,
+    authInfo.orgName,
+    authInfo.name,
+    result.organizationName,
+    result.corpName,
+    result.orgName,
+    result.name,
+  );
+
+  if (!name) {
+    throw new Error('dingtalk organization name missing');
+  }
+
+  return { name, source: 'organization_auth_info' };
+}
+
 function getDingtalkCacheKey(cfg) {
   const appKey = cfg?.dingtalk?.appKey ? String(cfg.dingtalk.appKey) : '';
   const appSecret = cfg?.dingtalk?.appSecret ? String(cfg.dingtalk.appSecret) : '';

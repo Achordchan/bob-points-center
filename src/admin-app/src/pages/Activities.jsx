@@ -58,5 +58,5 @@ function Charity() {
 }
 
 export default function Activities() {
-  return <Card title="活动与公益"><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets /> }, { key: 'charity', label: '公益助力', children: <Charity /> }]} /></Card>;
+  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets /> }, { key: 'charity', label: '公益助力', children: <Charity /> }]} /></Card>;
 }
