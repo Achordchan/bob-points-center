@@ -158,6 +158,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
   if (p.startsWith('/cdks')) return m === 'GET' ? 'commerce:view' : 'commerce:cdk';
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
+  if (p.startsWith('/settings/dingtalk/status')) return 'dashboard:view';
   if (p.startsWith('/settings/dingtalk/departments')) return ['integrations:view', 'activities:view'];
   if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
   if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';

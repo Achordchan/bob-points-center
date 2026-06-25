@@ -2,14 +2,23 @@ import { useEffect, useState } from 'react';
 import { App, Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload } from 'antd';
 import { api } from '../api.js';
 import { formatTs } from '../utils.js';
+import { hasPermission } from '../permissions.js';
 
-function Tokens() {
+function Tokens({ canEdit }) {
   const { message } = App.useApp(); const [rows, setRows] = useState([]);
   const load = async () => setRows((await api('/bob-token/list?includeRevoked=true&limit=200')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const create = async () => { const data = await api('/bob-token/create', { method: 'POST' }); message.success('Token 已创建'); if (data.token) navigator.clipboard?.writeText(data.token); load(); };
-  return <Card title="BOB Token" extra={<Space><Button onClick={load}>刷新</Button><Button type="primary" onClick={create}>创建 Token</Button></Space>}>
-    <Table rowKey="id" dataSource={rows} columns={[{ title: 'ID', dataIndex: 'id' }, { title: 'Token', dataIndex: 'token', ellipsis: true }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '吊销时间', dataIndex: 'revoked_at', render: formatTs }, { title: '状态', render: (_, r) => r.revoked_at ? <Tag>已吊销</Tag> : <Tag color="green">有效</Tag> }, { title: '操作', render: (_, r) => <Space><Button disabled={!r.token} onClick={() => navigator.clipboard?.writeText(r.token)}>复制</Button><Button danger disabled={Boolean(r.revoked_at)} onClick={() => api('/bob-token/revoke', { method: 'POST', body: { tokenId: r.id } }).then(load)}>吊销</Button></Space> }]} />
+  const remove = (row) => Modal.confirm({
+    title: '删除已吊销 Token',
+    content: `确认删除 Token #${row.id}？删除后不会影响已有账本。`,
+    okText: '确认删除',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    onOk: async () => { await api('/bob-token/delete', { method: 'POST', body: { tokenId: row.id } }); message.success('Token 已删除'); load(); },
+  });
+  return <Card title="BOB Token" extra={<Space><Button onClick={load}>刷新</Button>{canEdit && <Button type="primary" onClick={create}>创建 Token</Button>}</Space>}>
+    <Table rowKey="id" dataSource={rows} columns={[{ title: 'ID', dataIndex: 'id' }, { title: 'Token', dataIndex: 'token', ellipsis: true }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '吊销时间', dataIndex: 'revoked_at', render: formatTs }, { title: '状态', render: (_, r) => r.revoked_at ? <Tag>已吊销</Tag> : <Tag color="green">有效</Tag> }, { title: '操作', render: (_, r) => <Space><Button disabled={!r.token} onClick={() => navigator.clipboard?.writeText(r.token)}>复制</Button>{canEdit && <Button danger disabled={Boolean(r.revoked_at)} onClick={() => api('/bob-token/revoke', { method: 'POST', body: { tokenId: r.id } }).then(load)}>吊销</Button>}{canEdit && <Button danger disabled={!r.revoked_at} onClick={() => remove(r)}>删除</Button>}</Space> }]} />
   </Card>;
 }
 
@@ -68,7 +77,7 @@ function backupFilename(mode) {
   return `bob_backup_${mode}_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.json`;
 }
 
-function Backup() {
+function Backup({ canExport, canImport }) {
   const { message } = App.useApp();
   const [exportDetail, setExportDetail] = useState(null);
   const [lastBackup, setLastBackup] = useState(null);
@@ -168,8 +177,8 @@ function Backup() {
     <Card title="导出备份">
       <Space direction="vertical" style={{ width: '100%' }} size={12}>
         <Space wrap>
-          <Button loading={busy} onClick={() => exportBackup('settings')}>导出设置备份</Button>
-          <Button type="primary" loading={busy} onClick={() => exportBackup('full')}>导出全量备份</Button>
+          {canExport && <Button loading={busy} onClick={() => exportBackup('settings')}>导出设置备份</Button>}
+          {canExport && <Button type="primary" loading={busy} onClick={() => exportBackup('full')}>导出全量备份</Button>}
         </Space>
         <Descriptions bordered size="small" column={1} items={[
           { key: 'settings', label: '设置备份', children: settingsTables.join('、') },
@@ -186,7 +195,7 @@ function Backup() {
               <span>大小：{formatBytes(exportSize)}</span>
             </Space>
             <Space wrap>
-              <Button type="primary" onClick={() => lastBackup && downloadJson(lastBackup.filename, lastBackup.data)}>下载备份文件</Button>
+              {canExport && <Button type="primary" onClick={() => lastBackup && downloadJson(lastBackup.filename, lastBackup.data)}>下载备份文件</Button>}
               <Button onClick={loadHistory}>刷新历史记录</Button>
             </Space>
           </Space>}
@@ -195,7 +204,7 @@ function Backup() {
       </Space>
     </Card>
 
-    <Card title="导入恢复">
+    {canImport && <Card title="导入恢复">
       <Space direction="vertical" style={{ width: '100%' }} size={12}>
         <Alert type="warning" showIcon message="覆盖导入会替换备份涉及的数据，请先导出当前全量备份。" />
         <Space wrap>
@@ -214,7 +223,7 @@ function Backup() {
         {importRows.length > 0 && <Table size="small" rowKey="table" pagination={false} dataSource={importRows} columns={[{ title: '导入文件包含表', dataIndex: 'table' }, { title: '记录数', dataIndex: 'count' }]} />}
         {reportRows.length > 0 && <Table size="small" rowKey="table" pagination={false} dataSource={reportRows} columns={[{ title: '导入结果', dataIndex: 'table' }, { title: '写入记录数', dataIndex: 'count' }]} />}
       </Space>
-    </Card>
+    </Card>}
 
     <Card title="历史记录">
       <Table size="small" rowKey="id" dataSource={history} pagination={{ pageSize: 8 }} columns={[
@@ -225,8 +234,8 @@ function Backup() {
         { title: '大小', render: (_, row) => formatBytes(parseBackupDetails(row.details)?.size), width: 110 },
         { title: '状态', dataIndex: 'status', width: 90 },
         { title: '操作', fixed: 'right', width: 180, render: (_, row) => <Space>
-          {row.action === '导出' && <Button size="small" onClick={() => downloadHistory(row)}>下载</Button>}
-          {row.action === '导出' && <Button size="small" onClick={() => exportBackup(row.mode)}>重新导出</Button>}
+          {canExport && row.action === '导出' && <Button size="small" onClick={() => downloadHistory(row)}>下载</Button>}
+          {canExport && row.action === '导出' && <Button size="small" onClick={() => exportBackup(row.mode)}>重新导出</Button>}
         </Space> },
       ]} />
       <Typography.Text type="secondary">历史记录保存在服务器；导出记录可直接下载，旧记录文件缺失时请重新导出。</Typography.Text>
@@ -235,7 +244,7 @@ function Backup() {
 }
 
 
-function ImageOptimization() {
+function ImageOptimization({ canEdit }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [overview, setOverview] = useState(null);
@@ -289,7 +298,7 @@ function ImageOptimization() {
   const errorRows = (lastJob?.errors || []).map((error, index) => ({ id: index + 1, error }));
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    <Card title="图片优化" extra={<Space wrap><Button loading={loading} onClick={load}>刷新</Button><Button type="primary" loading={running} onClick={() => runBatch('pending')}>转换未优化图片</Button><Button loading={running} onClick={() => runBatch('retry')}>重试</Button></Space>}>
+    <Card title="图片优化" extra={<Space wrap><Button loading={loading} onClick={load}>刷新</Button>{canEdit && <Button type="primary" loading={running} onClick={() => runBatch('pending')}>转换未优化图片</Button>}{canEdit && <Button loading={running} onClick={() => runBatch('retry')}>重试</Button>}</Space>}>
       <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 4 }} items={[
         { key: 'total', label: '图片总数', children: stats.total ?? 0 },
         { key: 'converted', label: '已转 WebP', children: stats.converted ?? 0 },
@@ -300,11 +309,11 @@ function ImageOptimization() {
 
     <Card title="处理规则">
       <Form form={form} layout="vertical" onFinish={save} className="settings-form">
-        <Form.Item name="enabled" label="启用上传转 WebP" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item name="quality" label="WebP 质量"><InputNumber min={60} max={95} precision={0} /></Form.Item>
-        <Form.Item label="最大尺寸"><Space><Form.Item name="maxWidth" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="宽" /></Form.Item><Form.Item name="maxHeight" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="高" /></Form.Item></Space></Form.Item>
-        <Form.Item name="keepOriginal" label="保留原图" valuePropName="checked"><Switch /></Form.Item>
-        <Button type="primary" loading={loading} onClick={() => form.submit()}>保存配置</Button>
+        <Form.Item name="enabled" label="启用上传转 WebP" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+        <Form.Item name="quality" label="WebP 质量"><InputNumber min={60} max={95} precision={0} disabled={!canEdit} /></Form.Item>
+        <Form.Item label="最大尺寸"><Space><Form.Item name="maxWidth" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="宽" disabled={!canEdit} /></Form.Item><Form.Item name="maxHeight" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="高" disabled={!canEdit} /></Form.Item></Space></Form.Item>
+        <Form.Item name="keepOriginal" label="保留原图" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+        {canEdit && <Button type="primary" loading={loading} onClick={() => form.submit()}>保存配置</Button>}
       </Form>
     </Card>
 
@@ -324,6 +333,9 @@ function ImageOptimization() {
   </Space>;
 }
 
-export default function Integrations() {
-  return <Tabs items={[{ key: 'token', label: 'BOB Token', children: <Tokens /> }, { key: 'backup', label: '备份', children: <Backup /> }, { key: 'images', label: '图片优化', children: <ImageOptimization /> }]} />;
+export default function Integrations({ me }) {
+  const canEdit = hasPermission(me, 'integrations:edit');
+  const canExport = hasPermission(me, 'integrations:export');
+  const canImport = me?.isSuperAdmin === true;
+  return <Tabs items={[{ key: 'token', label: 'BOB Token', children: <Tokens canEdit={canEdit} /> }, { key: 'backup', label: '备份', children: <Backup canExport={canExport} canImport={canImport} /> }, { key: 'images', label: '图片优化', children: <ImageOptimization canEdit={canEdit} /> }]} />;
 }

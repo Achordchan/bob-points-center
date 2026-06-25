@@ -2,15 +2,22 @@ import { Router } from 'express';
 
 import { requireAdminSession } from '../middleware/requireAdminSession.js';
 import { createBobToken, deleteBobToken, listBobTokens, revokeBobToken } from '../services/bobTokenService.js';
-import { hasAdminPermission } from '../services/adminPermissionService.js';
+import { getAdminAccess, hasAdminPermission } from '../services/adminPermissionService.js';
 
 
 function requireIntegrationPermission(permission) {
-  return (req, res, next) => {
-    if (!hasAdminPermission(req.adminAccess, permission)) {
-      return res.status(403).json({ error: '权限不足，无法执行该操作' });
+  return async (req, res, next) => {
+    try {
+      if (!req.adminAccess) {
+        req.adminAccess = await getAdminAccess(req.app?.locals?.db, req.app?.locals?.cfg, req.adminSession || {});
+      }
+      if (!hasAdminPermission(req.adminAccess, permission)) {
+        return res.status(403).json({ error: '权限不足，无法执行该操作' });
+      }
+      return next();
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
     }
-    return next();
   };
 }
 

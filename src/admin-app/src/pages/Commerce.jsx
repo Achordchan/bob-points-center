@@ -146,6 +146,7 @@ function MallOpeningControl({ canEdit }) {
         { key: 'status', label: '当前状态', children: <Tag color={isOpen ? 'green' : 'red'}>{isOpen ? '已开启' : '已关闭'}</Tag> },
         { key: 'nextOpen', label: '下一次开启', children: formatTs(row?.next_open_at) || '-' },
         { key: 'nextClose', label: '下一次关闭', children: nextCloseText(row) },
+        { key: 'source', label: '商城数据源', children: '自建商城' },
       ]} />
       {advanced && <Form form={form} layout="vertical" onFinish={saveSchedule} className="settings-form">
         <Form.Item><Button onClick={load} loading={loading}>刷新设置</Button></Form.Item>
@@ -318,6 +319,7 @@ function Products({ me }) {
       { title: '限购', render: (_, r) => Number(r.limit_per_user) > 0 ? `每人 ${Number(r.limit_per_user)} · 第 ${Math.max(1, Number(r.limit_round || 1))} 轮` : '不限' },
       { title: 'CDK', dataIndex: 'cdk_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">可兑换</Tag> : <Tag>关闭</Tag> },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'on' ? 'success' : 'default'}>{v === 'on' ? '上架' : '下架'}</Tag> },
+      { title: '排序', dataIndex: 'sort', width: 90, sorter: (a, b) => Number(a.sort || 0) - Number(b.sort || 0), render: (v) => v ?? '-' },
       { title: '操作', fixed: 'right', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> },
     ]}
     />
@@ -429,7 +431,7 @@ function Cdks({ me }) {
 export default function Commerce({ me }) {
   const canEdit = hasPermission(me, 'commerce:edit');
   const items = [{ key: 'products', label: '商品管理', children: <Products me={me} /> }];
-  if (hasPermission(me, 'commerce:view')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
+  if (hasPermission(me, 'commerce:cdk')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <MallOpeningControl canEdit={canEdit} />
     <Card><Tabs items={items} /></Card>

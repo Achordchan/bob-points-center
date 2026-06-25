@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Alert, App, Avatar, Button, Card, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
-import { api, qs } from '../api.js';
+import { api, qs, translateErrorMessage } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import { amountText, formatTs, orderAmount } from '../utils.js';
 import { hasPermission } from '../permissions.js';
@@ -158,14 +158,67 @@ export default function Users({ me }) {
     ? [notifyTarget]
     : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
 
+
+  const postBatchOperation = async (path, body) => {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.error) throw new Error(translateErrorMessage(data?.error || `HTTP ${res.status}`));
+    return data || {};
+  };
+
+  const showBatchResult = (data, successText) => {
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const okCount = results.length ? results.filter((item) => item.ok).length : Number(data?.count || 0);
+    const failed = results.filter((item) => !item.ok);
+    if (!failed.length && data?.ok !== false) {
+      message.success(successText);
+      return;
+    }
+    Modal.warning({
+      title: '部分用户处理失败',
+      content: <Space direction="vertical" style={{ width: '100%' }}>
+        <div>成功 {okCount} 人，失败 {failed.length} 人。</div>
+        <div className="batch-recipient-list">{failed.slice(0, 20).map((item) => <Tag color="red" key={item.userid}>{item.name ? `${item.name}（${item.userid}）` : item.userid}：{translateErrorMessage(item.error || '处理失败')}</Tag>)}</div>
+      </Space>,
+      okText: '知道了',
+    });
+  };
+
+  const selectAllMatchedUsers = async () => {
+    setLoading(true);
+    try {
+      const first = await api(`/admin/users?${qs({ page: 1, pageSize: 100, keyword: normalizeKeyword(keyword) })}`);
+      const totalCount = Number(first.total || 0);
+      const allRows = [...(first.data || [])];
+      const pages = Math.ceil(totalCount / 100);
+      for (let current = 2; current <= pages; current += 1) {
+        const data = await api(`/admin/users?${qs({ page: current, pageSize: 100, keyword: normalizeKeyword(keyword) })}`);
+        allRows.push(...(data.data || []));
+      }
+      const keys = [...new Set(allRows.map((row) => String(row.userid || '')).filter(Boolean))];
+      setSelected(keys);
+      setSelectedUsers(Object.fromEntries(allRows.map((row) => [String(row.userid), row])));
+      message.success(`已按当前搜索条件选中 ${keys.length} 人`);
+    } catch (err) {
+      message.error(err.message || '全选失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const submitOp = async (values) => {
     const userids = op.userid ? [op.userid] : selected;
     const path = op.type === 'grant' ? '/admin/ledger/grant-batch' : '/admin/redeem/deduct-batch';
     const body = op.type === 'grant'
       ? { userids, amount: values.amount, reason: values.reason || '后台发币', refId: values.refId || undefined }
       : { userids, amount: values.amount, product_name: values.reason };
-    await api(path, { method: 'POST', body });
-    message.success(op.type === 'grant' ? '发币完成' : '减币完成');
+    const data = await postBatchOperation(path, body);
+    showBatchResult(data, op.type === 'grant' ? '发币完成' : '减币完成');
     if (!op.userid) clearSelected();
     setOp(null);
     await load();
@@ -288,6 +341,7 @@ export default function Users({ me }) {
       <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1, keyword)} searchPlaceholder="搜索姓名 / Userid">
         {canEdit && <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>}
         {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
+        <Button onClick={selectAllMatchedUsers}>全选当前搜索结果</Button>
         {canGrant && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>}
         {canDeduct && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>}
         {canNotify && <Button disabled={!selected.length} onClick={() => openNotify({})}>批量发消息</Button>}

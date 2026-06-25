@@ -11,6 +11,10 @@ function assertSafeTarget(cfg) {
   if (process.env.BOB_INTERNAL_TEST_DB !== '1') {
     throw new Error('拒绝执行：请先设置 BOB_INTERNAL_TEST_DB=1，确认这是内部并发测试。');
   }
+  const host = String(cfg?.db?.host || '').toLowerCase();
+  if (!/(127\.0\.0\.1|localhost)/.test(host) && process.env.BOB_ALLOW_REMOTE_TEST_DB !== '1') {
+    throw new Error(`拒绝执行：并发测试默认只允许本机测试库，当前 host=${cfg?.db?.host || '-'}`);
+  }
   const dbName = String(cfg?.db?.database || '').toLowerCase();
   if (!/(test|dev|local|sandbox)/.test(dbName)) {
     throw new Error(`拒绝执行：当前数据库 ${cfg?.db?.database || '-'} 不是测试库。请使用 test/dev/local/sandbox 数据库执行。`);

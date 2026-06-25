@@ -3,7 +3,7 @@ import { App as AntApp, Modal, Spin } from 'antd';
 import { api } from './api.js';
 import AppShell from './components/AppShell.jsx';
 import DingtalkModal from './components/DingtalkModal.jsx';
-import { canAccessNav } from './permissions.js';
+import { canAccessNav, hasPermission } from './permissions.js';
 
 const pages = {
   dashboard: lazy(() => import('./pages/Dashboard.jsx')),
@@ -30,20 +30,21 @@ export default function AdminApp() {
     const data = await api('/admin/me');
     if (!data?.ok) window.location.replace('/admin/login');
     setMe(data);
+    return data;
   }, []);
 
-  const loadDingtalk = useCallback(async () => {
+  const loadDingtalk = useCallback(async (currentUser = null) => {
     try {
-      const data = await api('/admin/settings/dingtalk');
-      setDingtalk({ connected: data.connected === true, data: data.data || {}, error: data.error || '' });
+      const canEditConnection = hasPermission(currentUser, 'integrations:view');
+      const data = await api(canEditConnection ? '/admin/settings/dingtalk' : '/admin/settings/dingtalk/status');
+      setDingtalk({ connected: data.connected === true, data: data.data || {}, error: data.error || '', readonly: !canEditConnection });
     } catch (err) {
-      setDingtalk((prev) => ({ ...prev, connected: false, error: err.message }));
+      setDingtalk((prev) => ({ ...prev, connected: false, error: err.message, readonly: true }));
     }
   }, []);
 
   useEffect(() => {
-    loadMe().catch(() => window.location.replace('/admin/login'));
-    loadDingtalk();
+    loadMe().then((currentUser) => loadDingtalk(currentUser)).catch(() => window.location.replace('/admin/login'));
   }, [loadMe, loadDingtalk]);
 
   useEffect(() => {
@@ -51,6 +52,8 @@ export default function AdminApp() {
     const fallback = ['dashboard', 'users', 'orders', 'commerce', 'activities', 'messages', 'content', 'integrations', 'audit'].find((key) => canAccessNav(me, key));
     setActiveKey(fallback || 'myOperations');
   }, [activeKey, me]);
+
+  const canEditDingtalk = hasPermission(me, 'integrations:edit');
 
   const saveDingtalk = async (values) => {
     const current = dingtalk.data || {};
@@ -71,7 +74,7 @@ export default function AdminApp() {
     setSavingDingtalk(true);
     try {
       await api('/admin/settings/dingtalk', { method: 'POST', body: values });
-      await loadDingtalk();
+      await loadDingtalk(me);
       setModalOpen(false);
       message.success('钉钉连接已保存');
     } catch (err) {
@@ -87,16 +90,16 @@ export default function AdminApp() {
   };
 
   const Page = pages[activeKey] || pages.dashboard;
-  const common = { onOpenDingtalk: () => setModalOpen(true), dingtalk, reloadDingtalk: loadDingtalk, onNavigate: setActiveKey, me };
+  const common = { onOpenDingtalk: () => canEditDingtalk && setModalOpen(true), dingtalk, reloadDingtalk: () => loadDingtalk(me), onNavigate: setActiveKey, me };
 
   return (
     <>
-      <AppShell activeKey={activeKey} onChange={setActiveKey} user={me} dingtalk={dingtalk} onOpenDingtalk={() => setModalOpen(true)} onLogout={logout}>
+      <AppShell activeKey={activeKey} onChange={setActiveKey} user={me} dingtalk={dingtalk} canEditDingtalk={canEditDingtalk} onOpenDingtalk={() => canEditDingtalk && setModalOpen(true)} onLogout={logout}>
         <Suspense fallback={<div className="page-loading"><Spin /> 正在加载模块…</div>}>
           <Page {...common} />
         </Suspense>
       </AppShell>
-      <DingtalkModal open={modalOpen} state={dingtalk} loading={savingDingtalk} onCancel={() => setModalOpen(false)} onRefresh={loadDingtalk} onSave={saveDingtalk} />
+      <DingtalkModal open={modalOpen} state={dingtalk} loading={savingDingtalk} onCancel={() => setModalOpen(false)} onRefresh={() => loadDingtalk(me)} onSave={saveDingtalk} />
     </>
   );
 }

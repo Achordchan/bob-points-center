@@ -5,6 +5,7 @@ import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
 import RichTextEditor from '../components/RichTextEditor.jsx';
 import { amountText, formatTs, localTablePagination } from '../utils.js';
+import { hasPermission } from '../permissions.js';
 
 const redPacketStatusText = { pending: '待开始', scheduled: '倒计时中', active: '进行中', ended: '已结束', cancelled: '已取消' };
 const charityStatusText = { active: '启用', paused: '暂停', archived: '归档' };
@@ -38,6 +39,7 @@ function packetClaimUser(row) {
 
 function RedPackets({ me }) {
   const { message } = App.useApp();
+  const canEdit = hasPermission(me, 'activities:edit');
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -49,7 +51,13 @@ function RedPackets({ me }) {
   const remove = (row) => Modal.confirm({ title: '删除红包活动', content: `确认删除红包活动 #${row.id}？该活动及领取明细会被删除。`, okText: '确认删除', cancelText: '取消', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/delete', { method: 'POST', body: { activity_id: row.id } }); message.success('已删除'); if (detail?.id === row.id) setDetail(null); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Card size="small" title="红包配置" extra={<Tag color={status?.status === 'active' ? 'green' : 'default'}>{status?.status ? statusText(redPacketStatusText, status.status) : '未开始'}</Tag>}>
-      <Form form={form} layout="inline" onFinish={start}><Form.Item name="total_amount" rules={[{ required: true }]}><InputNumber min={1} placeholder="总金额" /></Form.Item><Form.Item name="total_count" rules={[{ required: true }]}><InputNumber min={1} placeholder="人数" /></Form.Item><Form.Item name="countdown_seconds" rules={[{ required: true }]}><InputNumber min={0} placeholder="倒计时秒" /></Form.Item><Form.Item name="duration_minutes" rules={[{ required: true }]}><InputNumber min={1} placeholder="持续分钟" /></Form.Item><Form.Item name="sponsor"><Input placeholder="赞助人" /></Form.Item><Button type="primary" htmlType="submit">创建并开始</Button><Button onClick={load}>刷新</Button></Form>
+      <Form form={form} layout="inline" onFinish={start}><Form.Item name="total_amount" rules={[{ required: true }]}><InputNumber min={1} placeholder="总金额" disabled={!canEdit} /></Form.Item><Form.Item name="total_count" rules={[{ required: true }]}><InputNumber min={1} placeholder="人数" disabled={!canEdit} /></Form.Item><Form.Item name="countdown_seconds" rules={[{ required: true }]}><InputNumber min={0} placeholder="倒计时秒" disabled={!canEdit} /></Form.Item><Form.Item name="duration_minutes" rules={[{ required: true }]}><InputNumber min={1} placeholder="持续分钟" disabled={!canEdit} /></Form.Item><Form.Item name="sponsor"><Input placeholder="赞助人" readOnly={!canEdit} /></Form.Item>{canEdit && <Button type="primary" htmlType="submit">创建并开始</Button>}<Button onClick={load}>刷新</Button></Form>
+      {status && <Descriptions bordered size="small" column={{ xs: 1, md: 4 }} style={{ marginTop: 12 }} items={[
+        { key: 'start', label: '开始时间', children: formatTs(status.start_at) },
+        { key: 'end', label: '结束时间', children: formatTs(status.end_at) },
+        { key: 'count', label: '已抢/总份数', children: `${status.claimed_count || 0}/${status.total_count || 0}` },
+        { key: 'amount', label: '总额', children: amountText(status.total_amount) },
+      ]} />}
     </Card>
     <DataToolbar onRefresh={load}>{me?.isSuperAdmin && <Button danger onClick={clear}>危险区：清空历史</Button>}</DataToolbar>
     <Table rowKey="id" dataSource={history} pagination={localTablePagination('个活动')} scroll={{ x: 1080 }} columns={[{ title: 'ID', dataIndex: 'id' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '总额', dataIndex: 'total_amount', render: amountText }, { title: '份数', dataIndex: 'total_count' }, { title: '已抢', dataIndex: 'claimed_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(redPacketStatusText, v) }, { title: '赞助人', dataIndex: 'sponsor' }, { title: '操作', fixed: 'right', render: (_, r) => <Space><Button onClick={() => setDetail(r)}>详情</Button>{me?.isSuperAdmin && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> }]} />
@@ -103,8 +111,9 @@ function attendanceNote(row) {
   return key || '-';
 }
 
-function AttendanceRewards({ dingtalk }) {
+function AttendanceRewards({ dingtalk, me }) {
   const { message } = App.useApp();
+  const canEdit = hasPermission(me, 'activities:edit');
   const [form] = Form.useForm();
   const [departments, setDepartments] = useState([]);
   const [mode, setMode] = useState('all');
@@ -162,6 +171,24 @@ function AttendanceRewards({ dingtalk }) {
     }
   };
 
+
+  const resetSettings = () => Modal.confirm({
+    title: '恢复打卡奖励默认配置？',
+    content: '会把打卡奖励配置恢复为系统默认值，历史记录不会删除。',
+    okText: '确认恢复',
+    cancelText: '取消',
+    onOk: async () => {
+      setSaving(true);
+      try {
+        await api('/admin/settings/attendance-reward', { method: 'POST', body: { reset: true } });
+        message.success('打卡奖励配置已恢复默认');
+        await loadAll();
+      } finally {
+        setSaving(false);
+      }
+    },
+  });
+
   const changeDays = async (value) => {
     const next = Number(value || 7);
     setDays(next);
@@ -196,23 +223,23 @@ function AttendanceRewards({ dingtalk }) {
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     {!dingtalk?.connected && <Alert type="warning" showIcon message="钉钉未连接，部门选择和实时打卡奖励不可用。" />}
-    <Card title="打卡奖励配置" extra={<Button type="primary" loading={saving} onClick={() => form.submit()}>保存</Button>} loading={loading}>
+    <Card title="打卡奖励配置" extra={canEdit ? <Space><Button danger loading={saving} onClick={resetSettings}>恢复默认</Button><Button type="primary" loading={saving} onClick={() => form.submit()}>保存</Button></Space> : null} loading={loading}>
       <Form form={form} layout="vertical" onFinish={save} className="attendance-settings-form">
         <Row gutter={[16, 8]} align="middle">
-          <Col xs={24} md={8} lg={6}><Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch /></Form.Item></Col>
-          <Col xs={24} md={8} lg={6}><Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch /></Form.Item></Col>
-          <Col xs={24} md={8} lg={6}><Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
         </Row>
         <Row gutter={[16, 8]}>
-          <Col xs={24} sm={12} lg={6}><Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" /></Form.Item></Col>
-          <Col xs={24} sm={12} lg={6}><Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} sm={12} lg={6}><Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} sm={12} lg={6}><Form.Item label="奖励范围"><Space.Compact style={{ width: '100%' }}><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} style={{ width: '50%' }} /></Form.Item><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} style={{ width: '50%' }} /></Form.Item></Space.Compact></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" readOnly={!canEdit} /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} sm={12} lg={6}><Form.Item label="奖励范围"><Space.Compact style={{ width: '100%' }}><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '50%' }} /></Form.Item><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '50%' }} /></Form.Item></Space.Compact></Form.Item></Col>
         </Row>
         <Row gutter={[16, 8]}>
-          <Col xs={24} md={8} lg={6}><Form.Item label="适用部门"><Select value={mode} onChange={setMode} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} /></Form.Item></Col>
-          {mode === 'selected' && <Col xs={24} md={16} lg={10}><Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item></Col>}
-          <Col xs={24} md={mode === 'selected' ? 24 : 16} lg={mode === 'selected' ? 8 : 12}><Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item label="适用部门"><Select value={mode} onChange={setMode} disabled={!canEdit} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} /></Form.Item></Col>
+          {mode === 'selected' && <Col xs={24} md={16} lg={10}><Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!canEdit || !dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item></Col>}
+          <Col xs={24} md={mode === 'selected' ? 24 : 16} lg={mode === 'selected' ? 8 : 12}><Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" readOnly={!canEdit} /></Form.Item></Col>
         </Row>
       </Form>
     </Card>
@@ -237,11 +264,11 @@ function AttendanceRewards({ dingtalk }) {
         { title: '自动补发', dataIndex: 'auto_compensated_count' },
         { title: '总发放', dataIndex: 'total_reward_amount', render: amountText },
         { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
-        { title: '操作', render: (_, row) => <Space><Button onClick={() => openDetail(row.work_date)}>详情</Button><Button loading={reconciling} onClick={() => reconcile(row.work_date)}>对账补发</Button></Space> },
+        { title: '操作', render: (_, row) => <Space><Button onClick={() => openDetail(row.work_date)}>详情</Button>{canEdit && <Button loading={reconciling} onClick={() => reconcile(row.work_date)}>对账补发</Button>}</Space> },
       ]} />
     </Card>
 
-    <Drawer title="打卡奖励明细" open={Boolean(detail)} onClose={() => setDetail(null)} width={920} extra={detail && <Button loading={reconciling} onClick={() => reconcile(detail.date)}>对账补发</Button>}>
+    <Drawer title="打卡奖励明细" open={Boolean(detail)} onClose={() => setDetail(null)} width={920} extra={detail && canEdit ? <Button loading={reconciling} onClick={() => reconcile(detail.date)}>对账补发</Button> : null}>
       {detail && <Space direction="vertical" style={{ width: '100%' }} size={12}>
         <Descriptions bordered size="small" column={2} items={[
           { key: 'date', label: '日期', children: detail.date },
@@ -261,43 +288,50 @@ function AttendanceRewards({ dingtalk }) {
   </Space>;
 }
 
-function Charity() {
+function Charity({ me }) {
   const { message } = App.useApp();
+  const canEdit = hasPermission(me, 'activities:edit');
   const [projects, setProjects] = useState([]);
   const [contribs, setContribs] = useState([]);
+  const [contribSummary, setContribSummary] = useState({ total_bob_amount: 0, donor_count: 0, contribution_count: 0 });
   const [editing, setEditing] = useState(null);
   const [projectFilter, setProjectFilter] = useState('');
   const [form] = Form.useForm();
   const loadProjects = async () => setProjects((await api('/admin/charity/projects')).data || []);
-  const loadContribs = async () => setContribs((await api(`/admin/charity/contributions?${qs({ limit: 200, project_id: projectFilter })}`)).data || []);
+  const loadContribs = async () => { const resp = await api(`/admin/charity/contributions?${qs({ limit: 200, project_id: projectFilter })}`); setContribs(resp.data || []); setContribSummary(resp.summary || { total_bob_amount: 0, donor_count: 0, contribution_count: 0 }); };
   useEffect(() => { loadProjects().catch((e) => message.error(e.message)); }, []);
   useEffect(() => { loadContribs().catch(() => null); }, [projectFilter]);
   const open = (row = {}) => { form.resetFields(); setEditing(row); form.setFieldsValue({ ...row, tier_options: Array.isArray(row.tier_options) ? row.tier_options.join(',') : '10,20,50,100' }); };
   const save = async (values) => { await api('/admin/charity/projects/save', { method: 'POST', body: values }); message.success('公益项目已保存'); setEditing(null); form.resetFields(); loadProjects(); loadContribs(); };
   return <Space direction="vertical" style={{ width: '100%' }}>
-    <DataToolbar onRefresh={() => { loadProjects(); loadContribs(); }} onCreate={() => open({ project_id: `CHARITY_${Date.now().toString(36).toUpperCase()}`, status: 'active', execution_status: 'pending' })} createText="新增公益项目" />
-    <Table rowKey="project_id" dataSource={projects} pagination={localTablePagination('个项目')} scroll={{ x: 1180 }} columns={[{ title: '封面', dataIndex: 'cover_image_url', width: 86, render: (url) => url ? <Image src={url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 8 }} /> : '-' }, { title: '项目ID', dataIndex: 'project_id', ellipsis: true }, { title: '名称', dataIndex: 'project_name' }, { title: '目标BOB币', dataIndex: 'target_bob_amount', render: amountText }, { title: '已助力', dataIndex: 'total_bob_amount', render: amountText }, { title: '人数', dataIndex: 'donor_count' }, { title: '次数', dataIndex: 'contribution_count' }, { title: '达标', dataIndex: 'goal_reached', render: (v) => v ? <Tag color="green">已达标</Tag> : <Tag>未达标</Tag> }, { title: '排序', dataIndex: 'sort', render: (v) => v ?? '-' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(charityStatusText, v) }, { title: '执行', dataIndex: 'execution_status', render: (v) => statusText(executionStatusText, v) }, { title: '操作', render: (_, r) => <Button onClick={() => open(r)}>编辑</Button> }]} />
+    <DataToolbar onRefresh={() => { loadProjects(); loadContribs(); }} onCreate={canEdit ? () => open({ project_id: `CHARITY_${Date.now().toString(36).toUpperCase()}`, status: 'active', execution_status: 'pending' }) : null} createText="新增公益项目" />
+    <Table rowKey="project_id" dataSource={projects} pagination={localTablePagination('个项目')} scroll={{ x: 1180 }} columns={[{ title: '封面', dataIndex: 'cover_image_url', width: 86, render: (url) => url ? <Image src={url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 8 }} /> : '-' }, { title: '项目ID', dataIndex: 'project_id', ellipsis: true }, { title: '名称', dataIndex: 'project_name' }, { title: '目标BOB币', dataIndex: 'target_bob_amount', render: amountText }, { title: '已助力', dataIndex: 'total_bob_amount', render: amountText }, { title: '人数', dataIndex: 'donor_count' }, { title: '次数', dataIndex: 'contribution_count' }, { title: '达标', dataIndex: 'goal_reached', render: (v) => v ? <Tag color="green">已达标</Tag> : <Tag>未达标</Tag> }, { title: '排序', dataIndex: 'sort', render: (v) => v ?? '-' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(charityStatusText, v) }, { title: '执行', dataIndex: 'execution_status', render: (v) => statusText(executionStatusText, v) }, { title: '操作', render: (_, r) => canEdit ? <Button onClick={() => open(r)}>编辑</Button> : '-' }]} />
     <Card size="small" title="助力记录" extra={<Select allowClear placeholder="项目筛选" style={{ width: 220 }} value={projectFilter || undefined} onChange={(v) => setProjectFilter(v || '')} options={projects.map((p) => ({ value: p.project_id, label: p.project_name }))} />}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 12 }}>
+        <Col xs={8}><Statistic title="累计 BOB 币" value={Number(contribSummary.total_bob_amount || 0)} /></Col>
+        <Col xs={8}><Statistic title="助力人数" value={Number(contribSummary.donor_count || 0)} /></Col>
+        <Col xs={8}><Statistic title="助力次数" value={Number(contribSummary.contribution_count || 0)} /></Col>
+      </Row>
       <Table rowKey="id" size="small" dataSource={contribs} pagination={localTablePagination('条记录')} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '项目', dataIndex: 'project_name' }, { title: '用户', dataIndex: 'user_name_snapshot' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }]} />
     </Card>
-    <Drawer title={editing?.id ? "编辑公益项目" : "新增公益项目"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={680} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
+    <Drawer title={editing?.id ? "编辑公益项目" : "新增公益项目"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={680} extra={canEdit ? <Button type="primary" onClick={() => form.submit()}>保存</Button> : null}>
       <Form form={form} layout="vertical" onFinish={save}>
         <Form.Item name="project_id" label="项目ID" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
-        <Form.Item name="project_name" label="项目名称" rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item name="cover_image_url" label="项目封面"><ProductImageEditor /></Form.Item>
-        <Form.Item name="summary" label="简介" rules={[{ required: true }]}><RichTextEditor minHeight={150} /></Form.Item>
-        <Form.Item name="rules_text" label="规则" rules={[{ required: true }]}><RichTextEditor minHeight={180} /></Form.Item>
-        <Form.Item name="target_bob_amount" label="目标BOB币" rules={[{ required: true }]}><InputNumber min={1} style={{ width: '100%' }} /></Form.Item>
-        <Form.Item name="tier_options" label="助力档位"><Input placeholder="10,20,50,100" /></Form.Item>
-        <Form.Item name="sort" label="排序"><InputNumber min={0} precision={0} style={{ width: '100%' }} /></Form.Item>
-        <Form.Item name="status" label="状态"><Select options={[{ value: 'active', label: '启用' }, { value: 'paused', label: '暂停' }, { value: 'archived', label: '归档' }]} /></Form.Item>
-        <Form.Item name="execution_status" label="执行状态"><Select options={[{ value: 'pending', label: '待执行' }, { value: 'in_progress', label: '执行中' }, { value: 'completed', label: '已完成' }]} /></Form.Item>
-        <Form.Item name="execution_note" label="执行说明"><RichTextEditor minHeight={130} /></Form.Item>
+        <Form.Item name="project_name" label="项目名称" rules={[{ required: true }]}><Input readOnly={!canEdit} /></Form.Item>
+        <Form.Item name="cover_image_url" label="项目封面"><ProductImageEditor emptyText="未设置项目封面" disabled={!canEdit} /></Form.Item>
+        <Form.Item name="summary" label="简介" rules={[{ required: true }]}><RichTextEditor minHeight={150} disabled={!canEdit} /></Form.Item>
+        <Form.Item name="rules_text" label="规则" rules={[{ required: true }]}><RichTextEditor minHeight={180} disabled={!canEdit} /></Form.Item>
+        <Form.Item name="target_bob_amount" label="目标BOB币" rules={[{ required: true }]}><InputNumber min={1} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="tier_options" label="助力档位"><Input placeholder="10,20,50,100" readOnly={!canEdit} /></Form.Item>
+        <Form.Item name="sort" label="排序"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="status" label="状态"><Select disabled={!canEdit} options={[{ value: 'active', label: '启用' }, { value: 'paused', label: '暂停' }, { value: 'archived', label: '归档' }]} /></Form.Item>
+        <Form.Item name="execution_status" label="执行状态"><Select disabled={!canEdit} options={[{ value: 'pending', label: '待执行' }, { value: 'in_progress', label: '执行中' }, { value: 'completed', label: '已完成' }]} /></Form.Item>
+        <Form.Item name="execution_note" label="执行说明"><RichTextEditor minHeight={130} disabled={!canEdit} /></Form.Item>
       </Form>
     </Drawer>
   </Space>;
 }
 
 export default function Activities(props) {
-  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets {...props} /> }, { key: 'attendance', label: '打卡奖励', children: <AttendanceRewards {...props} /> }, { key: 'charity', label: '公益助力', children: <Charity /> }]} /></Card>;
+  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets {...props} /> }, { key: 'attendance', label: '打卡奖励', children: <AttendanceRewards {...props} /> }, { key: 'charity', label: '公益助力', children: <Charity {...props} /> }]} /></Card>;
 }

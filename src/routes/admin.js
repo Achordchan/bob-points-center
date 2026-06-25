@@ -2970,6 +2970,27 @@ export function adminRouter() {
     }
   });
 
+  router.get('/settings/dingtalk/status', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const settings = await getDingtalkConnectionSettings(db, cfg);
+      applyDingtalkConnectionSettings(cfg, settings);
+      let connected = false;
+      let error = '';
+      try {
+        await getAccessToken(cfg);
+        connected = true;
+      } catch (err) {
+        error = String(err?.message || err);
+      }
+      return res.json({ ok: true, connected, error, data: { organizationName: settings.organizationName || '', corpId: settings.corpId ? `${String(settings.corpId).slice(0, 4)}****` : '' } });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
   router.get('/settings/dingtalk', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;

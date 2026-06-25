@@ -68,6 +68,25 @@ function printResult(payload) {
   console.log(JSON.stringify({ ok: true, ...payload }, null, 2));
 }
 
+
+function assertLiveDbTarget(cfg) {
+  if (process.env.BOB_ATTENDANCE_LIVE_DB_INIT_RISK !== '1') {
+    throw new Error('拒绝执行：实时钉钉检查需要初始化数据库连接。请设置 BOB_ATTENDANCE_LIVE_DB_INIT_RISK=1，并确认只连接测试库；生产环境只允许 --fixture-only。');
+  }
+  if (process.env.BOB_INTERNAL_TEST_DB !== '1') {
+    throw new Error('拒绝执行：实时钉钉检查只能连接内部测试库，请设置 BOB_INTERNAL_TEST_DB=1。');
+  }
+  const dbName = String(cfg?.db?.database || '').toLowerCase();
+  if (!/(test|dev|local|sandbox)/.test(dbName)) {
+    throw new Error(`拒绝执行：当前数据库 ${cfg?.db?.database || '-'} 不是测试库。`);
+  }
+  const target = `${cfg?.db?.host || ''}:${cfg?.db?.port || ''}/${cfg?.db?.database || ''}`.toLowerCase();
+  const confirmTarget = String(process.env.BOB_ATTENDANCE_TEST_TARGET_CONFIRM || '').trim().toLowerCase();
+  if (confirmTarget !== target) {
+    throw new Error(`拒绝执行：请设置 BOB_ATTENDANCE_TEST_TARGET_CONFIRM=${target}，二次确认测试库地址。`);
+  }
+}
+
 const args = parseArgs(process.argv);
 const range = getDateRange(args.date);
 
@@ -98,10 +117,11 @@ if (args.fixtureOnly) {
 }
 
 if (process.env.BOB_ATTENDANCE_READONLY_LIVE !== '1') {
-  throw new Error('拒绝执行：实时钉钉只读检查会初始化数据库连接。请设置 BOB_ATTENDANCE_READONLY_LIVE=1 后再执行，推荐优先使用 --fixture-only。');
+  throw new Error('拒绝执行：实时钉钉检查会初始化数据库连接。请优先使用 --fixture-only；如必须实时检查，只能连接测试库。');
 }
 
 const cfg = loadConfig();
+assertLiveDbTarget(cfg);
 const db = await initDb(cfg);
 try {
   const settings = await getAttendanceRewardSettings(db);
@@ -135,7 +155,7 @@ try {
     };
   });
   printResult({
-    safe: { sends_dingtalk_message: false, grants_bob: false, writes_database: 'db_schema_init_possible' },
+    safe: { sends_dingtalk_message: false, grants_bob: false, writes_database: 'test_db_schema_init_only' },
     mode: 'dingtalk-readonly',
     date: range.date,
     settings: {

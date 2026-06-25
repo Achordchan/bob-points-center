@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { App, Button, Card, Collapse, Divider, Form, Input, Modal, Select, Space, Switch, Tabs, Typography } from 'antd';
-import { api } from '../api.js';
+import { api, qs } from '../api.js';
 import { hasPermission } from '../permissions.js';
 
 const notifyTemplates = [
@@ -29,6 +29,17 @@ const colorOptions = [
   { value: 'gray', label: '灰色' },
   { value: 'red', label: '红色' },
 ];
+
+const groupConversationPresets = [
+  { label: 'BOB大群', value: 'cidxEY0ywSnrjDytDeXzEscwg==' },
+  { label: '测试群', value: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
+  { label: '自定义群', value: '__custom__' },
+];
+
+function matchConversationPreset(value) {
+  const current = String(value || '').trim();
+  return groupConversationPresets.find((item) => item.value === current)?.value || '__custom__';
+}
 
 const variableDescriptions = {
   name: '接收消息的用户姓名',
@@ -118,6 +129,8 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [channelEditing, setChannelEditing] = useState(false);
+  const channelConversationId = Form.useWatch(['channel', 'openConversationId'], form);
+  const channelPreset = matchConversationPreset(channelConversationId);
 
   const load = async () => {
     setLoading(true);
@@ -164,7 +177,8 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
         extra={canEdit ? <Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button> : null}
         style={{ marginBottom: 12 }}
       >
-        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+        <Form.Item label="群会话预设"><Select disabled={!canEdit} value={channelPreset} options={groupConversationPresets} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
+        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input readOnly={!channelEditing || channelPreset !== '__custom__'} className={!channelEditing || channelPreset !== '__custom__' ? 'readonly-input' : ''} placeholder={channelPreset === '__custom__' ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
         <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
         <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
         <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
@@ -180,10 +194,16 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
 }
 
 
-function NotifyTestPanel({ disabled }) {
+function NotifyTestPanel({ disabled, canSearchUsers }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [userOptions, setUserOptions] = useState([]);
+  const searchUsers = async (keyword) => {
+    if (!String(keyword || '').trim()) return;
+    const data = await api(`/admin/users?${qs({ keyword, page: 1, pageSize: 20 })}`);
+    setUserOptions((data.data || []).map((row) => ({ value: row.userid, label: row.name ? `${row.name}（${row.userid}）` : row.userid, name: row.name || '' })));
+  };
   const submit = async (values) => {
     Modal.confirm({
       title: '确认发送私聊测试？',
@@ -206,8 +226,8 @@ function NotifyTestPanel({ disabled }) {
   return <Card size="small" title="私聊测试" style={{ marginTop: 12 }}>
     <Form form={form} layout="inline" onFinish={submit}>
       <Form.Item name="event" rules={[{ required: true, message: '请选择事件' }]}><Select placeholder="选择通知类型" style={{ width: 180 }} options={notifyTemplates.map((item) => ({ value: item.key, label: item.label }))} /></Form.Item>
-      <Form.Item name="userid"><Input placeholder="内部测试用户 Userid" style={{ width: 220 }} /></Form.Item>
-      <Form.Item name="name"><Input placeholder="或按姓名搜索" style={{ width: 180 }} /></Form.Item>
+{canSearchUsers ? <Form.Item name="userid" rules={[{ required: true, message: '请选择测试用户' }]}><Select showSearch placeholder="搜索并选择内部测试用户" style={{ width: 280 }} filterOption={false} onSearch={searchUsers} options={userOptions} onChange={(userid, option) => form.setFieldsValue({ userid, name: option?.name || '' })} /></Form.Item> : <Form.Item name="userid" rules={[{ required: true, message: '请输入测试用户 Userid' }]}><Input placeholder="内部测试用户 Userid" style={{ width: 220 }} /></Form.Item>}
+      <Form.Item name="name"><Input placeholder={canSearchUsers ? "用户姓名" : "可选：用户姓名"} style={{ width: 160 }} readOnly={canSearchUsers} /></Form.Item>
       <Button type="primary" htmlType="submit" loading={loading} disabled={disabled}>发送测试</Button>
     </Form>
   </Card>;
@@ -230,7 +250,12 @@ function GroupCardActions({ canManual, canTest }) {
       setLoading(false);
     }
   });
-  const manualSend = async (values) => confirmRun('确认发送手动群卡？', '这会向当前群卡配置对应的群发送手动群卡，请确认内容和群会话无误。', async () => {
+  const manualSend = async (values) => {
+    if (!String(values.title || '').trim() && !String(values.markdown || '').trim()) {
+      message.warning('标题和内容至少填写一项');
+      return;
+    }
+    return confirmRun('确认发送手动群卡？', '这会向当前群卡配置对应的群发送手动群卡，请确认内容和群会话无误。', async () => {
     setLoading(true);
     try {
       await api('/admin/notify/group-card', { method: 'POST', body: values });
@@ -242,6 +267,7 @@ function GroupCardActions({ canManual, canTest }) {
       setLoading(false);
     }
   });
+  };
   return <Space direction="vertical" style={{ width: '100%', marginTop: 12 }} size={12}>
     <Card size="small" title="群卡模板测试">
       <Form form={testForm} layout="inline" onFinish={testSend}>
@@ -251,19 +277,19 @@ function GroupCardActions({ canManual, canTest }) {
     </Card>
     <Card size="small" title="手动群卡推送">
       <Form form={manualForm} layout="vertical" onFinish={manualSend}>
-        <Form.Item label="标题" name="title" rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
-        <Form.Item label="Markdown 内容" name="markdown" rules={[{ required: true, message: '请输入内容' }]}><Input.TextArea rows={5} /></Form.Item>
-        <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" /></Form.Item>
-        <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" /></Form.Item>
+        <Form.Item label="标题" name="title"><Input readOnly={!canManual} /></Form.Item>
+        <Form.Item label="Markdown 内容" name="markdown"><Input.TextArea rows={5} readOnly={!canManual} /></Form.Item>
+        <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" readOnly={!canManual} /></Form.Item>
+        <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" readOnly={!canManual} /></Form.Item>
         <Form.List name="buttons">
           {(fields, { add, remove }) => <Space direction="vertical" style={{ width: '100%' }}>
-            <Space><Typography.Text strong>按钮</Typography.Text>{canEdit && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</Space>
+            <Space><Typography.Text strong>按钮</Typography.Text>{canManual && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</Space>
             {fields.map((field) => <Card size="small" key={field.key}>
               <Space direction="vertical" style={{ width: '100%' }}>
-                <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canEdit} /></Form.Item>
-                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input readOnly={!canEdit} /></Form.Item>
-                <Form.Item label="颜色" name={[field.name, 'color']}><Select options={colorOptions} /></Form.Item>
-                <Button danger onClick={() => remove(field.name)}>删除按钮</Button>
+                <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canManual} /></Form.Item>
+                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input readOnly={!canManual} /></Form.Item>
+                <Form.Item label="颜色" name={[field.name, 'color']}><Select disabled={!canManual} options={colorOptions} /></Form.Item>
+                {canManual && <Button danger onClick={() => remove(field.name)}>删除按钮</Button>}
               </Space>
             </Card>)}
           </Space>}
@@ -275,8 +301,11 @@ function GroupCardActions({ canManual, canTest }) {
 }
 
 export default function Messages({ me }) {
+  const canEdit = hasPermission(me, 'messages:edit');
+  const canTest = hasPermission(me, 'messages:test');
+  const canSearchUsers = hasPermission(me, 'users:view');
   return <Tabs items={[
-    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} extraPanel={<NotifyTestPanel disabled={!canTest} />} /> },
+    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} extraPanel={<NotifyTestPanel disabled={!canTest} canSearchUsers={canSearchUsers} />} /> },
     { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons canEdit={canEdit} extraPanel={<GroupCardActions canManual={canEdit} canTest={canTest} />} /> },
   ]} />;
 }

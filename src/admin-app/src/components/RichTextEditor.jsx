@@ -15,12 +15,18 @@ function successText(result) {
   return `图片已转为 WebP，节省 ${Math.round(saved / 1024)} KB`;
 }
 
-export default function RichTextEditor({ value, onChange, minHeight = 180 }) {
+export default function RichTextEditor({ value, onChange, minHeight = 180, disabled = false }) {
   const { message } = App.useApp();
   const [editor, setEditor] = useState(null);
   const html = normalizeHtml(value);
 
   useEffect(() => () => editor?.destroy(), [editor]);
+
+  useEffect(() => {
+    if (!editor) return;
+    if (disabled) editor.disable?.();
+    else editor.enable?.();
+  }, [disabled, editor]);
 
   const toolbarConfig = useMemo(() => ({
     excludeKeys: ['fullScreen', 'group-video', 'insertTable', 'codeBlock'],
@@ -32,6 +38,7 @@ export default function RichTextEditor({ value, onChange, minHeight = 180 }) {
     MENU_CONF: {
       uploadImage: {
         async customUpload(file, insertFn) {
+          if (disabled) return;
           const invalid = validateImageFile(file);
           if (invalid) {
             message.warning(invalid);
@@ -47,10 +54,10 @@ export default function RichTextEditor({ value, onChange, minHeight = 180 }) {
         },
       },
     },
-  }), [message]);
+  }), [disabled, message]);
 
   return <div className="rich-text-editor">
-    <Toolbar editor={editor} defaultConfig={toolbarConfig} mode="default" />
+    {!disabled && <Toolbar editor={editor} defaultConfig={toolbarConfig} mode="default" />}
     <Editor
       defaultConfig={editorConfig}
       value={html}

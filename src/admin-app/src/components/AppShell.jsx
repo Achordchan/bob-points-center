@@ -30,7 +30,7 @@ export const navItems = [
   { key: 'audit', icon: <SafetyOutlined />, label: '审计安全' },
 ];
 
-export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDingtalk, onLogout, children }) {
+export default function AppShell({ activeKey, onChange, user, dingtalk, canEditDingtalk = false, onOpenDingtalk, onLogout, children }) {
   const [collapsed, setCollapsed] = useState(false);
   const visibleNavItems = useMemo(() => navItems.filter((item) => canAccessNav(user, item.key)), [user]);
   const selected = useMemo(() => navItems.find((item) => item.key === activeKey), [activeKey]);
@@ -49,7 +49,7 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDi
         <Header className="topbar">
           <Typography.Title level={4} className="page-title">{activeKey === 'myOperations' ? (user?.isSuperAdmin ? '管理员操作记录' : '我的操作记录') : selected?.label || '首页概览'}</Typography.Title>
           <Space wrap>
-            <Button className="dingtalk-pill" type={connected ? 'primary' : 'default'} ghost={connected} onClick={onOpenDingtalk}>
+            <Button className="dingtalk-pill" type={connected ? 'primary' : 'default'} ghost={connected} disabled={!canEditDingtalk} onClick={onOpenDingtalk}>
               钉钉：{connected ? org : '未连接'}
             </Button>
             <Button href="/docs" target="_blank">API 文档</Button>

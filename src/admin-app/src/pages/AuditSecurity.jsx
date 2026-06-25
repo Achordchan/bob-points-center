@@ -79,7 +79,7 @@ function RoleManagement() {
       { title: '成员数', dataIndex: 'user_count', width: 100 },
       { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>, width: 100 },
       { title: '权限数', render: (_, r) => `${r.permissions?.length || 0} 项`, width: 100 },
-      { title: '操作', width: 160, render: (_, r) => <Space><Button onClick={() => open(r)}>编辑</Button><Button danger disabled={Number(r.is_enabled) !== 1} onClick={() => disable(r)}>停用</Button></Space> },
+      { title: '操作', width: 160, render: (_, r) => <Space><Button onClick={() => open(r)}>编辑</Button>{Number(r.is_builtin) !== 1 && <Button danger disabled={Number(r.is_enabled) !== 1} onClick={() => disable(r)}>停用</Button>}</Space> },
     ]} />
     <Drawer title={editing?.id ? '编辑角色' : '新增角色'} open={Boolean(editing)} onClose={() => setEditing(null)} width={720} extra={<Button type="primary" onClick={() => form.submit()}>保存角色</Button>}>
       <Form form={form} layout="vertical" onFinish={save}>
