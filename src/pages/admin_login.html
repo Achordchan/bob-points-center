@@ -8,70 +8,46 @@
     <link rel="stylesheet" href="/assets/admin_login.css" />
   </head>
   <body>
-    <div class="login-shell">
-      <div class="login-board">
-        <section class="login-hero" aria-label="BOB币管理端介绍">
-        <div class="login-logo-row">
+    <main class="login-shell">
+      <section class="login-panel" aria-label="BOB币管理端登录">
+        <div class="login-brand">
           <div class="brand-badge">BOB</div>
           <div>
-            <div class="brand-kicker">BOB币 管理端</div>
-            <div class="brand-sub">bob.baymaxgroup.com</div>
+            <h1>BOB币 管理端</h1>
+            <p id="hint">登录</p>
           </div>
         </div>
-        <div class="hero-copy">
-          <h1>BOB币管理后台</h1>
-          <p id="hint">正在检查登录状态…</p>
-        </div>
-        <div class="scope-grid" aria-label="管理范围">
-          <div>用户与账户</div>
-          <div>订单与核销</div>
-          <div>商城与 CDK</div>
-          <div>活动与公益</div>
-        </div>
+
+        <section class="login-card hidden" id="cardDingtalk">
+          <div class="card-title">钉钉登录</div>
+          <div class="ding-actions">
+            <button id="btnDingLogin" disabled>开始钉钉登录</button>
+            <button class="secondary" id="btnReload">刷新</button>
+          </div>
+          <div class="error" id="dingErr"></div>
         </section>
 
-        <main class="login-main">
-        <div class="login-panel">
-          <div class="panel-head">
-            <h2>登录管理后台</h2>
-            <p>请使用管理员账号进入系统。</p>
+        <section class="login-card login-card-primary" id="cardFallback">
+          <div class="card-title">账号密码登录</div>
+          <div class="login-form">
+            <div class="field">
+              <label for="fbUser">账号</label>
+              <input id="fbUser" value="admin" autocomplete="username" />
+            </div>
+            <div class="field">
+              <label for="fbPass">密码</label>
+              <input id="fbPass" type="password" autocomplete="current-password" />
+            </div>
+            <div class="login-actions">
+              <button id="fbLogin">登录</button>
+            </div>
           </div>
+          <div class="error" id="fbErr"></div>
+        </section>
 
-          <section class="login-card" id="cardDingtalk">
-            <div class="card-title">钉钉登录</div>
-            <div class="muted">在钉钉内打开时可自动授权登录。</div>
-            <div class="ding-actions">
-              <button id="btnDingLogin" disabled>开始钉钉登录</button>
-              <button class="secondary" id="btnReload">刷新状态</button>
-            </div>
-            <div class="error" id="dingErr"></div>
-          </section>
-
-          <section class="login-card login-card-primary" id="cardFallback">
-            <div class="card-title">账号密码登录</div>
-            <div class="muted">仅在电脑浏览器或非钉钉环境使用。</div>
-            <div class="login-form">
-              <div class="field">
-                <label for="fbUser">账号</label>
-                <input id="fbUser" value="admin" autocomplete="username" />
-              </div>
-              <div class="field">
-                <label for="fbPass">密码</label>
-                <input id="fbPass" type="password" autocomplete="current-password" />
-              </div>
-              <div class="login-actions">
-                <button id="fbLogin">登录</button>
-              </div>
-            </div>
-            <div class="error" id="fbErr"></div>
-          </section>
-
-          <div class="login-footnote">登录即进入 BOB 管理端，所有高危操作会记录到审计日志。</div>
-          <div class="error" id="err"></div>
-        </div>
-        </main>
-      </div>
-    </div>
+        <div class="error" id="err"></div>
+      </section>
+    </main>
 
     <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js"></script>
     <script src="/assets/base.js"></script>

@@ -70,7 +70,7 @@
       if (raw === '{}' || raw === 'null' || raw === 'undefined') {
         const card = document.getElementById('cardDingtalk');
         if (card) card.classList.add('hidden');
-        document.getElementById('hint').textContent = '当前不在钉钉，请使用账号密码登录';
+        document.getElementById('hint').textContent = '登录';
         document.getElementById('dingErr').textContent = '';
         return;
       }
@@ -100,10 +100,12 @@
       return;
     }
 
-    document.getElementById('hint').textContent = '请登录后进入管理端';
+    document.getElementById('hint').textContent = '登录';
     document.getElementById('btnDingLogin').disabled = false;
 
     if (typeof dd !== 'undefined') {
+      const card = document.getElementById('cardDingtalk');
+      if (card) card.classList.remove('hidden');
       dingLogin();
     }
   }

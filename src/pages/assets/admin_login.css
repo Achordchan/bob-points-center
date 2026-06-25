@@ -5,7 +5,6 @@
   --login-muted: #64748b;
   --login-line: rgba(15, 23, 42, 0.10);
   --login-primary: #1677ff;
-  --login-navy: #0b1f3a;
 }
 
 body {
@@ -16,60 +15,25 @@ body {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 40px 24px;
-  background:
-    radial-gradient(720px 420px at 82% 18%, rgba(22, 119, 255, 0.12), transparent 62%),
-    linear-gradient(135deg, #f8fbff 0%, #eef4ff 48%, #f5f7fb 100%);
+  padding: 32px 18px;
+  background: linear-gradient(135deg, #f8fbff 0%, #eef4ff 52%, #f5f7fb 100%);
   color: var(--login-text);
 }
 
-.login-board {
-  width: min(1120px, 100%);
-  min-height: 560px;
-  display: grid;
-  grid-template-columns: minmax(340px, 0.9fr) minmax(420px, 1fr);
-  overflow: hidden;
+.login-panel {
+  width: min(420px, 100%);
   border: 1px solid var(--login-line);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.14);
+  border-radius: 24px;
+  padding: 28px;
+  background: var(--login-panel);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
 }
 
-.login-hero {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 48px;
-  padding: 52px;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 20% 85%, rgba(22, 119, 255, 0.24), transparent 32%),
-    linear-gradient(145deg, #0f2d55 0%, #0b1f3a 100%);
-  color: #fff;
-}
-
-.login-hero::after {
-  content: "";
-  position: absolute;
-  inset: auto -120px -120px auto;
-  width: 280px;
-  height: 280px;
-  border-radius: 999px;
-  background: rgba(22, 119, 255, 0.18);
-}
-
-.login-logo-row,
-.hero-copy,
-.scope-grid {
-  position: relative;
-  z-index: 1;
-}
-
-.login-logo-row {
+.login-brand {
   display: flex;
   align-items: center;
   gap: 14px;
+  margin-bottom: 24px;
 }
 
 .brand-badge {
@@ -79,84 +43,25 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  color: #fff;
   font-size: 15px;
   font-weight: 900;
   letter-spacing: 0.4px;
-  background: linear-gradient(135deg, #1677ff, #36cfc9);
-  box-shadow: 0 16px 36px rgba(22, 119, 255, 0.30);
+  background: #1677ff;
 }
 
-.brand-kicker {
-  font-size: 18px;
-  font-weight: 850;
-  letter-spacing: 0.2px;
-}
-
-.brand-sub {
-  margin-top: 2px;
-  color: rgba(255, 255, 255, 0.64);
-  font-size: 13px;
-}
-
-.hero-copy h1 {
+.login-brand h1 {
   margin: 0;
-  max-width: 420px;
-  color: #fff;
-  font-size: clamp(34px, 3.6vw, 48px);
-  line-height: 1.08;
-  letter-spacing: -1.2px;
-}
-
-.hero-copy p {
-  margin: 18px 0 0;
-  max-width: 420px;
-  color: rgba(255, 255, 255, 0.74);
-  font-size: 15px;
-  line-height: 1.7;
-}
-
-.scope-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.scope-grid div {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 14px;
-  padding: 11px 13px;
-  color: rgba(255, 255, 255, 0.86);
-  background: rgba(255, 255, 255, 0.07);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.login-main {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 56px;
-}
-
-.login-panel {
-  width: min(100%, 430px);
-}
-
-.panel-head {
-  margin-bottom: 24px;
-}
-
-.panel-head h2 {
-  margin: 0;
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1.2;
   letter-spacing: -0.4px;
 }
 
-.panel-head p {
-  margin: 8px 0 0;
+.login-brand p {
+  margin: 5px 0 0;
   color: var(--login-muted);
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .login-card {
@@ -172,24 +77,17 @@ body {
 
 .login-card-primary {
   border-color: rgba(22, 119, 255, 0.24);
-  box-shadow: 0 18px 50px rgba(22, 119, 255, 0.08);
 }
 
 .card-title {
-  margin-bottom: 4px;
+  margin-bottom: 14px;
   font-size: 16px;
   font-weight: 850;
-}
-
-.login-card .muted {
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .login-form {
   display: grid;
   gap: 14px;
-  margin-top: 16px;
 }
 
 .field label {
@@ -217,7 +115,6 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 14px;
 }
 
 button#fbLogin,
@@ -232,42 +129,8 @@ button.secondary {
   border-radius: 12px;
 }
 
-.login-footnote {
-  margin-top: 14px;
-  color: var(--login-muted);
-  font-size: 12px;
-  line-height: 1.7;
-  text-align: center;
-}
-
 .error {
   margin-top: 10px;
-}
-
-@media (max-width: 900px) {
-  .login-shell {
-    padding: 18px;
-    place-items: start center;
-  }
-
-  .login-board {
-    min-height: 0;
-    grid-template-columns: 1fr;
-    border-radius: 24px;
-  }
-
-  .login-hero {
-    gap: 28px;
-    padding: 30px;
-  }
-
-  .hero-copy h1 {
-    font-size: 30px;
-  }
-
-  .login-main {
-    padding: 30px;
-  }
 }
 
 @media (max-width: 560px) {
@@ -275,13 +138,13 @@ button.secondary {
     padding: 12px;
   }
 
-  .login-board {
+  .login-panel {
     border-radius: 20px;
+    padding: 22px;
   }
 
-  .login-hero,
-  .login-main {
-    padding: 22px;
+  .login-brand {
+    margin-bottom: 20px;
   }
 
   .brand-badge {
@@ -291,21 +154,8 @@ button.secondary {
     font-size: 13px;
   }
 
-  .brand-kicker {
-    font-size: 16px;
-  }
-
-  .hero-copy h1 {
-    font-size: 25px;
-    letter-spacing: -0.6px;
-  }
-
-  .scope-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .panel-head h2 {
-    font-size: 22px;
+  .login-brand h1 {
+    font-size: 21px;
   }
 
   .login-card {
