@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Collapse, Divider, Form, Input, Select, Space, Switch, Tabs, Typography } from 'antd';
+import { App, Button, Card, Collapse, Divider, Form, Input, Modal, Select, Space, Switch, Tabs, Typography } from 'antd';
 import { api } from '../api.js';
+import { hasPermission } from '../permissions.js';
 
 const notifyTemplates = [
   { key: 'grant', label: '发币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}}' },
   { key: 'deduct', label: '减币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}} {{exchange_id}}' },
   { key: 'redeem', label: '核销通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}} {{exchange_id}}' },
   { key: 'mall_buy', label: '下单通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}}' },
-  { key: 'transfer_out', label: '转出通知', vars: '{{name}} {{to_name}} {{amount}} {{balance}}' },
-  { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{from_name}} {{amount}} {{balance}}' },
+  { key: 'transfer_out', label: '转出通知', vars: '{{name}} {{to_name}} {{amount}} {{balance}} {{transfer_id}}' },
+  { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{from_name}} {{amount}} {{balance}} {{transfer_id}}' },
   { key: 'red_packet', label: '红包通知', vars: '{{name}} {{amount}} {{balance}} {{activity_id}}' },
   { key: 'charity', label: '公益通知', vars: '{{name}} {{project_name}} {{amount}} {{balance}}' },
 ];
@@ -35,6 +36,7 @@ const variableDescriptions = {
   amount: '本次变动的 BOB 币数量',
   balance: '操作完成后的账户余额',
   exchange_id: '订单或核销单号',
+  transfer_id: '转账流水编号',
   product_name: '商品名称',
   to_name: '转账接收人姓名',
   from_name: '转账发起人姓名',
@@ -79,30 +81,30 @@ function renderVariableHelp(keys) {
   </div>;
 }
 
-function Toolbar({ onRefresh, onReset, onSave }) {
+function Toolbar({ onRefresh, onReset, onSave, canEdit = true }) {
   return <Space className="table-toolbar" wrap>
     <Button onClick={onRefresh}>刷新</Button>
-    <Button danger onClick={onReset}>恢复默认</Button>
-    <Button type="primary" onClick={onSave}>保存</Button>
+    {canEdit && <Button danger onClick={onReset}>恢复默认</Button>}
+    {canEdit && <Button type="primary" onClick={onSave}>保存</Button>}
   </Space>;
 }
 
-function TemplateFields({ namePrefix, withButtons = false }) {
+function TemplateFields({ namePrefix, withButtons = false, canEdit = true }) {
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch /></Form.Item>
-    <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
-    <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} /></Form.Item>
+    <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+    <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} /></Form.Item>
+    <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} /></Form.Item>
     {withButtons && <>
       <Divider style={{ margin: '4px 0' }} />
       <Form.List name={[...namePrefix, 'buttons']}>
         {(fields, { add, remove }) => <Space direction="vertical" style={{ width: '100%' }} size={10}>
-          <Space><Typography.Text strong>按钮</Typography.Text><Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button></Space>
+          <Space><Typography.Text strong>按钮</Typography.Text>{canEdit && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</Space>
           {fields.map((field) => <Card size="small" key={field.key}>
             <Space direction="vertical" style={{ width: '100%' }}>
-              <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input /></Form.Item>
-              <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input /></Form.Item>
-              <Form.Item label="颜色" name={[field.name, 'color']}><Select options={colorOptions} /></Form.Item>
-              <Button danger onClick={() => remove(field.name)}>删除按钮</Button>
+              <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canEdit} /></Form.Item>
+              <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input readOnly={!canEdit} /></Form.Item>
+              <Form.Item label="颜色" name={[field.name, 'color']}><Select disabled={!canEdit} options={colorOptions} /></Form.Item>
+              {canEdit && <Button danger onClick={() => remove(field.name)}>删除按钮</Button>}
             </Space>
           </Card>)}
         </Space>}
@@ -111,7 +113,7 @@ function TemplateFields({ namePrefix, withButtons = false }) {
   </Space>;
 }
 
-function SettingsEditor({ title, loadPath, savePath, templates, withChannel = false, withButtons = false }) {
+function SettingsEditor({ title, loadPath, savePath, templates, withChannel = false, withButtons = false, canEdit = true, extraPanel = null }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -147,34 +149,134 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const items = templates.map((item) => ({
     key: item.key,
     label: item.label,
-    children: <TemplateFields namePrefix={['templates', item.key]} withButtons={withButtons} />,
+    children: <TemplateFields namePrefix={['templates', item.key]} withButtons={withButtons} canEdit={canEdit} />,
   }));
   const templateVars = collectTemplateVars(templates);
 
   return <Card loading={loading}>
-    <Toolbar onRefresh={load} onReset={reset} onSave={save} />
+    <Toolbar onRefresh={load} onReset={reset} onSave={save} canEdit={canEdit} />
     <Form form={form} layout="vertical">
-      <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch /></Form.Item>
+      <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
       {renderVariableHelp(templateVars)}
       {withChannel && <Card
         size="small"
         title="群发送配置"
-        extra={<Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button>}
+        extra={canEdit ? <Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button> : null}
         style={{ marginBottom: 12 }}
       >
         <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
         <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
         <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+        <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
         <Form.Item label="指定接收人" name={['channel', 'recipients']}><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={3} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
+        <Form.Item label="标题字段 Key" name={['channel', 'titleKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="留空使用模板默认标题字段" /></Form.Item>
+        <Form.Item label="内容字段 Key" name={['channel', 'contentKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="例如 spyj_neirong" /></Form.Item>
+        <Form.Item label="搜索图标" name={['channel', 'searchIcon']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="可选，群卡搜索图标地址" /></Form.Item>
       </Card>}
       <Collapse defaultActiveKey={[]} items={items} />
+    </Form>
+    {extraPanel}
+  </Card>;
+}
+
+
+function NotifyTestPanel({ disabled }) {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [loading, setLoading] = useState(false);
+  const submit = async (values) => {
+    Modal.confirm({
+      title: '确认发送私聊测试？',
+      content: '这会向指定用户发送一条测试通知，请只填写内部测试账号。',
+      okText: '确认发送',
+      cancelText: '取消',
+      onOk: async () => {
+        setLoading(true);
+        try {
+          await api('/admin/settings/notify/test', { method: 'POST', body: values });
+          message.success('私聊测试已发送');
+        } catch (err) {
+          message.error(err.message || '私聊测试失败');
+        } finally {
+          setLoading(false);
+        }
+      },
+    });
+  };
+  return <Card size="small" title="私聊测试" style={{ marginTop: 12 }}>
+    <Form form={form} layout="inline" onFinish={submit}>
+      <Form.Item name="event" rules={[{ required: true, message: '请选择事件' }]}><Select placeholder="选择通知类型" style={{ width: 180 }} options={notifyTemplates.map((item) => ({ value: item.key, label: item.label }))} /></Form.Item>
+      <Form.Item name="userid"><Input placeholder="内部测试用户 Userid" style={{ width: 220 }} /></Form.Item>
+      <Form.Item name="name"><Input placeholder="或按姓名搜索" style={{ width: 180 }} /></Form.Item>
+      <Button type="primary" htmlType="submit" loading={loading} disabled={disabled}>发送测试</Button>
     </Form>
   </Card>;
 }
 
-export default function Messages() {
+function GroupCardActions({ canManual, canTest }) {
+  const { message } = App.useApp();
+  const [testForm] = Form.useForm();
+  const [manualForm] = Form.useForm();
+  const [loading, setLoading] = useState(false);
+  const confirmRun = (title, content, fn) => Modal.confirm({ title, content, okText: '确认发送', cancelText: '取消', onOk: fn });
+  const testSend = async (values) => confirmRun('确认发送群卡测试？', '这会向当前配置的测试群或群会话发送一条测试群卡。', async () => {
+    setLoading(true);
+    try {
+      await api('/admin/settings/group-card/test', { method: 'POST', body: values });
+      message.success('群卡测试已发送');
+    } catch (err) {
+      message.error(err.message || '群卡测试失败');
+    } finally {
+      setLoading(false);
+    }
+  });
+  const manualSend = async (values) => confirmRun('确认发送手动群卡？', '这会向当前群卡配置对应的群发送手动群卡，请确认内容和群会话无误。', async () => {
+    setLoading(true);
+    try {
+      await api('/admin/notify/group-card', { method: 'POST', body: values });
+      message.success('手动群卡已发送');
+      manualForm.resetFields();
+    } catch (err) {
+      message.error(err.message || '手动群卡发送失败');
+    } finally {
+      setLoading(false);
+    }
+  });
+  return <Space direction="vertical" style={{ width: '100%', marginTop: 12 }} size={12}>
+    <Card size="small" title="群卡模板测试">
+      <Form form={testForm} layout="inline" onFinish={testSend}>
+        <Form.Item name="event" initialValue="manual"><Select style={{ width: 200 }} options={groupTemplates.map((item) => ({ value: item.key, label: item.label }))} /></Form.Item>
+        <Button type="primary" htmlType="submit" loading={loading} disabled={!canTest}>发送模板测试</Button>
+      </Form>
+    </Card>
+    <Card size="small" title="手动群卡推送">
+      <Form form={manualForm} layout="vertical" onFinish={manualSend}>
+        <Form.Item label="标题" name="title" rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
+        <Form.Item label="Markdown 内容" name="markdown" rules={[{ required: true, message: '请输入内容' }]}><Input.TextArea rows={5} /></Form.Item>
+        <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" /></Form.Item>
+        <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" /></Form.Item>
+        <Form.List name="buttons">
+          {(fields, { add, remove }) => <Space direction="vertical" style={{ width: '100%' }}>
+            <Space><Typography.Text strong>按钮</Typography.Text>{canEdit && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</Space>
+            {fields.map((field) => <Card size="small" key={field.key}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canEdit} /></Form.Item>
+                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input readOnly={!canEdit} /></Form.Item>
+                <Form.Item label="颜色" name={[field.name, 'color']}><Select options={colorOptions} /></Form.Item>
+                <Button danger onClick={() => remove(field.name)}>删除按钮</Button>
+              </Space>
+            </Card>)}
+          </Space>}
+        </Form.List>
+        <Button type="primary" htmlType="submit" loading={loading} disabled={!canManual}>发送手动群卡</Button>
+      </Form>
+    </Card>
+  </Space>;
+}
+
+export default function Messages({ me }) {
   return <Tabs items={[
-    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} /> },
-    { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons /> },
+    { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} extraPanel={<NotifyTestPanel disabled={!canTest} />} /> },
+    { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons canEdit={canEdit} extraPanel={<GroupCardActions canManual={canEdit} canTest={canTest} />} /> },
   ]} />;
 }

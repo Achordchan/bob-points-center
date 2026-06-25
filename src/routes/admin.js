@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import dns from 'node:dns/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -980,7 +981,7 @@ export function adminRouter() {
     }
   });
 
-  router.post('/red-packet/history/clear', requireAdminSession(), async (_req, res) => {
+  router.post('/red-packet/history/clear', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -1266,17 +1267,18 @@ export function adminRouter() {
         [input.product_id],
       );
 
-      if (isCreate && publishToGroup && row) {
+      if (publishToGroup && row) {
         const name = row?.product_name ? String(row.product_name) : String(row?.product_id || input.product_id);
         const amount = Number(row?.bob_amount);
         const amountText = Number.isFinite(amount) ? `${amount} BOB 币` : '-';
         const stockRaw = row?.stock;
         const stockText = stockRaw === null || stockRaw === undefined ? '无限' : String(stockRaw);
         const imageUrl = row?.image_url ? String(row.image_url) : '';
+        const actionText = isCreate ? '新品上架' : '商品更新';
         await notifyGroupInteractiveCardBySettings(db, req.app?.locals?.cfg, {
           event: 'new_product',
-          title: `【BOB币中心】新品上架：${name}`,
-          markdown: `## 新品上架\n\n- 商品：${name}\n- 价格：${amountText}\n- 库存：${stockText}\n\n欢迎在商城下单。`,
+          title: `【BOB币中心】${actionText}：${name}`,
+          markdown: `## ${actionText}\n\n- 商品：${name}\n- 价格：${amountText}\n- 库存：${stockText}\n\n欢迎在商城下单。`,
           outTrackId: `new_product_${String(row?.product_id || input.product_id)}_${Date.now()}`,
           imageUrl,
           vars: {
@@ -2030,6 +2032,9 @@ export function adminRouter() {
     if (!id) return res.status(400).json({ error: 'missing id' });
     try {
       res.setHeader('Cache-Control', 'no-store');
+      const role = await db.get('SELECT id, is_builtin FROM admin_roles WHERE id = ? LIMIT 1', [id]);
+      if (!role) return res.status(404).json({ error: '角色不存在' });
+      if (Number(role.is_builtin) === 1) return res.status(400).json({ error: '系统内置角色不能停用' });
       const count = await db.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
       if (Number(count?.c || 0) > 0) return res.status(400).json({ error: '该角色已有用户使用，请先调整用户角色' });
       const r = await db.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
@@ -3094,7 +3099,7 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
     const date = req.body?.date ? String(req.body.date).trim() : '';
-    const notify = req.body?.notify === undefined ? true : toBool(req.body.notify);
+    const notify = req.body?.notify === undefined ? false : toBool(req.body.notify);
     try {
       res.setHeader('Cache-Control', 'no-store');
       const result = await reconcileAttendanceRewards(db, cfg, { date, notifyOnReward: notify });
@@ -3272,6 +3277,31 @@ export function adminRouter() {
     }
   }
 
+  function backupStorageDir() {
+    return process.env.BOB_BACKUP_DIR || fileURLToPath(new URL('../../data/admin-backups/', import.meta.url));
+  }
+
+  function safeBackupFilename(filename) {
+    const name = path.basename(String(filename || '').trim());
+    if (!/^bob_backup_(settings|full)_\d{8}_\d{4}\.json$/.test(name)) {
+      throw new Error('备份文件名不合法');
+    }
+    return name;
+  }
+
+  function backupFilePath(filename) {
+    return path.join(backupStorageDir(), safeBackupFilename(filename));
+  }
+
+  function writeBackupFile(filename, payload) {
+    const dir = backupStorageDir();
+    mkdirSync(dir, { recursive: true });
+    const filePath = backupFilePath(filename);
+    writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    const stat = statSync(filePath);
+    return { filePath, size: stat.size };
+  }
+
   async function appendBackupHistory(db, req, input) {
     const payload = getAdminSessionPayload(req) || {};
     await db.run(
@@ -3332,10 +3362,45 @@ export function adminRouter() {
         },
         data,
       };
-      await appendBackupHistory(db, req, { action: '导出', mode, filename, status: '完成', details: payload._meta });
+      const stored = writeBackupFile(filename, payload);
+      await appendBackupHistory(db, req, {
+        action: '导出',
+        mode,
+        filename,
+        status: '完成',
+        details: { ...payload._meta, size: stored.size, downloadable: true },
+      });
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       return res.json(payload);
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/backup/history/:id/download', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const id = toPositiveInt(req.params?.id, 0);
+    if (!id) return res.status(400).json({ error: '缺少备份记录 ID' });
+    try {
+      const row = await db.get(
+        `SELECT id, action, filename
+         FROM admin_backup_history
+         WHERE id = ?
+         LIMIT 1`,
+        [id],
+      );
+      if (!row || row.action !== '导出' || !row.filename) {
+        return res.status(404).json({ error: '未找到可下载的备份文件' });
+      }
+      const filename = safeBackupFilename(row.filename);
+      const filePath = backupFilePath(filename);
+      if (!existsSync(filePath)) {
+        return res.status(404).json({ error: '服务器上的备份文件不存在，请重新导出' });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.download(filePath, filename);
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -3357,6 +3422,15 @@ export function adminRouter() {
 
     const backupData = backup.data;
     const report = {};
+    const importedRoleIdMap = new Map();
+    const parseRolePermissions = (value) => {
+      if (Array.isArray(value)) return normalizePermissions(value);
+      try {
+        return normalizePermissions(JSON.parse(String(value || '[]')));
+      } catch {
+        return [];
+      }
+    };
 
     // system_settings：始终 upsert，不清除
     if (Array.isArray(backupData.system_settings)) {
@@ -3373,6 +3447,72 @@ export function adminRouter() {
         } catch { /* skip */ }
       }
       report.system_settings = count;
+    }
+
+    // admin_roles：按 code 恢复，记录旧 role_id 到当前 role_id 的映射，供 admin_user_roles 使用。
+    if (Array.isArray(backupData.admin_roles)) {
+      let count = 0;
+      for (const row of backupData.admin_roles) {
+        if (!row?.code || !row?.name) continue;
+        const code = String(row.code).trim();
+        const name = String(row.name).trim();
+        const permissions = parseRolePermissions(row.permissions);
+        const now = Math.floor(Date.now() / 1000);
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const existing = await db.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [code]);
+          if (existing?.id) {
+            // eslint-disable-next-line no-await-in-loop
+            await db.exec(
+              `UPDATE admin_roles
+               SET name = $1, permissions = $2, is_builtin = $3, is_enabled = $4, updated_at = $5
+               WHERE code = $6`,
+              [name, JSON.stringify(permissions), row.is_builtin ?? 0, row.is_enabled ?? 1, row.updated_at ?? now, code],
+            );
+            importedRoleIdMap.set(Number(row.id), Number(existing.id));
+          } else {
+            const backupId = toOptionalInt(row.id);
+            let inserted = null;
+            if (backupId) {
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                inserted = await db.get('SELECT id FROM admin_roles WHERE id = ? LIMIT 1', [backupId]);
+                if (!inserted?.id) {
+                  // eslint-disable-next-line no-await-in-loop
+                  await db.exec(
+                    `INSERT INTO admin_roles(id, code, name, permissions, is_builtin, is_enabled, created_at, updated_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+                    [backupId, code, name, JSON.stringify(permissions), row.is_builtin ?? 0, row.is_enabled ?? 1,
+                      row.created_at ?? now, row.updated_at ?? now],
+                  );
+                } else {
+                  inserted = null;
+                }
+              } catch {
+                inserted = null;
+              }
+            }
+            if (!backupId || inserted === null) {
+              // eslint-disable-next-line no-await-in-loop
+              await db.exec(
+                `INSERT INTO admin_roles(code, name, permissions, is_builtin, is_enabled, created_at, updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7)
+                 ON CONFLICT(code) DO UPDATE SET
+                   name=excluded.name, permissions=excluded.permissions, is_builtin=excluded.is_builtin,
+                   is_enabled=excluded.is_enabled, updated_at=excluded.updated_at`,
+                [code, name, JSON.stringify(permissions), row.is_builtin ?? 0, row.is_enabled ?? 1,
+                  row.created_at ?? now, row.updated_at ?? now],
+              );
+            }
+            // eslint-disable-next-line no-await-in-loop
+            const saved = await db.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [code]);
+            if (saved?.id) importedRoleIdMap.set(Number(row.id), Number(saved.id));
+          }
+          count++;
+        } catch { /* skip */ }
+      }
+      try { await db.exec(`SELECT setval(pg_get_serial_sequence('admin_roles', 'id'), (SELECT MAX(id) FROM admin_roles))`, []); } catch { /* skip */ }
+      report.admin_roles = count;
     }
 
     // mall_products：upsert by product_id
@@ -3544,6 +3684,7 @@ export function adminRouter() {
       // users：upsert by userid
       if (Array.isArray(backupData.users)) {
         if (mode === 'overwrite') {
+          try { await db.exec('DELETE FROM admin_user_roles', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM audit_logs', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM attendance_reward_records', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM ledger', []); } catch { /* skip */ }
@@ -3568,6 +3709,39 @@ export function adminRouter() {
         }
         try { await db.exec(`SELECT setval(pg_get_serial_sequence('users', 'id'), (SELECT MAX(id) FROM users))`, []); } catch { /* skip */ }
         report.users = count;
+      }
+
+      if (Array.isArray(backupData.admin_user_roles)) {
+        let count = 0;
+        for (const row of backupData.admin_user_roles) {
+          if (!row?.userid || !row?.role_id) continue;
+          try {
+            let roleId = importedRoleIdMap.get(Number(row.role_id)) || toOptionalInt(row.role_id);
+            // eslint-disable-next-line no-await-in-loop
+            const role = roleId ? await db.get('SELECT id FROM admin_roles WHERE id = ? LIMIT 1', [roleId]) : null;
+            if (!role?.id && row.role_code) {
+              // eslint-disable-next-line no-await-in-loop
+              const byCode = await db.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [String(row.role_code)]);
+              roleId = byCode?.id || null;
+            }
+            if (!roleId) continue;
+            // eslint-disable-next-line no-await-in-loop
+            const user = await db.get('SELECT userid FROM users WHERE userid = ? LIMIT 1', [row.userid]);
+            if (!user?.userid) continue;
+            // eslint-disable-next-line no-await-in-loop
+            await db.exec(
+              `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+               VALUES($1,$2,$3,$4,$5)
+               ON CONFLICT(userid) DO UPDATE SET
+                 role_id=excluded.role_id, assigned_by=excluded.assigned_by,
+                 assigned_name=excluded.assigned_name, assigned_at=excluded.assigned_at`,
+              [row.userid, roleId, row.assigned_by ?? null, row.assigned_name ?? null,
+                row.assigned_at ?? Math.floor(Date.now() / 1000)],
+            );
+            count++;
+          } catch { /* skip */ }
+        }
+        report.admin_user_roles = count;
       }
 
       // accounts：upsert by userid

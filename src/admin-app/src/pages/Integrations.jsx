@@ -13,10 +13,28 @@ function Tokens() {
   </Card>;
 }
 
-const settingsTables = ['system_settings', 'mall_products', 'charity_projects', 'mall_opening_schedule', 'content_faq', 'content_announcements', 'system_versions'];
-const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'system_settings'];
+const settingsTables = ['system_settings', 'mall_products', 'charity_projects', 'mall_opening_schedule', 'content_faq', 'content_announcements', 'system_versions', 'admin_roles'];
+const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'admin_roles', 'admin_user_roles', 'system_settings'];
 function tableRowsFromMap(map = {}) {
   return Object.entries(map).map(([table, count]) => ({ table, count }));
+}
+
+function backupTypeText(mode) {
+  return mode === 'full' ? '全量备份' : mode === 'settings' ? '设置备份' : mode === 'overwrite' ? '覆盖导入' : '合并导入';
+}
+
+function formatBytes(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function parseBackupDetails(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(String(value)); } catch { return null; }
 }
 
 function downloadJson(filename, data) {
@@ -25,6 +43,21 @@ function downloadJson(filename, data) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+
+async function downloadHistoryBackup(row) {
+  const res = await fetch(`/admin/backup/history/${encodeURIComponent(row.id)}/download`, { credentials: 'include' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || '备份文件下载失败');
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = row.filename || 'bob_backup.json';
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
@@ -38,6 +71,7 @@ function backupFilename(mode) {
 function Backup() {
   const { message } = App.useApp();
   const [exportDetail, setExportDetail] = useState(null);
+  const [lastBackup, setLastBackup] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const [importMode, setImportMode] = useState('merge');
   const [importDetail, setImportDetail] = useState(null);
@@ -63,8 +97,9 @@ function Backup() {
       downloadJson(filename, data);
       const detail = { mode, filename, meta: data._meta };
       setExportDetail(detail);
+      setLastBackup({ filename, data });
       await loadHistory();
-      message.success('备份已导出');
+      message.success('备份已生成并开始下载');
     } catch (err) {
       message.error(err.message || '导出失败');
     } finally {
@@ -117,6 +152,15 @@ function Backup() {
   };
 
   const exportRows = exportDetail?.meta?.tables ? tableRowsFromMap(exportDetail.meta.tables) : [];
+  const exportSize = exportDetail?.meta?.size || (lastBackup?.data ? JSON.stringify(lastBackup.data).length : 0);
+  const downloadHistory = async (row) => {
+    try {
+      await downloadHistoryBackup(row);
+      message.success('备份文件已开始下载');
+    } catch (err) {
+      message.error(err.message || '备份文件下载失败');
+    }
+  };
   const importRows = importDetail?.meta?.tables ? tableRowsFromMap(importDetail.meta.tables) : [];
   const reportRows = importReport ? tableRowsFromMap(importReport) : [];
 
@@ -131,7 +175,23 @@ function Backup() {
           { key: 'settings', label: '设置备份', children: settingsTables.join('、') },
           { key: 'full', label: '全量备份', children: fullTables.join('、') },
         ]} />
-        {exportDetail && <Table size="small" rowKey="table" pagination={false} dataSource={exportRows} columns={[{ title: '导出表', dataIndex: 'table' }, { title: '记录数', dataIndex: 'count' }]} />}
+        {exportDetail && <Alert
+          type="success"
+          showIcon
+          message="备份文件已生成"
+          description={<Space direction="vertical" style={{ width: '100%' }} size={8}>
+            <Space wrap>
+              <span>文件名：</span><Typography.Text copyable>{exportDetail.filename}</Typography.Text>
+              <span>类型：{backupTypeText(exportDetail.mode)}</span>
+              <span>大小：{formatBytes(exportSize)}</span>
+            </Space>
+            <Space wrap>
+              <Button type="primary" onClick={() => lastBackup && downloadJson(lastBackup.filename, lastBackup.data)}>下载备份文件</Button>
+              <Button onClick={loadHistory}>刷新历史记录</Button>
+            </Space>
+          </Space>}
+        />}
+        {exportDetail && <Table size="small" rowKey="table" pagination={false} dataSource={exportRows} columns={[{ title: '已导出数据表', dataIndex: 'table' }, { title: '记录数', dataIndex: 'count' }]} />}
       </Space>
     </Card>
 
@@ -158,13 +218,18 @@ function Backup() {
 
     <Card title="历史记录">
       <Table size="small" rowKey="id" dataSource={history} pagination={{ pageSize: 8 }} columns={[
-        { title: '时间', dataIndex: 'at', render: formatTs },
-        { title: '操作', dataIndex: 'action' },
-        { title: '类型', dataIndex: 'mode', render: (v) => v === 'full' ? '全量' : v === 'settings' ? '设置' : v === 'overwrite' ? '覆盖导入' : '合并导入' },
-        { title: '文件', dataIndex: 'filename', ellipsis: true },
-        { title: '状态', dataIndex: 'status' },
+        { title: '时间', dataIndex: 'at', render: formatTs, width: 170 },
+        { title: '操作', dataIndex: 'action', width: 90 },
+        { title: '类型', dataIndex: 'mode', render: backupTypeText, width: 110 },
+        { title: '文件', dataIndex: 'filename', ellipsis: true, render: (v) => v ? <Typography.Text copyable>{v}</Typography.Text> : '-' },
+        { title: '大小', render: (_, row) => formatBytes(parseBackupDetails(row.details)?.size), width: 110 },
+        { title: '状态', dataIndex: 'status', width: 90 },
+        { title: '操作', fixed: 'right', width: 180, render: (_, row) => <Space>
+          {row.action === '导出' && <Button size="small" onClick={() => downloadHistory(row)}>下载</Button>}
+          {row.action === '导出' && <Button size="small" onClick={() => exportBackup(row.mode)}>重新导出</Button>}
+        </Space> },
       ]} />
-      <Typography.Text type="secondary">历史记录保存在服务器，用于追溯最近导出和导入操作。</Typography.Text>
+      <Typography.Text type="secondary">历史记录保存在服务器；导出记录可直接下载，旧记录文件缺失时请重新导出。</Typography.Text>
     </Card>
   </Space>;
 }

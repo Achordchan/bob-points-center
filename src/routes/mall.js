@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { requireBobToken } from '../middleware/requireBobToken.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { createRedeemOrderInTx } from '../services/redeemService.js';
-import { ensureAccount, listLedgerRecords } from '../services/ledgerService.js';
+import { listLedgerRecords } from '../services/ledgerService.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
 import { notifyGroupInteractiveCardBySettings } from '../services/groupCardNotifyService.js';
 import { getRedeemCdkInfo, previewRedeemCdk, redeemCdk } from '../services/cdkService.js';
@@ -13,16 +13,9 @@ import { contributeToCharity, getCharityProjectDetail, listMallCharityProjects }
 import { publishMallRealtimeEvent, registerMallRealtimeClient } from '../services/mallRealtimeService.js';
 import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
+import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
 
 const mallEasterTokens = new Map();
-let redPacketClaimQueue = Promise.resolve();
-
-function enqueueRedPacketClaim(task) {
-  const next = redPacketClaimQueue.then(task, task);
-  redPacketClaimQueue = next.catch(() => {});
-  return next;
-}
-
 function normalizeLimitRound(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
@@ -168,22 +161,6 @@ async function ensureMallOpeningRow(db) {
 
 function genExchangeId() {
   return `MALL_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-}
-
-async function resolveRedPacketActivity(db, now) {
-  const activity = await db.get('SELECT * FROM red_packet_activity ORDER BY id DESC LIMIT 1');
-  if (!activity) return null;
-  let nextStatus = activity.status;
-  if (now >= Number(activity.end_at)) {
-    nextStatus = 'ended';
-  } else if (now >= Number(activity.start_at) && activity.status === 'scheduled') {
-    nextStatus = 'active';
-  }
-  if (nextStatus !== activity.status) {
-    await db.run('UPDATE red_packet_activity SET status = ? WHERE id = ?', [nextStatus, activity.id]);
-    return await db.get('SELECT * FROM red_packet_activity WHERE id = ?', [activity.id]);
-  }
-  return activity;
 }
 
 async function buildRedPacketScreenPayload(db, now, limit = 12) {
@@ -787,73 +764,7 @@ export function mallRouter() {
 
     let result = null;
     try {
-      result = await enqueueRedPacketClaim(async () => {
-        const now = Math.floor(Date.now() / 1000);
-        const txRunner = typeof db.transaction === 'function'
-          ? (fn) => db.transaction(fn)
-          : async (fn) => await fn(db);
-        return await txRunner(async (tx) => {
-          const activity = await resolveRedPacketActivity(tx, now);
-          if (!activity) {
-            throw new Error('no_active');
-          }
-          if (now < Number(activity.start_at)) {
-            throw new Error('not_started');
-          }
-          if (now >= Number(activity.end_at)) {
-            await tx.run('UPDATE red_packet_activity SET status = ? WHERE id = ?', ['ended', activity.id]);
-            throw new Error('ended');
-          }
-          if (activity.status === 'ended') {
-            throw new Error('ended');
-          }
-          if (activity.status !== 'active') {
-            await tx.run('UPDATE red_packet_activity SET status = ? WHERE id = ?', ['active', activity.id]);
-          }
-
-          const mine = await tx.get(
-            'SELECT id, amount FROM red_packet_items WHERE activity_id = ? AND claimed_by = ? LIMIT 1',
-            [activity.id, userid],
-          );
-          if (mine?.id) {
-            throw new Error('already_claimed');
-          }
-
-          const item = await tx.get(
-            'SELECT id, amount FROM red_packet_items WHERE activity_id = ? AND claimed_by IS NULL ORDER BY id ASC LIMIT 1',
-            [activity.id],
-          );
-          if (!item) {
-            await tx.run('UPDATE red_packet_activity SET status = ? WHERE id = ?', ['ended', activity.id]);
-            throw new Error('sold_out');
-          }
-
-          const updated = await tx.run(
-            'UPDATE red_packet_items SET claimed_by = ?, claimed_at = unixepoch() WHERE id = ? AND claimed_by IS NULL',
-            [userid, item.id],
-          );
-          if (!updated?.changes) {
-            throw new Error('sold_out');
-          }
-
-          await ensureAccount(tx, { userid, name });
-          await tx.run(
-            'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
-            [userid, Number(item.amount), '红包收入', `RED_PACKET_${activity.id}_${item.id}`],
-          );
-          await tx.run(
-            'UPDATE accounts SET balance = balance + ?, updated_at = unixepoch() WHERE userid = ?',
-            [Number(item.amount), userid],
-          );
-          const balanceRow = await tx.get('SELECT balance FROM accounts WHERE userid = ?', [userid]);
-
-          return {
-            amount: Number(item.amount),
-            balance: balanceRow?.balance ?? 0,
-            activity_id: activity.id,
-          };
-        });
-      });
+      result = await claimActiveRedPacket(db, { userid, name });
       if (result?.amount) {
         await sendOrQueueNotify({
           db,
@@ -891,10 +802,11 @@ export function mallRouter() {
     } catch (err) {
       const msg = String(err?.message || err || '');
       const pgCode = String(err?.code || '');
+      const isDuplicateClaim = pgCode === '23505';
       const isBusy =
         pgCode === '55P03' ||
         pgCode === '40P01';
-      const errorCode = isBusy ? 'concurrent_limit' : msg;
+      const errorCode = isDuplicateClaim ? 'already_claimed' : isBusy ? 'concurrent_limit' : msg;
       const status = isBusy ? 429 : 400;
       return res.status(status).json({ error: errorCode });
     }
@@ -1329,6 +1241,10 @@ export function mallRouter() {
     const name = req.body?.name ? String(req.body.name).trim() : await getUserName(db, userid);
 
     try {
+      const opening = await ensureMallOpeningRow(db);
+      if (Number(opening?.is_open) !== 1) {
+        return res.status(403).json({ error: 'mall_closed', next_open_at: opening?.next_open_at ?? null });
+      }
       const secret = req.app?.locals?.cfg?.qrSignSecret;
       const result = await buyMallProduct({ db, cfg, userid, name, productId, exchangeId, secret, awaitNotify });
       if (!awaitNotify && result && 'notify' in result) {

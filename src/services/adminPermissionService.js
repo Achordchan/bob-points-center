@@ -147,6 +147,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/users/assign-role') || p.startsWith('/roles') || p.startsWith('/permissions')) return 'super';
   if (p.startsWith('/users/set-admin')) return 'super';
   if (p.startsWith('/users/sync')) return 'users:edit';
+  if (p.startsWith('/users/notify')) return 'messages:edit';
   if (p.startsWith('/users/delete') || p.startsWith('/data/reset-user') || p.startsWith('/data/reset-all')) return 'super';
   if (p.startsWith('/users') || p.startsWith('/ledger/grant-batch')) return p.startsWith('/ledger/grant-batch') ? 'users:grant' : 'users:view';
   if (p.startsWith('/redeem/deduct-batch')) return 'users:deduct';
@@ -158,6 +159,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/cdks')) return m === 'GET' ? 'commerce:view' : 'commerce:cdk';
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
   if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
+  if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';
   if (p.startsWith('/notify') || p.startsWith('/settings/notify') || p.startsWith('/settings/group-card')) return m === 'GET' ? 'messages:view' : 'messages:edit';
   if (p.startsWith('/content')) {
     if (m === 'GET') return 'content:view';
@@ -166,6 +168,7 @@ function matchPathPermission(method, path) {
   }
   if (p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
+  if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export';
   if (p.startsWith('/backup/import')) return 'super';
   if (p.startsWith('/backup/history')) return 'integrations:view';
   if (p.startsWith('/logs')) return 'audit:view';

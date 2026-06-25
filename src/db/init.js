@@ -112,6 +112,12 @@ CREATE TABLE IF NOT EXISTS red_packet_items (
 );
 CREATE INDEX IF NOT EXISTS idx_red_packet_items_activity_claimed_id
   ON red_packet_items(activity_id, claimed_by, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_red_packet_items_activity_claimed_once
+  ON red_packet_items(activity_id, claimed_by)
+  WHERE claimed_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_red_packet_items_activity_unclaimed
+  ON red_packet_items(activity_id, id)
+  WHERE claimed_by IS NULL;
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGSERIAL PRIMARY KEY,
@@ -628,6 +634,8 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_by TEXT");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_name TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_red_packet_items_activity_claimed_once ON red_packet_items(activity_id, claimed_by) WHERE claimed_by IS NOT NULL");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_red_packet_items_activity_unclaimed ON red_packet_items(activity_id, id) WHERE claimed_by IS NULL");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '[]'");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_builtin INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_enabled INTEGER NOT NULL DEFAULT 1");

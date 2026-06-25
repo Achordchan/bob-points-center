@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, App, Avatar, Button, Card, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
-import { amountText, formatTs } from '../utils.js';
+import { amountText, formatTs, orderAmount } from '../utils.js';
 import { hasPermission } from '../permissions.js';
 
 
@@ -77,8 +77,14 @@ export default function Users({ me }) {
   const [deleteTarget, setDeleteTarget] = useState([]);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [roleTarget, setRoleTarget] = useState(null);
+  const [notifyTarget, setNotifyTarget] = useState(null);
+  const [notifyLoading, setNotifyLoading] = useState(false);
+  const [resetTarget, setResetTarget] = useState(null);
+  const [resetLoading, setResetLoading] = useState(false);
   const [roles, setRoles] = useState([]);
   const [form] = Form.useForm();
+  const [notifyForm] = Form.useForm();
+  const [resetForm] = Form.useForm();
 
   const normalizeKeyword = (value) => String(value || '').replace(/\s+/g, ' ').trim();
   const canGrant = hasPermission(me, 'users:grant');
@@ -86,6 +92,7 @@ export default function Users({ me }) {
   const canDelete = me?.isSuperAdmin === true;
   const canEdit = hasPermission(me, 'users:edit');
   const canAssignRole = me?.isSuperAdmin === true;
+  const canNotify = hasPermission(me, 'messages:edit');
 
   const load = async (nextPage = page, nextKeyword = keyword, nextPageSize = pageSize) => {
     setLoading(true);
@@ -147,12 +154,16 @@ export default function Users({ me }) {
     ? [rows.find((row) => row.userid === op.userid) || selectedUsers[op.userid] || { userid: op.userid }]
     : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
 
+  const notifyRows = notifyTarget?.userid
+    ? [notifyTarget]
+    : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
+
   const submitOp = async (values) => {
     const userids = op.userid ? [op.userid] : selected;
     const path = op.type === 'grant' ? '/admin/ledger/grant-batch' : '/admin/redeem/deduct-batch';
     const body = op.type === 'grant'
-      ? { userids, amount: values.amount, reason: values.reason || '后台发币' }
-      : { userids, amount: values.amount, product_name: values.reason || '后台减币' };
+      ? { userids, amount: values.amount, reason: values.reason || '后台发币', refId: values.refId || undefined }
+      : { userids, amount: values.amount, product_name: values.reason };
     await api(path, { method: 'POST', body });
     message.success(op.type === 'grant' ? '发币完成' : '减币完成');
     if (!op.userid) clearSelected();
@@ -186,6 +197,63 @@ export default function Users({ me }) {
     });
   };
 
+  const openNotify = (target = {}) => {
+    setNotifyTarget(target);
+    notifyForm.resetFields();
+  };
+
+  const submitNotify = async (values) => {
+    const userids = notifyTarget?.userid ? [notifyTarget.userid] : selected;
+    if (!userids.length) return message.warning('请先选择接收人');
+    Modal.confirm({
+      title: '确认发送私聊消息？',
+      content: `将向 ${userids.length} 个用户发送钉钉私聊消息。`,
+      okText: '确认发送',
+      cancelText: '取消',
+      onOk: async () => {
+        setNotifyLoading(true);
+        try {
+          const data = await api('/admin/users/notify', {
+            method: 'POST',
+            body: { userids, title: values.title, content: values.content },
+          });
+          const okCount = (data.results || []).filter((item) => item.ok).length;
+          message.success(`消息发送完成：成功 ${okCount}/${data.count || userids.length}`);
+          setNotifyTarget(null);
+          if (!notifyTarget?.userid) clearSelected();
+        } catch (err) {
+          message.error(err.message || '消息发送失败');
+        } finally {
+          setNotifyLoading(false);
+        }
+      },
+    });
+  };
+
+
+  const openResetUser = (user) => {
+    setResetTarget(user);
+    resetForm.resetFields();
+  };
+
+  const submitResetUser = async (values) => {
+    const userid = resetTarget?.userid ? String(resetTarget.userid) : '';
+    if (!userid) return message.warning('缺少用户 ID');
+    if (values.confirm !== 'RESET_USER') return message.warning('确认口令不正确');
+    setResetLoading(true);
+    try {
+      await api('/admin/data/reset-user', { method: 'POST', body: { userid } });
+      message.success('该用户业务数据已清空');
+      setResetTarget(null);
+      await load(page, keyword, pageSize);
+      await openDetail(userid);
+    } catch (err) {
+      message.error(err.message || '清空失败');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   const deleteUsers = (userids) => {
     if (!userids.length) return;
     setDeleteTarget(userids);
@@ -212,7 +280,7 @@ export default function Users({ me }) {
     { title: '余额', dataIndex: 'balance', render: amountText, sorter: (a, b) => Number(a.balance) - Number(b.balance) },
     { title: '身份', render: (_, r) => r.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (r.role?.name ? <Tag color="blue">{r.role.name}</Tag> : <Tag>普通用户</Tag>) },
     { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
-    { title: '操作', fixed: 'right', render: (_, r) => <Space>{canGrant && <Button onClick={() => { setOp({ type: 'grant', userid: r.userid }); form.resetFields(); }}>发币</Button>}{canDeduct && <Button onClick={() => { setOp({ type: 'deduct', userid: r.userid }); form.resetFields(); }}>减币</Button>}</Space> },
+    { title: '操作', fixed: 'right', render: (_, r) => <Space>{canGrant && <Button onClick={() => { setOp({ type: 'grant', userid: r.userid }); form.resetFields(); }}>发币</Button>}{canDeduct && <Button onClick={() => { setOp({ type: 'deduct', userid: r.userid }); form.resetFields(); }}>减币</Button>}{canNotify && <Button onClick={() => openNotify(r)}>发消息</Button>}</Space> },
   ];
 
   return (
@@ -222,6 +290,7 @@ export default function Users({ me }) {
         {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
         {canGrant && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>}
         {canDeduct && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>}
+        {canNotify && <Button disabled={!selected.length} onClick={() => openNotify({})}>批量发消息</Button>}
         {canAssignRole && <Button disabled={!selected.length} onClick={() => setRoleTarget({})}>分配后台角色</Button>}
         {canDelete && <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>}
         <Button disabled={!selected.length} onClick={clearSelected}>清空选择</Button>
@@ -255,11 +324,14 @@ export default function Users({ me }) {
               { key: 'balance', label: '余额', children: amountText(detail.account?.balance) },
               { key: 'admin', label: '后台角色', children: detail.user?.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (detail.user?.role?.name ? <Tag color="blue">{detail.user.role.name}</Tag> : '普通用户') },
             ]} />
-            {canAssignRole && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
+            <Space wrap>
+              {canAssignRole && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
+              {canDelete && <Button danger onClick={() => openResetUser(detail.user)}>危险区：清空该用户业务数据</Button>}
+            </Space>
           </Space> },
           { key: 'dingtalk', label: '钉钉资料', children: detail.dingtalk ? <Descriptions bordered column={2} items={dingtalkItems(detail.dingtalk)} /> : <Empty description="暂无钉钉同步资料，请先同步通讯录" /> },
           { key: 'ledger', label: '余额流水', children: <Table rowKey="id" size="small" dataSource={detail.ledger || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '金额', dataIndex: 'delta', render: amountText }, { title: '原因', dataIndex: 'reason', ellipsis: true }]} /> },
-          { key: 'orders', label: '订单记录', children: <Table rowKey="exchange_id" size="small" dataSource={detail.redeems || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '商品', dataIndex: 'product_name' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }, { title: '状态', render: (_, r) => r.fulfilled_at ? '已核销' : '未核销' }]} /> },
+          { key: 'orders', label: '订单记录', children: <Table rowKey="exchange_id" size="small" dataSource={detail.redeems || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '商品', dataIndex: 'product_name' }, { title: '金额', render: (_, r) => amountText(orderAmount(r)) }, { title: '状态', render: (_, r) => r.fulfilled_at ? '已核销' : '未核销' }]} /> },
           { key: 'ops', label: '最近操作', children: <Table rowKey="id" size="small" dataSource={detail.operations || []} pagination={false} locale={{ emptyText: '暂无后台操作记录' }} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '操作', dataIndex: 'event_label', render: operationEventTag }, { title: '结果', dataIndex: 'status_code', render: operationStatusTag }, { title: '说明', dataIndex: 'message', ellipsis: true }]} /> },
         ]} />}
       </Drawer>
@@ -267,7 +339,8 @@ export default function Users({ me }) {
         {op && <Alert type={op.type === 'deduct' ? 'warning' : 'info'} showIcon message={`本次将${op.type === 'grant' ? '发币给' : '减币'} ${recipientRows.length} 人`} description={<div className="batch-recipient-list">{recipientRows.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} style={{ marginBottom: 12 }} />}
         <Form form={form} layout="vertical" onFinish={submitOp}>
           <Form.Item label="金额" name="amount" rules={[{ required: true, message: '请输入金额' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item label="原因" name="reason"><Input placeholder={op?.type === 'grant' ? '后台发币' : '后台减币'} /></Form.Item>
+          <Form.Item label="原因" name="reason" rules={op?.type === 'deduct' ? [{ required: true, message: '请输入减币原因' }] : []}><Input placeholder={op?.type === 'grant' ? '后台发币' : '请输入减币原因'} /></Form.Item>
+          {op?.type === 'grant' && <Form.Item label="批次 / 备注 ID" name="refId"><Input placeholder="用于账本追溯，可选" /></Form.Item>}
         </Form>
       </Modal>
       <Modal
@@ -285,6 +358,46 @@ export default function Users({ me }) {
             onChange={assignRole}
           />
         </Space>
+      </Modal>
+      <Modal
+        title="发送私聊消息"
+        open={Boolean(notifyTarget)}
+        onCancel={() => setNotifyTarget(null)}
+        onOk={() => notifyForm.submit()}
+        confirmLoading={notifyLoading}
+        okText="发送"
+        cancelText="取消"
+      >
+        <Alert type="warning" showIcon message={`本次将发送给 ${notifyRows.length} 人`} description={<div className="batch-recipient-list">{notifyRows.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} style={{ marginBottom: 12 }} />
+        <Form form={notifyForm} layout="vertical" onFinish={submitNotify}>
+          <Form.Item label="标题" name="title"><Input placeholder="可留空" /></Form.Item>
+          <Form.Item label="内容" name="content" rules={[{ required: true, message: '请输入消息内容' }]}><Input.TextArea rows={5} /></Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="清空该用户业务数据"
+        open={Boolean(resetTarget)}
+        onCancel={() => setResetTarget(null)}
+        onOk={() => resetForm.submit()}
+        confirmLoading={resetLoading}
+        okText="确认清空"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+      >
+        <Alert
+          type="error"
+          showIcon
+          message="仅清空该用户的业务数据"
+          description="会删除该用户余额流水、兑换订单、公益助力记录，并把余额重置为 0；不会删除用户本人、后台角色、商品、CDK 和系统配置。"
+          style={{ marginBottom: 12 }}
+        />
+        {resetTarget && <Tag color="red">{resetTarget.name ? `${resetTarget.name}（${resetTarget.userid}）` : resetTarget.userid}</Tag>}
+        <Form form={resetForm} layout="vertical" onFinish={submitResetUser} style={{ marginTop: 12 }}>
+          <Form.Item name="confirm" label="输入确认口令 RESET_USER" rules={[{ required: true, message: '请输入确认口令' }]}>
+            <Input placeholder="RESET_USER" autoComplete="off" />
+          </Form.Item>
+        </Form>
       </Modal>
       <Modal
         title="确认删除用户？"

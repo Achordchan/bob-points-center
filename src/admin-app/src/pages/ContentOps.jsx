@@ -7,8 +7,17 @@ import { formatTs, toUnix } from '../utils.js';
 
 const feedbackStatusText = { pending: '待处理', processing: '处理中', resolved: '已处理', rejected: '已驳回' };
 const feedbackCategoryText = { bug: '问题反馈', question: '咨询问题', rule: '规则相关', suggestion: '建议', other: '其他' };
-const announcementLevelText = { info: '普通', warning: '提醒', danger: '重要' };
-const announcementLevelColor = { info: 'blue', warning: 'orange', danger: 'red' };
+const announcementLevelText = { info: '普通', success: '成功', warning: '提醒', danger: '重要' };
+const announcementLevelColor = { info: 'blue', success: 'green', warning: 'orange', danger: 'red' };
+
+
+function toDateTimeLocal(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const d = new Date(n * 1000);
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 function richTextIsEmpty(value) {
   const text = String(value || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, '').trim();
@@ -56,11 +65,11 @@ function Announcements() {
   const { message } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
   const load = async () => setRows((await api('/admin/content/announcements?limit=120')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
-  const open = (r = { level: 'info', is_enabled: 1, sort: 0 }) => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, is_enabled: Number(r.is_enabled ?? 1) === 1 }); };
+  const open = (r = { level: 'info', is_enabled: 1, sort: 0 }) => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, publish_at: toDateTimeLocal(r.publish_at), is_enabled: Number(r.is_enabled ?? 1) === 1 }); };
   const save = async (v) => { await api('/admin/content/announcements/save', { method: 'POST', body: { ...v, id: editing?.id || null, is_enabled: v.is_enabled ? 1 : 0, publish_at: toUnix(v.publish_at) } }); message.success('公告已保存'); setEditing(null); form.resetFields(); load(); };
   const del = (id) => Modal.confirm({ title: '删除公告', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/announcements/delete', { method: 'POST', body: { id } }); load(); } });
   return <Card><DataToolbar onRefresh={load} onCreate={() => open()} createText="新增公告" /><Table rowKey="id" dataSource={rows} columns={[{ title: '标题', dataIndex: 'title' }, { title: '级别', dataIndex: 'level', render: (v) => <Tag color={announcementLevelColor[v] || 'default'}>{announcementLevelText[v] || v || '-'}</Tag> }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }, { title: '发布时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Space><Button onClick={() => open(r)}>编辑</Button><Button danger onClick={() => del(r.id)}>删除</Button></Space> }]} />
-    <Drawer title={editing?.id ? "编辑公告" : "新增公告"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item><Form.Item name="level" label="级别"><Select options={[{ value: 'info', label: '普通' }, { value: 'warning', label: '提醒' }, { value: 'danger', label: '重要' }]} /></Form.Item><Form.Item name="sort" label="排序"><Input /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
+    <Drawer title={editing?.id ? "编辑公告" : "新增公告"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item><Form.Item name="level" label="级别"><Select options={[{ value: 'info', label: '普通' }, { value: 'success', label: '成功' }, { value: 'warning', label: '提醒' }, { value: 'danger', label: '重要' }]} /></Form.Item><Form.Item name="publish_at" label="发布时间"><Input type="datetime-local" /></Form.Item><Form.Item name="sort" label="排序"><Input /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
   </Card>;
 }
 
@@ -141,8 +150,8 @@ function Versions() {
   const { message } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
   const load = async () => setRows((await api('/admin/content/version')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
-  const save = async (v) => { await api('/admin/content/version/save', { method: 'POST', body: { ...v, id: editing?.id || null, is_enabled: v.is_enabled ? 1 : 0 } }); message.success('版本已保存'); setEditing(null); form.resetFields(); load(); };
-  return <Card><DataToolbar onRefresh={load} onCreate={() => { form.resetFields(); setEditing({ is_enabled: 1 }); form.setFieldsValue({ is_enabled: true }); }} createText="新增版本" /><Table rowKey="id" dataSource={rows} columns={[{ title: '版本', dataIndex: 'version_name' }, { title: '说明', dataIndex: 'release_notes' }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? '启用' : '停用' }, { title: '时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Button onClick={() => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, is_enabled: Number(r.is_enabled) === 1 }); }}>编辑</Button> }]} /><Drawer title={editing?.id ? "编辑版本" : "新增版本"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="version_name" label="版本" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="release_notes" label="说明"><Input.TextArea rows={6} /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer></Card>;
+  const save = async (v) => { await api('/admin/content/version/save', { method: 'POST', body: { ...v, id: editing?.id || null, is_enabled: v.is_enabled ? 1 : 0, publish_at: toUnix(v.publish_at) } }); message.success('版本已保存'); setEditing(null); form.resetFields(); load(); };
+  return <Card><DataToolbar onRefresh={load} onCreate={() => { form.resetFields(); setEditing({ is_enabled: 1 }); form.setFieldsValue({ is_enabled: true, publish_at: '' }); }} createText="新增版本" /><Table rowKey="id" dataSource={rows} columns={[{ title: '版本', dataIndex: 'version_name' }, { title: '说明', dataIndex: 'release_notes' }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? '启用' : '停用' }, { title: '时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Button onClick={() => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, publish_at: toDateTimeLocal(r.publish_at), is_enabled: Number(r.is_enabled) === 1 }); }}>编辑</Button> }]} /><Drawer title={editing?.id ? "编辑版本" : "新增版本"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="version_name" label="版本" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="release_notes" label="说明"><Input.TextArea rows={6} /></Form.Item><Form.Item name="publish_at" label="发布时间"><Input type="datetime-local" /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer></Card>;
 }
 
 export default function ContentOps() {

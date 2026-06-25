@@ -32,6 +32,7 @@ function AuditLogs() {
       { title: '时间', dataIndex: 'created_at', render: formatTs, width: 180 },
       { title: '事件', dataIndex: 'event_label', render: (v, r) => <Tag color={r.event_group === 'danger' ? 'red' : undefined}>{v || r.event_type}</Tag>, width: 150 },
       { title: '操作者', render: (_, r) => r.actor_display_name || r.actor_name || r.actor_id || r.actor_type, width: 180 },
+      { title: 'IP', dataIndex: 'ip', ellipsis: true, width: 150 },
       { title: '路径', dataIndex: 'path', ellipsis: true },
       { title: '状态', dataIndex: 'status_code', render: statusTag, width: 100 },
       { title: '说明', dataIndex: 'message', ellipsis: true },

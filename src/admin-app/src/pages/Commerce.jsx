@@ -1,10 +1,165 @@
 import { useEffect, useMemo, useState } from 'react';
-import { App, Button, Card, Drawer, Form, Image, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag } from 'antd';
 import { api } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
 import { amountText, downloadText, formatTs } from '../utils.js';
 import { hasPermission } from '../permissions.js';
+
+
+function toDateTimeLocal(ts) {
+  const n = Number(ts || 0);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const d = new Date(n * 1000);
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function parseDateTimeLocal(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const ms = new Date(text).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(ms / 1000);
+}
+
+function mallOpeningErrorText(error) {
+  const text = String(error || '操作失败');
+  const map = {
+    'missing next_open_at': '请填写下一次开启时间',
+    'interval_minutes must be >= 1': '开启频率必须大于等于 1 分钟',
+    'open_duration_minutes must be >= 1': '开启持续时间必须大于等于 1 分钟',
+    'remind_before_seconds must be >= 0': '开启前提醒秒数不能小于 0',
+    'close_remind_seconds must be >= 0': '关闭前提醒秒数不能小于 0',
+    'close_remind_seconds requires open_duration_minutes': '设置关闭前提醒需要填写开启持续时间',
+    'missing open_duration_minutes': '启用自动开启需要填写开启持续时间',
+  };
+  return map[text] || text;
+}
+
+
+function personText(name, userid) {
+  const n = String(name || '').trim();
+  const u = String(userid || '').trim();
+  if (n && u) return `${n}（${u}）`;
+  return n || u || '-';
+}
+
+function nextCloseText(row) {
+  const duration = Number(row?.open_duration_minutes || 0);
+  const openAt = Number(row?.open_notify_for_open_at || row?.next_open_at || 0);
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(openAt) || openAt <= 0) return '-';
+  return formatTs(openAt + duration * 60);
+}
+
+function MallOpeningControl({ canEdit }) {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [row, setRow] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const isOpen = Number(row?.is_open || 0) === 1;
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await api('/admin/mall/opening');
+      const next = data.data || {};
+      setRow(next);
+      form.setFieldsValue({
+        auto_enabled: Number(next.auto_enabled) === 1,
+        next_open_at: toDateTimeLocal(next.next_open_at),
+        interval_minutes: next.interval_minutes ?? null,
+        open_duration_minutes: next.open_duration_minutes ?? null,
+        remind_before_seconds: next.remind_before_seconds ?? null,
+        close_remind_seconds: next.close_remind_seconds ?? null,
+      });
+    } catch (err) {
+      message.error(mallOpeningErrorText(err.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const toggleNow = () => {
+    if (!canEdit) return;
+    Modal.confirm({
+      title: isOpen ? '确认立即关闭商城？' : '确认立即开启商城？',
+      content: isOpen ? '关闭后，用户将不能继续下单。' : '开启后，用户可以立即下单。',
+      okText: isOpen ? '确认关闭' : '确认开启',
+      cancelText: '取消',
+      okButtonProps: { danger: isOpen },
+      onOk: async () => {
+        setSaving(true);
+        try {
+          const data = await api(isOpen ? '/admin/mall/opening/close-now' : '/admin/mall/opening/open-now', { method: 'POST' });
+          const next = data.data || {};
+          setRow(next);
+          await load();
+          message.success(isOpen ? '商城已关闭' : '商城已开启');
+        } catch (err) {
+          message.error(mallOpeningErrorText(err.message));
+        } finally {
+          setSaving(false);
+        }
+      },
+    });
+  };
+
+  const saveSchedule = async (values) => {
+    const autoEnabled = values.auto_enabled === true;
+    const nextOpenAt = parseDateTimeLocal(values.next_open_at);
+    if (autoEnabled && !nextOpenAt) return message.warning('请填写下一次开启时间');
+    if (autoEnabled && !Number(values.open_duration_minutes || 0)) return message.warning('启用自动开启需要填写开启持续时间');
+    setSaving(true);
+    try {
+      const data = await api('/admin/mall/opening', {
+        method: 'POST',
+        body: {
+          auto_enabled: autoEnabled ? 1 : 0,
+          next_open_at: nextOpenAt,
+          interval_minutes: values.interval_minutes ?? null,
+          open_duration_minutes: values.open_duration_minutes ?? null,
+          remind_before_seconds: values.remind_before_seconds ?? null,
+          close_remind_seconds: values.close_remind_seconds ?? null,
+        },
+      });
+      setRow(data.data || {});
+      await load();
+      message.success('商城开启计划已保存');
+    } catch (err) {
+      message.error(mallOpeningErrorText(err.message));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <Card size="small" title="商城开启控制" loading={loading} extra={<Space>
+    <Button onClick={() => setAdvanced((v) => !v)}>{advanced ? '收起设置' : '更多设置'}</Button>
+    {canEdit && <Button danger={isOpen} type={isOpen ? 'default' : 'primary'} loading={saving} onClick={toggleNow}>{isOpen ? '立即关闭' : '立即开启'}</Button>}
+  </Space>}>
+    <Space direction="vertical" style={{ width: '100%' }} size={12}>
+      <Descriptions bordered size="small" column={{ xs: 1, md: 3 }} items={[
+        { key: 'status', label: '当前状态', children: <Tag color={isOpen ? 'green' : 'red'}>{isOpen ? '已开启' : '已关闭'}</Tag> },
+        { key: 'nextOpen', label: '下一次开启', children: formatTs(row?.next_open_at) || '-' },
+        { key: 'nextClose', label: '下一次关闭', children: nextCloseText(row) },
+      ]} />
+      {advanced && <Form form={form} layout="vertical" onFinish={saveSchedule} className="settings-form">
+        <Form.Item><Button onClick={load} loading={loading}>刷新设置</Button></Form.Item>
+        <Form.Item name="auto_enabled" label="自动开启计划" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+        <Form.Item name="next_open_at" label="下一次开启时间"><Input type="datetime-local" disabled={!canEdit} /></Form.Item>
+        <Form.Item name="interval_minutes" label="开启频率（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空表示不循环" /></Form.Item>
+        <Form.Item name="open_duration_minutes" label="开启持续（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="remind_before_seconds" label="开启前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
+        <Form.Item name="close_remind_seconds" label="关闭前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
+        {canEdit && <Button type="primary" loading={saving} onClick={() => form.submit()}>保存开启计划</Button>}
+      </Form>}
+    </Space>
+  </Card>;
+}
 
 function Products({ me }) {
   const { message } = App.useApp();
@@ -67,13 +222,14 @@ function Products({ me }) {
       limit_per_user: row.limit_per_user ?? 0,
       status: row.status || 'on',
       cdk_enabled: Number(row.cdk_enabled) === 1,
+      publish_to_group: false,
       sort: row.sort ?? null,
       image_url: row.image_url || '',
       remark: row.remark || '',
     });
   };
   const save = async (values) => {
-    await api('/admin/mall/self/products', { method: 'POST', body: { ...values, cdk_enabled: values.cdk_enabled ? 1 : 0 } });
+    await api('/admin/mall/self/products', { method: 'POST', body: { ...values, cdk_enabled: values.cdk_enabled ? 1 : 0, publish_to_group: values.publish_to_group ? 1 : 0 } });
     message.success('商品已保存'); setEditing(null); load();
   };
   const startLimitRound = () => {
@@ -136,7 +292,7 @@ function Products({ me }) {
       },
     });
   };
-  return <>
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={load} onCreate={canEdit ? () => open({ product_id: `P${Date.now().toString(36).toUpperCase()}`, status: 'on', cdk_enabled: false }) : null} createText="新增商品" searchPlaceholder="搜索商品名称 / ID">
       <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 120 }} options={[{ value: 'all', label: '全部状态' }, { value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} />
       <Select value={stockFilter} onChange={setStockFilter} style={{ width: 130 }} options={[{ value: 'all', label: '全部库存' }, { value: 'available', label: '可售库存' }, { value: 'empty', label: '库存为 0' }, { value: 'limited', label: '限库存' }]} />
@@ -160,6 +316,7 @@ function Products({ me }) {
       { title: '金额', dataIndex: 'bob_amount', render: amountText },
       { title: '库存', render: (_, r) => r.stock ?? '不限' },
       { title: '限购', render: (_, r) => Number(r.limit_per_user) > 0 ? `每人 ${Number(r.limit_per_user)} · 第 ${Math.max(1, Number(r.limit_round || 1))} 轮` : '不限' },
+      { title: 'CDK', dataIndex: 'cdk_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">可兑换</Tag> : <Tag>关闭</Tag> },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'on' ? 'success' : 'default'}>{v === 'on' ? '上架' : '下架'}</Tag> },
       { title: '操作', fixed: 'right', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> },
     ]}
@@ -181,11 +338,12 @@ function Products({ me }) {
         </div>
         <Form.Item label="状态" name="status"><Select options={[{ value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} /></Form.Item>
         <Form.Item label="启用 CDK" name="cdk_enabled" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item label="保存后通知到群" name="publish_to_group" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item label="排序" name="sort"><InputNumber precision={0} style={{ width: '100%' }} /></Form.Item>
         <Form.Item label="备注" name="remark"><Input.TextArea rows={3} /></Form.Item>
       </Form>
     </Drawer>
-  </>;
+  </Space>;
 }
 
 function Cdks({ me }) {
@@ -234,7 +392,18 @@ function Cdks({ me }) {
     if (!generated?.codes?.length) return;
     downloadText(`cdk-${generated.batchId}.txt`, generated.codes.join('\n'));
   };
-  const remove = (id) => Modal.confirm({ title: '危险区：删除 CDK', content: '仅未兑换 CDK 可删除。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/cdks/delete', { method: 'POST', body: { ids: [id] } }); message.success('已删除'); load(); } });
+  const remove = (row) => Modal.confirm({
+    title: '危险区：删除 CDK',
+    content: `确认删除 ${row.product_name || '-'} 的 CDK：${row.cdk_code || '-'}？仅未兑换 CDK 可删除。`,
+    okText: '确认删除',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      await api('/admin/cdks/delete', { method: 'POST', body: { ids: [row.id] } });
+      message.success('已删除');
+      load();
+    },
+  });
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true, message: '请选择商品' }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true, message: '请输入生成数量' }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item>{canCdk && <Button type="primary" htmlType="submit">生成并导出</Button>}<Button onClick={load}>刷新</Button></Form></Card>
     <Modal
@@ -247,17 +416,22 @@ function Cdks({ me }) {
       <Input.TextArea value={(generated?.codes || []).join('\n')} rows={Math.min(10, Math.max(4, generated?.codes?.length || 0))} readOnly />
     </Modal>
     <Table rowKey="id" loading={loading} dataSource={rows} scroll={{ x: 1120 }} columns={[
-      { title: '商品', dataIndex: 'product_name' }, { title: 'CDK', dataIndex: 'cdk_code', ellipsis: true },
-      { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'unused' ? 'success' : v === 'redeemed' ? 'red' : 'default'}>{v === 'unused' ? '未兑换' : v === 'redeemed' ? '已兑换' : v}</Tag> },
-      { title: '创建人', dataIndex: 'created_name' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs },
-      { title: '兑换人', dataIndex: 'redeemed_name' }, { title: '兑换订单', dataIndex: 'redeem_exchange_id', ellipsis: true },
-      { title: '操作', render: (_, r) => canCdk ? <Button danger disabled={r.status !== 'unused'} onClick={() => remove(r.id)}>删除</Button> : '-' },
+      { title: '商品', dataIndex: 'product_name' }, { title: 'CDK', dataIndex: 'cdk_code', ellipsis: true }, { title: 'CDK 面值', dataIndex: 'product_bob_amount', render: amountText },
+      { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'unused' ? 'success' : v === 'redeemed' ? 'red' : 'default'}>{v === 'unused' ? '未兑换' : v === 'redeemed' ? '已兑换' : v === 'deleted' ? '已删除' : v}</Tag> },
+      { title: '创建人', render: (_, r) => personText(r.created_name, r.created_by) }, { title: '创建时间', dataIndex: 'created_at', render: formatTs },
+      { title: '兑换人', render: (_, r) => personText(r.redeemed_name, r.redeemed_by) }, { title: '兑换时间', dataIndex: 'redeemed_at', render: formatTs },
+      { title: '兑换订单', dataIndex: 'redeem_exchange_id', ellipsis: true },
+      { title: '操作', render: (_, r) => canCdk ? <Button danger disabled={r.status !== 'unused'} onClick={() => remove(r)}>删除</Button> : '-' },
     ]} />
   </Space>;
 }
 
 export default function Commerce({ me }) {
+  const canEdit = hasPermission(me, 'commerce:edit');
   const items = [{ key: 'products', label: '商品管理', children: <Products me={me} /> }];
-  if (hasPermission(me, 'commerce:cdk')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
-  return <Card><Tabs items={items} /></Card>;
+  if (hasPermission(me, 'commerce:view')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    <MallOpeningControl canEdit={canEdit} />
+    <Card><Tabs items={items} /></Card>
+  </Space>;
 }

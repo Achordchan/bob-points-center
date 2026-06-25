@@ -5,7 +5,7 @@ import { safeAppendAuditLog } from './auditLogService.js';
 import { getAccessToken, getUserProfile, listSubDepartments } from './dingtalkService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
-const CUTOFF_MIN = 8 * 60 + 30; // 08:30 前算有效
+const DEFAULT_WORK_START_MIN = 8 * 60 + 30; // 默认 08:30 前算有效
 const DEPARTMENT_EXPANSION_CACHE_MS = 5 * 60 * 1000;
 const departmentExpansionCache = new Map();
 
@@ -116,7 +116,7 @@ function resolveCheckType(record, checkTotalMin) {
   return { checkType: 'unknown', source: 'unknown', raw: '' };
 }
 
-function normalizeAttendanceRecord(record, fallbackUserName = '') {
+export function normalizeAttendanceRecord(record, fallbackUserName = '') {
   const userid = record?.userId ? String(record.userId).trim() : '';
   const checkTimeMs = Number(record?.checkTime || record?.userCheckTime) || 0;
   const checkTimeText = formatCstTime(checkTimeMs);
@@ -148,13 +148,18 @@ function parseTimeToMinutes(text) {
   return h * 60 + min;
 }
 
-function isOnDutyEligible(normalized, settings) {
+function getWorkStartMinutes(settings) {
+  const parsed = parseTimeToMinutes(settings?.workStartTime);
+  return parsed === null ? DEFAULT_WORK_START_MIN : parsed;
+}
+
+export function isOnDutyEligible(normalized, settings) {
   if (!normalized.userid) return { ok: false, skipReason: 'missing_userid' };
   if (!normalized.check_time_ms) return { ok: false, skipReason: 'missing_check_time' };
   if (String(normalized.time_result || '').trim().toLowerCase() === 'notsigned') {
     return { ok: false, skipReason: 'not_signed' };
   }
-  const startMin = CUTOFF_MIN;
+  const startMin = getWorkStartMinutes(settings);
   const grace = Number(settings.lateGraceMinutes) || 0;
   const cutoff = startMin + grace;
 
@@ -163,7 +168,7 @@ function isOnDutyEligible(normalized, settings) {
   }
 
   if (Number(normalized.check_total_min) > cutoff) {
-    return { ok: false, skipReason: 'skipped_late' };
+    return { ok: false, skipReason: 'skipped_late', cutoffMin: cutoff };
   }
   if (normalized.check_type !== 'on_duty') return { ok: false, skipReason: 'not_on_duty' };
   return { ok: true, skipReason: '' };
@@ -182,6 +187,23 @@ export function isAttendanceDepartmentAllowed(userProfile, settings) {
   const userDeptIds = Array.isArray(userProfile?.deptIds) ? userProfile.deptIds.map((id) => String(id || '').trim()) : [];
   const matched = userDeptIds.some((id) => allow.has(id));
   return matched ? { ok: true, skipReason: '' } : { ok: false, skipReason: 'department_not_allowed' };
+}
+
+export function evaluateAttendanceRewardRecord(settings = {}, record = {}, userProfile = {}) {
+  const userid = record?.userId ? String(record.userId).trim() : '';
+  const normalized = normalizeAttendanceRecord(record, userProfile?.name || userid);
+  const deptEligibility = isAttendanceDepartmentAllowed(userProfile, settings);
+  if (!deptEligibility.ok) {
+    return { ok: true, wouldReward: false, status: 'skipped', reason: deptEligibility.skipReason, normalized };
+  }
+  const eligibility = isOnDutyEligible(normalized, settings);
+  if (!eligibility.ok) {
+    return { ok: true, wouldReward: false, status: 'skipped', reason: eligibility.skipReason, normalized };
+  }
+  if (settings?.testMode === true) {
+    return { ok: true, wouldReward: true, status: 'would_reward', reason: 'test_mode', normalized };
+  }
+  return { ok: true, wouldReward: true, status: 'would_reward', reason: '', normalized };
 }
 
 async function collectDepartmentAndChildren(cfg, departmentIds = []) {
@@ -225,11 +247,11 @@ async function expandAttendanceDepartmentSettings(cfg, settings) {
   }
 }
 
-function humanizeSkipMessage(skipReason, normalized) {
+function humanizeSkipMessage(skipReason, normalized, settings = {}) {
   const timeSuffix = normalized.check_time_text ? `（${normalized.check_time_text}）` : '';
   if (skipReason === 'skipped_off_duty') return `下班打卡已按规则忽略${timeSuffix}`;
   if (skipReason === 'not_signed') return `未打卡，跳过奖励${timeSuffix}`;
-  if (skipReason === 'skipped_late') return `打卡晚于 08:30（含宽限），跳过奖励${timeSuffix}`;
+  if (skipReason === 'skipped_late') return `打卡晚于 ${settings.workStartTime || '08:30'}（含宽限），跳过奖励${timeSuffix}`;
   if (skipReason === 'max_per_day') return `今日已奖励 1 次，跳过${timeSuffix}`;
   if (skipReason === 'department_not_allowed') return `未命中奖励部门${timeSuffix}`;
   if (skipReason === 'missing_check_time') return '缺少打卡时间，跳过奖励';
@@ -329,6 +351,7 @@ async function resolveAttendanceDisplayName(db, cfg, userid) {
 }
 
 async function handleAttendanceRecord(db, cfg, settings, record, { eventSource = 'stream', notifyOnReward = false } = {}) {
+  if (settings?.testMode === true) notifyOnReward = false;
   const userid = record?.userId ? String(record.userId).trim() : '';
   if (!userid) return { ok: false, skipped: true, reason: 'missing_userid' };
   const userProfile = await resolveAttendanceUserProfile(db, cfg, userid);
@@ -342,7 +365,10 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
     if (existing && String(existing.status || '') !== 'pending') {
       const existingStatus = String(existing.status || '');
       const existingSkipReason = String(existing.skip_reason || '');
-      if (!(existingStatus === 'skipped' && existingSkipReason === 'department_not_allowed')) {
+      const shouldReevaluate =
+        (existingStatus === 'skipped' && existingSkipReason === 'department_not_allowed') ||
+        (settings?.testMode === true && existingStatus === 'test_passed');
+      if (!shouldReevaluate) {
         return {
           ok: true,
           reused: true,
@@ -362,7 +388,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
         skip_reason: deptEligibility.skipReason,
         event_source: eventSource,
       });
-      const message = humanizeSkipMessage(deptEligibility.skipReason, normalized);
+      const message = humanizeSkipMessage(deptEligibility.skipReason, normalized, settings);
       await writeAttendanceAudit(tx, {
         eventType: 'attendance_skip',
         userid,
@@ -383,39 +409,39 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
       return { ok: true, skipped: true, reason: deptEligibility.skipReason };
     }
 
+    const eligibility = isOnDutyEligible(normalized, settings);
+    if (!eligibility.ok) {
+      await finalizeAttendanceRecord(tx, existing.id, {
+        status: 'skipped',
+        skip_reason: eligibility.skipReason,
+        event_source: eventSource,
+      });
+      const message = humanizeSkipMessage(eligibility.skipReason, normalized, settings);
+      await writeAttendanceAudit(tx, {
+        eventType: 'attendance_skip',
+        userid,
+        actorName: normalized.user_name_snapshot,
+        message,
+        payload: {
+          reason: eligibility.skipReason,
+          userid,
+          name: normalized.user_name_snapshot,
+          checkTimeMs: normalized.check_time_ms,
+          checkTimeText: normalized.check_time_text,
+          checkHourCST: normalized.check_hour_cst,
+          checkMinuteCST: normalized.check_minute_cst,
+          checkType: normalized.check_type,
+          checkTypeSource: normalized.check_type_source,
+          checkTypeRaw: normalized.check_type_raw,
+          sourceType: normalized.source_type,
+          eventSource,
+        },
+      });
+      return { ok: true, skipped: true, reason: eligibility.skipReason };
+    }
+
     const isTestMode = settings.testMode === true;
     if (!isTestMode) {
-      const eligibility = isOnDutyEligible(normalized, settings);
-      if (!eligibility.ok) {
-        await finalizeAttendanceRecord(tx, existing.id, {
-          status: 'skipped',
-          skip_reason: eligibility.skipReason,
-          event_source: eventSource,
-        });
-        const message = humanizeSkipMessage(eligibility.skipReason, normalized);
-        await writeAttendanceAudit(tx, {
-          eventType: 'attendance_skip',
-          userid,
-          actorName: normalized.user_name_snapshot,
-          message,
-          payload: {
-            reason: eligibility.skipReason,
-            userid,
-            name: normalized.user_name_snapshot,
-            checkTimeMs: normalized.check_time_ms,
-            checkTimeText: normalized.check_time_text,
-            checkHourCST: normalized.check_hour_cst,
-            checkMinuteCST: normalized.check_minute_cst,
-            checkType: normalized.check_type,
-            checkTypeSource: normalized.check_type_source,
-            checkTypeRaw: normalized.check_type_raw,
-            sourceType: normalized.source_type,
-            eventSource,
-          },
-        });
-        return { ok: true, skipped: true, reason: eligibility.skipReason };
-      }
-
       const todayCount = await countRewardedToday(tx, normalized);
       if (todayCount >= Number(settings.maxPerDay || 1)) {
         await finalizeAttendanceRecord(tx, existing.id, {
@@ -427,7 +453,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
           eventType: 'attendance_skip',
           userid,
           actorName: normalized.user_name_snapshot,
-          message: humanizeSkipMessage('max_per_day', normalized),
+          message: humanizeSkipMessage('max_per_day', normalized, settings),
           payload: {
             reason: 'max_per_day',
             userid,
@@ -442,6 +468,31 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
         });
         return { ok: true, skipped: true, reason: 'max_per_day' };
       }
+    }
+
+    if (isTestMode) {
+      await finalizeAttendanceRecord(tx, existing.id, {
+        status: 'test_passed',
+        skip_reason: 'test_mode',
+        notify_status: 'not_sent',
+        error_message: null,
+        event_source: eventSource,
+      });
+      await writeAttendanceAudit(tx, {
+        eventType: 'attendance_test_passed',
+        userid,
+        actorName: normalized.user_name_snapshot,
+        message: `打卡奖励测试通过，未发放 BOB 币，未发送通知${normalized.check_time_text ? `（${normalized.check_time_text}）` : ''}`,
+        payload: {
+          userid,
+          name: normalized.user_name_snapshot,
+          checkTimeMs: normalized.check_time_ms,
+          checkTimeText: normalized.check_time_text,
+          sourceType: normalized.source_type,
+          eventSource,
+        },
+      });
+      return { ok: true, skipped: true, dryRun: true, reason: 'test_mode', recordId: existing.id };
     }
 
     const amount = randomInt(
@@ -600,9 +651,10 @@ function getCurrentCstInfo() {
   };
 }
 
-export async function reconcileAttendanceRewards(db, cfg, { date, userids, notifyOnReward = true } = {}) {
+export async function reconcileAttendanceRewards(db, cfg, { date, userids, notifyOnReward = false } = {}) {
   const settings = await getAttendanceRewardSettings(db);
   if (!settings?.enabled) return { ok: true, skipped: true, reason: 'disabled' };
+  if (settings.testMode === true) notifyOnReward = false;
 
   const range = getDateRange(date);
   const nowCst = getCurrentCstInfo();
@@ -770,7 +822,7 @@ export function startAttendanceRewardReconcileScheduler({ db, cfg } = {}) {
 
     inFlight = true;
     try {
-      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: inMorningWindow });
+      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: false });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[AttendanceReward] reconcile failed:', err?.message || err);
