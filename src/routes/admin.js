@@ -90,6 +90,18 @@ function getPackageMeta() {
   }
 }
 
+function withTimeout(promise, ms, timeoutMessage) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+    }),
+  ]);
+}
+
 async function resolveHostIp(host) {
   const target = host ? String(host).trim() : '';
   if (!target || target === 'localhost') return '';
@@ -2976,7 +2988,7 @@ export function adminRouter() {
       ];
       if (items.find((item) => item.key === 'appKey')?.ok && items.find((item) => item.key === 'appSecret')?.ok) {
         try {
-          await getV1AccessToken(cfg);
+          await withTimeout(getV1AccessToken(cfg), 4000, '钉钉接口凭证检测超时');
           items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: true });
         } catch (err) {
           items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: false, message: String(err?.message || err) });

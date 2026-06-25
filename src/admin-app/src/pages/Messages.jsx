@@ -75,6 +75,16 @@ function extractDingtalkConversation(data) {
   return { openConversationId, name };
 }
 
+function withTimeout(promise, ms, message) {
+  let timer = 0;
+  return Promise.race([
+    promise.finally(() => window.clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]);
+}
+
 const variableDescriptions = {
   name: '接收消息的用户姓名',
   userid: '接收消息的钉钉 Userid',
@@ -226,42 +236,17 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       if (!dd?.biz?.chat?.chooseConversationByCorpId) {
         throw new Error('当前钉钉版本不支持选择群聊，请升级钉钉客户端');
       }
-      const selected = await new Promise((resolve, reject) => {
+      const selected = await withTimeout(new Promise((resolve, reject) => {
         dd.biz.chat.chooseConversationByCorpId({
           corpId: cfg.corpId,
           isConfirm: true,
           onSuccess: resolve,
           onFail: (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊')),
         });
-      });
+      }), 20000, '钉钉选择群聊超时，请重新选择');
       const conversation = extractDingtalkConversation(selected);
       if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
-      let presetName = conversation.name;
-      const confirmed = await new Promise((resolve, reject) => {
-        Modal.confirm({
-          title: '保存群预设',
-          content: <Space direction="vertical" style={{ width: '100%' }}>
-            <Typography.Text type="secondary">已选择群聊，保存后会作为群预设使用。</Typography.Text>
-            <Input defaultValue={presetName} maxLength={40} onChange={(event) => { presetName = event.target.value; }} />
-          </Space>,
-          okText: '保存为预设',
-          cancelText: '取消',
-          onOk: () => {
-            if (!String(presetName || '').trim()) {
-              message.warning('请输入群预设名称');
-              return Promise.reject(new Error('missing name'));
-            }
-            resolve(true);
-            return true;
-          },
-          onCancel: () => reject(new Error('cancel')),
-        });
-      }).catch((err) => {
-        if (String(err?.message || '') === 'cancel') return false;
-        throw err;
-      });
-      if (!confirmed) return;
-      if (!String(presetName || '').trim()) return;
+      const presetName = String(conversation.name || '').trim() || '钉钉群聊';
       const data = await api('/admin/settings/group-card/preset', {
         method: 'POST',
         body: { name: presetName, openConversationId: conversation.openConversationId },
@@ -350,9 +335,9 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
           <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={channelPreset} options={channelPresetOptions} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
           <div className="group-channel-actions">
             {inDingtalk
-              ? <Button type="primary" onClick={chooseDingtalkGroup} loading={selectingGroup} disabled={!canEdit}>从钉钉选择群聊</Button>
+              ? <Button type="primary" htmlType="button" onClick={chooseDingtalkGroup} loading={selectingGroup} disabled={!canEdit}>从钉钉选择群聊</Button>
               : <Typography.Text type="secondary">钉钉客户端内可选择群聊</Typography.Text>}
-            <Button onClick={checkGroupCardConfig} loading={checking}>检测配置</Button>
+            <Button htmlType="button" onClick={checkGroupCardConfig} loading={checking}>检测配置</Button>
           </div>
           <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
           <Form.Item label="指定接收人" name={['channel', 'recipients']} className="group-channel-span-2"><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={2} placeholder="不填时按默认接收人；多个 Userid 可用换行或逗号分隔" /></Form.Item>
