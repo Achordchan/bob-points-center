@@ -137,7 +137,15 @@ function MallOpeningControl({ canEdit }) {
     }
   };
 
-  return <Card size="small" title="商城开启控制" loading={loading} extra={<Space>
+  return <Card size="small" title="商城开启 / 关闭控制" className="mall-opening-control-card" loading={loading} extra={<Space>
+    <Switch
+      checked={isOpen}
+      loading={saving}
+      disabled={!canEdit}
+      checkedChildren="已开启"
+      unCheckedChildren="已关闭"
+      onChange={toggleNow}
+    />
     <Button onClick={() => setAdvanced((v) => !v)}>{advanced ? '收起设置' : '更多设置'}</Button>
     {canEdit && <Button danger={isOpen} type={isOpen ? 'default' : 'primary'} loading={saving} onClick={toggleNow}>{isOpen ? '立即关闭' : '立即开启'}</Button>}
   </Space>}>
@@ -148,15 +156,19 @@ function MallOpeningControl({ canEdit }) {
         { key: 'nextClose', label: '下一次关闭', children: nextCloseText(row) },
         { key: 'source', label: '商城数据源', children: '自建商城' },
       ]} />
-      {advanced && <Form form={form} layout="vertical" onFinish={saveSchedule} className="settings-form">
-        <Form.Item><Button onClick={load} loading={loading}>刷新设置</Button></Form.Item>
-        <Form.Item name="auto_enabled" label="自动开启计划" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
-        <Form.Item name="next_open_at" label="下一次开启时间"><Input type="datetime-local" disabled={!canEdit} /></Form.Item>
-        <Form.Item name="interval_minutes" label="开启频率（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空表示不循环" /></Form.Item>
-        <Form.Item name="open_duration_minutes" label="开启持续（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
-        <Form.Item name="remind_before_seconds" label="开启前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
-        <Form.Item name="close_remind_seconds" label="关闭前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
-        {canEdit && <Button type="primary" loading={saving} onClick={() => form.submit()}>保存开启计划</Button>}
+      {advanced && <Form form={form} layout="vertical" onFinish={saveSchedule} className="mall-opening-settings-form">
+        <div className="mall-opening-settings-grid">
+          <Form.Item name="auto_enabled" label="自动开启计划" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+          <Form.Item name="next_open_at" label="下一次开启时间"><Input type="datetime-local" disabled={!canEdit} /></Form.Item>
+          <Form.Item name="interval_minutes" label="开启频率（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空表示不循环" /></Form.Item>
+          <Form.Item name="open_duration_minutes" label="开启持续（分钟）"><InputNumber min={1} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="remind_before_seconds" label="开启前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
+          <Form.Item name="close_remind_seconds" label="关闭前提醒（秒）"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} placeholder="留空为不提醒" /></Form.Item>
+        </div>
+        <div className="mall-opening-settings-actions">
+          <Button onClick={load} loading={loading}>刷新设置</Button>
+          {canEdit && <Button type="primary" loading={saving} onClick={() => form.submit()}>保存开启计划</Button>}
+        </div>
       </Form>}
     </Space>
   </Card>;
@@ -317,20 +329,23 @@ function Products({ me }) {
       { title: '金额', dataIndex: 'bob_amount', render: amountText },
       { title: '库存', render: (_, r) => r.stock ?? '不限' },
       { title: '限购', render: (_, r) => Number(r.limit_per_user) > 0 ? `每人 ${Number(r.limit_per_user)} · 第 ${Math.max(1, Number(r.limit_round || 1))} 轮` : '不限' },
-      { title: 'CDK', dataIndex: 'cdk_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">可兑换</Tag> : <Tag>关闭</Tag> },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'on' ? 'success' : 'default'}>{v === 'on' ? '上架' : '下架'}</Tag> },
       { title: '排序', dataIndex: 'sort', width: 90, sorter: (a, b) => Number(a.sort || 0) - Number(b.sort || 0), render: (v) => v ?? '-' },
       { title: '操作', fixed: 'right', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> },
     ]}
     />
-    <Drawer title={savedEditing ? "商品编辑" : "新增商品"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={620} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
+    <Drawer title={savedEditing ? "商品编辑" : "新增商品"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={760} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
       <Form form={form} layout="vertical" onFinish={save}>
         <Form.Item label="商品图片" name="image_url"><ProductImageEditor /></Form.Item>
-        <Form.Item label="商品ID" name="product_id" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
-        <Form.Item label="名称" name="product_name" rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item label="金额" name="bob_amount" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
-        <Form.Item label="库存" name="stock"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="留空为不限" /></Form.Item>
-        <Form.Item label="每人限购" name="limit_per_user"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="0 表示不限购" /></Form.Item>
+        <div className="product-form-grid product-form-grid-main">
+          <Form.Item label="商品ID" name="product_id" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
+          <Form.Item label="名称" name="product_name" rules={[{ required: true }]}><Input /></Form.Item>
+        </div>
+        <div className="product-form-grid">
+          <Form.Item label="金额" name="bob_amount" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item label="库存" name="stock"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="留空为不限" /></Form.Item>
+          <Form.Item label="每人限购" name="limit_per_user"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="0 表示不限购" /></Form.Item>
+        </div>
         <div className="product-limit-round-panel">
           <div>
             <div className="product-limit-round-title">限购轮次</div>
@@ -338,10 +353,12 @@ function Products({ me }) {
           </div>
           <Button disabled={!canStartLimitRound} onClick={startLimitRound}>开启新一轮限购</Button>
         </div>
-        <Form.Item label="状态" name="status"><Select options={[{ value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} /></Form.Item>
-        <Form.Item label="启用 CDK" name="cdk_enabled" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item label="保存后通知到群" name="publish_to_group" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item label="排序" name="sort"><InputNumber precision={0} style={{ width: '100%' }} /></Form.Item>
+        <div className="product-form-grid product-form-grid-actions">
+          <Form.Item label="状态" name="status"><Select options={[{ value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} /></Form.Item>
+          <Form.Item label="启用 CDK" name="cdk_enabled" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item label="保存后通知到群" name="publish_to_group" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item label="排序" name="sort"><InputNumber precision={0} style={{ width: '100%' }} /></Form.Item>
+        </div>
         <Form.Item label="备注" name="remark"><Input.TextArea rows={3} /></Form.Item>
       </Form>
     </Drawer>
@@ -430,8 +447,9 @@ function Cdks({ me }) {
 
 export default function Commerce({ me }) {
   const canEdit = hasPermission(me, 'commerce:edit');
+  const canView = hasPermission(me, 'commerce:view');
   const items = [{ key: 'products', label: '商品管理', children: <Products me={me} /> }];
-  if (hasPermission(me, 'commerce:cdk')) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
+  if (canView) items.push({ key: 'cdk', label: 'CDK 管理', children: <Cdks me={me} /> });
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <MallOpeningControl canEdit={canEdit} />
     <Card><Tabs items={items} /></Card>

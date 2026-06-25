@@ -80,6 +80,7 @@ function backupFilename(mode) {
 function Backup({ canExport, canImport }) {
   const { message } = App.useApp();
   const [exportDetail, setExportDetail] = useState(null);
+  const [exportTablesOpen, setExportTablesOpen] = useState(false);
   const [lastBackup, setLastBackup] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const [importMode, setImportMode] = useState('merge');
@@ -196,11 +197,20 @@ function Backup({ canExport, canImport }) {
             </Space>
             <Space wrap>
               {canExport && <Button type="primary" onClick={() => lastBackup && downloadJson(lastBackup.filename, lastBackup.data)}>下载备份文件</Button>}
+              <Button onClick={() => setExportTablesOpen(true)}>查看数据表详情</Button>
               <Button onClick={loadHistory}>刷新历史记录</Button>
             </Space>
           </Space>}
         />}
-        {exportDetail && <Table size="small" rowKey="table" pagination={false} dataSource={exportRows} columns={[{ title: '已导出数据表', dataIndex: 'table' }, { title: '记录数', dataIndex: 'count' }]} />}
+        <Modal
+          title="已导出数据表"
+          open={exportTablesOpen}
+          onCancel={() => setExportTablesOpen(false)}
+          footer={<Button type="primary" onClick={() => setExportTablesOpen(false)}>知道了</Button>}
+          width={720}
+        >
+          <Table size="small" rowKey="table" pagination={false} dataSource={exportRows} columns={[{ title: '数据表', dataIndex: 'table' }, { title: '记录数', dataIndex: 'count', width: 140 }]} />
+        </Modal>
       </Space>
     </Card>
 
@@ -308,12 +318,19 @@ function ImageOptimization({ canEdit }) {
     </Card>
 
     <Card title="处理规则">
-      <Form form={form} layout="vertical" onFinish={save} className="settings-form">
-        <Form.Item name="enabled" label="启用上传转 WebP" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
-        <Form.Item name="quality" label="WebP 质量"><InputNumber min={60} max={95} precision={0} disabled={!canEdit} /></Form.Item>
-        <Form.Item label="最大尺寸"><Space><Form.Item name="maxWidth" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="宽" disabled={!canEdit} /></Form.Item><Form.Item name="maxHeight" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="高" disabled={!canEdit} /></Form.Item></Space></Form.Item>
-        <Form.Item name="keepOriginal" label="保留原图" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
-        {canEdit && <Button type="primary" loading={loading} onClick={() => form.submit()}>保存配置</Button>}
+      <Form form={form} layout="vertical" onFinish={save} className="image-optimization-settings-form">
+        <div className="image-optimization-settings-grid">
+          <Form.Item name="enabled" label="上传自动转 WebP" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+          <Form.Item name="quality" label="WebP 质量"><InputNumber min={60} max={95} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item label="最大尺寸" className="image-optimization-size-field">
+            <Space.Compact style={{ width: '100%' }}>
+              <Form.Item name="maxWidth" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="宽" disabled={!canEdit} style={{ width: '50%' }} /></Form.Item>
+              <Form.Item name="maxHeight" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="高" disabled={!canEdit} style={{ width: '50%' }} /></Form.Item>
+            </Space.Compact>
+          </Form.Item>
+          <Form.Item name="keepOriginal" label="保留原图" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
+        </div>
+        {canEdit && <div className="image-optimization-settings-actions"><Button type="primary" loading={loading} onClick={() => form.submit()}>保存配置</Button></div>}
       </Form>
     </Card>
 

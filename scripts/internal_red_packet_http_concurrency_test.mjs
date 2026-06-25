@@ -27,6 +27,7 @@ function assertSafeTarget(cfg) {
 
 async function createFixture(db) {
   return await db.transaction(async (tx) => {
+    const previousNotify = await tx.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', ['notify_settings']);
     await tx.exec(
       `INSERT INTO system_settings(key, value, updated_at)
        VALUES('notify_settings', ?, unixepoch())
@@ -53,7 +54,7 @@ async function createFixture(db) {
       // eslint-disable-next-line no-await-in-loop
       await tx.run('INSERT INTO accounts(userid, balance) VALUES(?, 0) ON CONFLICT(userid) DO UPDATE SET balance = 0, updated_at = unixepoch()', [userid]);
     }
-    return { activityId, users };
+    return { activityId, users, previousNotifyValue: previousNotify?.value ?? null, previousNotifyExisted: Boolean(previousNotify) };
   });
 }
 
@@ -110,14 +111,23 @@ async function inspectResult(db, activityId, userids) {
   };
 }
 
-async function cleanup(db, activityId, users) {
+async function cleanup(db, activityId, users, previousNotify) {
   const userids = users.map((u) => u.userid);
   const refPrefix = `RED_PACKET_${activityId}_`;
   await db.transaction(async (tx) => {
     await tx.run('DELETE FROM ledger WHERE LEFT(ref_id, LENGTH(?)) = ?', [refPrefix, refPrefix]);
     await tx.run('DELETE FROM red_packet_activity WHERE id = ?', [activityId]);
     await tx.run('DELETE FROM users WHERE userid = ANY(?)', [userids]);
-    await tx.run('DELETE FROM system_settings WHERE key = ?', ['notify_settings']);
+    if (previousNotify?.existed) {
+      await tx.exec(
+        `INSERT INTO system_settings(key, value, updated_at)
+         VALUES('notify_settings', ?, unixepoch())
+         ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = unixepoch()`,
+        [previousNotify.value],
+      );
+    } else {
+      await tx.run('DELETE FROM system_settings WHERE key = ?', ['notify_settings']);
+    }
   });
 }
 
@@ -152,7 +162,7 @@ try {
       notify_settings_disabled: true,
       route_under_test: '/mall/red-packet/claim',
       writes_test_rows: true,
-      cleanup: 'finally_exact_ids',
+      cleanup: 'finally_exact_ids_and_settings_restore',
     },
     prefix: PREFIX,
     activity_id: fixture.activityId,
@@ -166,6 +176,11 @@ try {
   if (!pass) process.exitCode = 1;
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
-  if (fixture?.activityId) await cleanup(db, fixture.activityId, fixture.users);
+  if (fixture?.activityId) {
+    await cleanup(db, fixture.activityId, fixture.users, {
+      existed: fixture.previousNotifyExisted,
+      value: fixture.previousNotifyValue,
+    });
+  }
   await db.close();
 }

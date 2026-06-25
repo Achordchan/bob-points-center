@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Checkbox, Drawer, Form, Input, InputNumber, Modal, Space, Table, Tabs, Tag } from 'antd';
+import { useEffect, useRef, useState } from 'react';
+import { Alert, App, Button, Card, Checkbox, Drawer, Form, Input, InputNumber, Modal, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import { formatTs } from '../utils.js';
 
@@ -16,18 +16,32 @@ function AuditLogs() {
   const [rows, setRows] = useState([]);
   const [days, setDays] = useState(30);
   const [loading, setLoading] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const inFlightRef = useRef(false);
   const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setLoading(true);
     try {
       setRows((await api(`/admin/logs?${qs({ days, limit: 300 })}`)).data || []);
     } catch (e) {
       message.error(e.message || '审计日志加载失败');
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   };
-  useEffect(() => { load().catch(() => null); }, []);
-  return <Card title="审计日志" extra={<Space><InputNumber value={days} onChange={(v) => setDays(v || 30)} addonAfter="天" min={1} max={365} style={{ width: 140 }} /><Button onClick={load}>刷新</Button></Space>}>
+  useEffect(() => { load().catch(() => null); }, [days]);
+  useEffect(() => {
+    if (!autoRefresh) return undefined;
+    const timer = window.setInterval(() => { load().catch(() => null); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, days]);
+  return <Card title="审计日志" extra={<Space wrap>
+    <Space size={6}><Typography.Text type="secondary">5 秒自动刷新</Typography.Text><Switch checked={autoRefresh} onChange={setAutoRefresh} /></Space>
+    <InputNumber value={days} onChange={(v) => setDays(v || 30)} addonAfter="天" min={1} max={365} style={{ width: 140 }} />
+    <Button onClick={load}>刷新</Button>
+  </Space>}>
     <Table rowKey="id" loading={loading} dataSource={rows} scroll={{ x: 1180 }} columns={[
       { title: '时间', dataIndex: 'created_at', render: formatTs, width: 180 },
       { title: '事件', dataIndex: 'event_label', render: (v, r) => <Tag color={r.event_group === 'danger' ? 'red' : undefined}>{v || r.event_type}</Tag>, width: 150 },

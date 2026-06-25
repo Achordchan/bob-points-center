@@ -79,6 +79,7 @@ export default function Users({ me }) {
   const [roleTarget, setRoleTarget] = useState(null);
   const [notifyTarget, setNotifyTarget] = useState(null);
   const [notifyLoading, setNotifyLoading] = useState(false);
+  const [notifyResult, setNotifyResult] = useState(null);
   const [resetTarget, setResetTarget] = useState(null);
   const [resetLoading, setResetLoading] = useState(false);
   const [roles, setRoles] = useState([]);
@@ -252,35 +253,47 @@ export default function Users({ me }) {
 
   const openNotify = (target = {}) => {
     setNotifyTarget(target);
+    setNotifyResult(null);
     notifyForm.resetFields();
+  };
+
+  const postNotify = async (body) => {
+    const res = await fetch('/admin/users/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(translateErrorMessage(data?.error || `HTTP ${res.status}`));
+    }
+    return data || {};
   };
 
   const submitNotify = async (values) => {
     const userids = notifyTarget?.userid ? [notifyTarget.userid] : selected;
     if (!userids.length) return message.warning('请先选择接收人');
-    Modal.confirm({
-      title: '确认发送私聊消息？',
-      content: `将向 ${userids.length} 个用户发送钉钉私聊消息。`,
-      okText: '确认发送',
-      cancelText: '取消',
-      onOk: async () => {
-        setNotifyLoading(true);
-        try {
-          const data = await api('/admin/users/notify', {
-            method: 'POST',
-            body: { userids, title: values.title, content: values.content },
-          });
-          const okCount = (data.results || []).filter((item) => item.ok).length;
-          message.success(`消息发送完成：成功 ${okCount}/${data.count || userids.length}`);
-          setNotifyTarget(null);
-          if (!notifyTarget?.userid) clearSelected();
-        } catch (err) {
-          message.error(err.message || '消息发送失败');
-        } finally {
-          setNotifyLoading(false);
-        }
-      },
-    });
+    setNotifyLoading(true);
+    setNotifyResult(null);
+    try {
+      const data = await postNotify({ userids, title: values.title, content: values.content });
+      const results = Array.isArray(data.results) ? data.results : [];
+      const okCount = Number(data.success_count ?? results.filter((item) => item.ok).length);
+      const failed = results.filter((item) => !item.ok);
+      if (failed.length) {
+        setNotifyResult({ okCount, total: data.count || userids.length, failed });
+        message.error(`发送失败 ${failed.length} 人，请查看失败原因`);
+        return;
+      }
+      message.success(`消息发送完成：成功 ${okCount}/${data.count || userids.length}`);
+      setNotifyTarget(null);
+      if (!notifyTarget?.userid) clearSelected();
+    } catch (err) {
+      message.error(err.message || '消息发送失败');
+    } finally {
+      setNotifyLoading(false);
+    }
   };
 
 
@@ -380,7 +393,7 @@ export default function Users({ me }) {
             ]} />
             <Space wrap>
               {canAssignRole && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
-              {canDelete && <Button danger onClick={() => openResetUser(detail.user)}>危险区：清空该用户业务数据</Button>}
+              {canDelete && !detail.user?.is_fixed_admin && <Button danger onClick={() => openResetUser(detail.user)}>危险区：清空该用户业务数据</Button>}
             </Space>
           </Space> },
           { key: 'dingtalk', label: '钉钉资料', children: detail.dingtalk ? <Descriptions bordered column={2} items={dingtalkItems(detail.dingtalk)} /> : <Empty description="暂无钉钉同步资料，请先同步通讯录" /> },
@@ -423,6 +436,13 @@ export default function Users({ me }) {
         cancelText="取消"
       >
         <Alert type="warning" showIcon message={`本次将发送给 ${notifyRows.length} 人`} description={<div className="batch-recipient-list">{notifyRows.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} style={{ marginBottom: 12 }} />
+        {notifyResult?.failed?.length > 0 && <Alert
+          type="error"
+          showIcon
+          message={`发送未完成：成功 ${notifyResult.okCount}/${notifyResult.total}`}
+          description={<div className="batch-recipient-list">{notifyResult.failed.slice(0, 10).map((item) => <Tag color="red" key={item.userid}>{item.userid}：{translateErrorMessage(item.error || '发送失败')}</Tag>)}</div>}
+          style={{ marginBottom: 12 }}
+        />}
         <Form form={notifyForm} layout="vertical" onFinish={submitNotify}>
           <Form.Item label="标题" name="title"><Input placeholder="可留空" /></Form.Item>
           <Form.Item label="内容" name="content" rules={[{ required: true, message: '请输入消息内容' }]}><Input.TextArea rows={5} /></Form.Item>

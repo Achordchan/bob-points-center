@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { App as AntApp, Modal, Spin } from 'antd';
+import { Component, lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { Alert, App as AntApp, Button, Modal, Spin } from 'antd';
 import { api } from './api.js';
 import AppShell from './components/AppShell.jsx';
 import DingtalkModal from './components/DingtalkModal.jsx';
@@ -17,6 +17,34 @@ const pages = {
   audit: lazy(() => import('./pages/AuditSecurity.jsx')),
   myOperations: lazy(() => import('./pages/MyOperations.jsx')),
 };
+
+class PageErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidUpdate(prevProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <Alert
+      type="error"
+      showIcon
+      message="模块加载失败"
+      description="当前页面资源可能已更新，请重新加载后台后再进入该模块。"
+      action={<Button type="primary" onClick={() => window.location.reload()}>重新加载后台</Button>}
+    />;
+  }
+}
 
 export default function AdminApp() {
   const { message } = AntApp.useApp();
@@ -95,9 +123,11 @@ export default function AdminApp() {
   return (
     <>
       <AppShell activeKey={activeKey} onChange={setActiveKey} user={me} dingtalk={dingtalk} canEditDingtalk={canEditDingtalk} onOpenDingtalk={() => canEditDingtalk && setModalOpen(true)} onLogout={logout}>
-        <Suspense fallback={<div className="page-loading"><Spin /> 正在加载模块…</div>}>
-          <Page {...common} />
-        </Suspense>
+        <PageErrorBoundary resetKey={activeKey}>
+          <Suspense fallback={<div className="page-loading"><Spin /> 正在加载模块…</div>}>
+            <Page {...common} />
+          </Suspense>
+        </PageErrorBoundary>
       </AppShell>
       <DingtalkModal open={modalOpen} state={dingtalk} loading={savingDingtalk} onCancel={() => setModalOpen(false)} onRefresh={() => loadDingtalk(me)} onSave={saveDingtalk} />
     </>

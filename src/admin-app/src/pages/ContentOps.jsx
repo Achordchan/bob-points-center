@@ -77,7 +77,10 @@ function Announcements({ canEdit, canDelete }) {
 function Feedback({ canEdit }) {
   const { message } = App.useApp(); const [rows, setRows] = useState([]); const [status, setStatus] = useState(''); const [keyword, setKeyword] = useState(''); const [handling, setHandling] = useState(null); const [form] = Form.useForm();
   const load = async () => setRows((await api(`/admin/content/feedback?${qs({ limit: 200, status, keyword })}`)).data || []);
-  useEffect(() => { load().catch((e) => message.error(e.message)); }, [status]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { load().catch((e) => message.error(e.message)); }, 300);
+    return () => window.clearTimeout(timer);
+  }, [status, keyword]);
   const open = (row) => { form.resetFields(); setHandling(row); form.setFieldsValue({ status: row.status || 'pending', reply: '' }); };
   const saveStatus = async () => {
     const values = await form.validateFields(['status']);

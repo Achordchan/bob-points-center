@@ -1194,7 +1194,16 @@ export function adminRouter() {
         }
       }
       const ok = results.every((x) => x.ok);
-      return res.json({ ok, count: results.length, results });
+      const failed = results.filter((x) => !x.ok);
+      const successCount = results.length - failed.length;
+      return res.json({
+        ok,
+        count: results.length,
+        success_count: successCount,
+        failed_count: failed.length,
+        error: failed.length ? `私聊消息发送失败 ${failed.length} 人` : undefined,
+        results,
+      });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -2722,9 +2731,13 @@ export function adminRouter() {
 
   router.post('/data/reset-user', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
     const userid = req.body?.userid ? String(req.body.userid).trim() : '';
     if (!userid) {
       return res.status(400).json({ error: 'missing userid' });
+    }
+    if (isFixedAdmin(cfg, userid)) {
+      return res.status(400).json({ error: 'fixed admin cannot be reset' });
     }
 
     try {
@@ -2743,20 +2756,31 @@ export function adminRouter() {
 
   router.post('/data/reset-all', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
     const confirm = req.body?.confirm ? String(req.body.confirm).trim() : '';
     if (confirm !== 'RESET_ALL') {
       return res.status(400).json({ error: '确认口令不正确，已取消' });
     }
 
     try {
+      const fixedAdminIds = (Array.isArray(cfg?.adminUserids) ? cfg.adminUserids : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean);
       await runInTransaction(db, async (tx) => {
-        await tx.run('DELETE FROM ledger');
-        await tx.run('DELETE FROM redeems');
-        await tx.run('DELETE FROM charity_contributions');
-        await tx.run('UPDATE accounts SET balance = 0, updated_at = unixepoch()');
+        if (fixedAdminIds.length) {
+          await tx.run('DELETE FROM ledger WHERE NOT (userid = ANY(?))', [fixedAdminIds]);
+          await tx.run('DELETE FROM redeems WHERE NOT (userid = ANY(?))', [fixedAdminIds]);
+          await tx.run('DELETE FROM charity_contributions WHERE NOT (userid = ANY(?))', [fixedAdminIds]);
+          await tx.run('UPDATE accounts SET balance = 0, updated_at = unixepoch() WHERE NOT (userid = ANY(?))', [fixedAdminIds]);
+        } else {
+          await tx.run('DELETE FROM ledger');
+          await tx.run('DELETE FROM redeems');
+          await tx.run('DELETE FROM charity_contributions');
+          await tx.run('UPDATE accounts SET balance = 0, updated_at = unixepoch()');
+        }
       });
       publishMallRealtimeFullRefresh('reset_all');
-      return res.json({ ok: true });
+      return res.json({ ok: true, protected_admins: fixedAdminIds.length });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

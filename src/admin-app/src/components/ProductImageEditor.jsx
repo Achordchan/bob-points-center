@@ -116,10 +116,12 @@ export default function ProductImageEditor({ value, onChange, emptyText = '未�
       </div>}
     </div>
     <Space direction="vertical" className="product-image-controls" size={10}>
+      <Upload.Dragger accept="image/*" showUploadList={false} beforeUpload={applyFile} disabled={disabled || uploading} className="product-image-dropzone">
+        <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+        <p className="ant-upload-text">{disabled ? '当前权限仅可查看图片' : '点击或拖入图片上传'}</p>
+        <p className="ant-upload-hint">上传后自动压缩为 WebP，支持粘贴图片。</p>
+      </Upload.Dragger>
       <Space wrap>
-        <Upload accept="image/*" showUploadList={false} beforeUpload={applyFile} disabled={disabled}>
-          <Button type="primary" icon={<InboxOutlined />} loading={uploading} disabled={disabled}>上传图片</Button>
-        </Upload>
         <Button icon={<DeleteOutlined />} disabled={disabled || !imageUrl} onClick={() => onChange('')}>移除图片</Button>
       </Space>
       <Typography.Text type="secondary">{imageUrl ? imageSourceType(imageUrl) : disabled ? '当前权限仅可查看图片。' : '支持上传、拖入或粘贴图片，上传前可裁切为 1:1。'}</Typography.Text>

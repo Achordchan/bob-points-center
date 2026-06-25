@@ -29,6 +29,9 @@ function statusText(map, value) {
   return map[value] || value || '-';
 }
 
+function isCurrentRedPacketStatus(value) {
+  return ['pending', 'scheduled', 'active'].includes(String(value || ''));
+}
 
 function packetClaimUser(row) {
   const name = String(row?.name || '').trim();
@@ -50,14 +53,8 @@ function RedPackets({ me }) {
   const clear = () => Modal.confirm({ title: '危险区：清空红包历史', content: '清空后无法恢复。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/clear', { method: 'POST' }); message.success('已清空'); load(); } });
   const remove = (row) => Modal.confirm({ title: '删除红包活动', content: `确认删除红包活动 #${row.id}？该活动及领取明细会被删除。`, okText: '确认删除', cancelText: '取消', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/delete', { method: 'POST', body: { activity_id: row.id } }); message.success('已删除'); if (detail?.id === row.id) setDetail(null); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
-    <Card size="small" title="红包配置" extra={<Tag color={status?.status === 'active' ? 'green' : 'default'}>{status?.status ? statusText(redPacketStatusText, status.status) : '未开始'}</Tag>}>
+    <Card size="small" title="红包配置" extra={<Tag color={status?.status === 'active' ? 'green' : 'default'}>{isCurrentRedPacketStatus(status?.status) ? statusText(redPacketStatusText, status.status) : '未开始'}</Tag>}>
       <Form form={form} layout="inline" onFinish={start}><Form.Item name="total_amount" rules={[{ required: true }]}><InputNumber min={1} placeholder="总金额" disabled={!canEdit} /></Form.Item><Form.Item name="total_count" rules={[{ required: true }]}><InputNumber min={1} placeholder="人数" disabled={!canEdit} /></Form.Item><Form.Item name="countdown_seconds" rules={[{ required: true }]}><InputNumber min={0} placeholder="倒计时秒" disabled={!canEdit} /></Form.Item><Form.Item name="duration_minutes" rules={[{ required: true }]}><InputNumber min={1} placeholder="持续分钟" disabled={!canEdit} /></Form.Item><Form.Item name="sponsor"><Input placeholder="赞助人" readOnly={!canEdit} /></Form.Item>{canEdit && <Button type="primary" htmlType="submit">创建并开始</Button>}<Button onClick={load}>刷新</Button></Form>
-      {status && <Descriptions bordered size="small" column={{ xs: 1, md: 4 }} style={{ marginTop: 12 }} items={[
-        { key: 'start', label: '开始时间', children: formatTs(status.start_at) },
-        { key: 'end', label: '结束时间', children: formatTs(status.end_at) },
-        { key: 'count', label: '已抢/总份数', children: `${status.claimed_count || 0}/${status.total_count || 0}` },
-        { key: 'amount', label: '总额', children: amountText(status.total_amount) },
-      ]} />}
     </Card>
     <DataToolbar onRefresh={load}>{me?.isSuperAdmin && <Button danger onClick={clear}>危险区：清空历史</Button>}</DataToolbar>
     <Table rowKey="id" dataSource={history} pagination={localTablePagination('个活动')} scroll={{ x: 1080 }} columns={[{ title: 'ID', dataIndex: 'id' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '总额', dataIndex: 'total_amount', render: amountText }, { title: '份数', dataIndex: 'total_count' }, { title: '已抢', dataIndex: 'claimed_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(redPacketStatusText, v) }, { title: '赞助人', dataIndex: 'sponsor' }, { title: '操作', fixed: 'right', render: (_, r) => <Space><Button onClick={() => setDetail(r)}>详情</Button>{me?.isSuperAdmin && <Button danger onClick={() => remove(r)}>删除</Button>}</Space> }]} />

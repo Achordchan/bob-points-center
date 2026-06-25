@@ -4,14 +4,14 @@ import { api, qs } from '../api.js';
 import { hasPermission } from '../permissions.js';
 
 const notifyTemplates = [
-  { key: 'grant', label: '发币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}}' },
-  { key: 'deduct', label: '减币通知', vars: '{{name}} {{reason}} {{amount}} {{balance}} {{exchange_id}}' },
-  { key: 'redeem', label: '核销通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}} {{exchange_id}}' },
-  { key: 'mall_buy', label: '下单通知', vars: '{{name}} {{product_name}} {{amount}} {{balance}}' },
-  { key: 'transfer_out', label: '转出通知', vars: '{{name}} {{to_name}} {{amount}} {{balance}} {{transfer_id}}' },
-  { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{from_name}} {{amount}} {{balance}} {{transfer_id}}' },
-  { key: 'red_packet', label: '红包通知', vars: '{{name}} {{amount}} {{balance}} {{activity_id}}' },
-  { key: 'charity', label: '公益通知', vars: '{{name}} {{project_name}} {{amount}} {{balance}}' },
+  { key: 'grant', label: '发币通知', vars: '{{name}} {{userid}} {{reason}} {{amount}} {{balance}}' },
+  { key: 'deduct', label: '减币通知', vars: '{{name}} {{userid}} {{reason}} {{amount}} {{balance}} {{exchange_id}}' },
+  { key: 'redeem', label: '核销通知', vars: '{{name}} {{userid}} {{product_name}} {{amount}} {{balance}} {{exchange_id}}' },
+  { key: 'mall_buy', label: '下单通知', vars: '{{name}} {{userid}} {{product_name}} {{amount}} {{balance}}' },
+  { key: 'transfer_out', label: '转出通知', vars: '{{name}} {{userid}} {{to_name}} {{amount}} {{balance}} {{transfer_id}}' },
+  { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{userid}} {{from_name}} {{amount}} {{balance}} {{transfer_id}}' },
+  { key: 'red_packet', label: '红包通知', vars: '{{name}} {{userid}} {{amount}} {{balance}} {{activity_id}}' },
+  { key: 'charity', label: '公益通知', vars: '{{name}} {{userid}} {{project_name}} {{amount}} {{balance}}' },
 ];
 
 const groupTemplates = [
@@ -43,6 +43,7 @@ function matchConversationPreset(value) {
 
 const variableDescriptions = {
   name: '接收消息的用户姓名',
+  userid: '接收消息的钉钉 Userid',
   reason: '发币或减币的业务原因',
   amount: '本次变动的 BOB 币数量',
   balance: '操作完成后的账户余额',
@@ -79,13 +80,15 @@ function collectTemplateVars(templates) {
   return keys;
 }
 
-function renderVariableHelp(keys) {
+function renderVariableHelp(keys, onInsert, canEdit) {
   if (!keys.length) return null;
   return <div className="template-variable-help">
-    <Typography.Text type="secondary">模板变量</Typography.Text>
+    <Typography.Text type="secondary">{canEdit ? '模板变量（点击插入到当前编辑框）' : '模板变量'}</Typography.Text>
     <div className="template-variable-grid">
       {keys.map((key) => <div className="template-variable-item" key={key}>
-        <code>{`{{${key}}}`}</code>
+        {canEdit
+          ? <button type="button" className="template-variable-chip" onClick={() => onInsert?.(key)}><code>{`{{${key}}}`}</code></button>
+          : <code>{`{{${key}}}`}</code>}
         <span>{variableDescriptions[key] || '模板变量'}</span>
       </div>)}
     </div>
@@ -100,11 +103,19 @@ function Toolbar({ onRefresh, onReset, onSave, canEdit = true }) {
   </Space>;
 }
 
-function TemplateFields({ namePrefix, withButtons = false, canEdit = true }) {
+function TemplateFields({ namePrefix, withButtons = false, canEdit = true, onActiveField }) {
+  const bindField = (name) => {
+    const updateTarget = (event) => onActiveField?.({
+      namePath: [...namePrefix, name],
+      start: event?.target?.selectionStart ?? null,
+      end: event?.target?.selectionEnd ?? null,
+    });
+    return { onFocus: updateTarget, onClick: updateTarget, onKeyUp: updateTarget, onSelect: updateTarget };
+  };
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
-    <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} /></Form.Item>
-    <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} /></Form.Item>
+    <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} {...bindField('title')} /></Form.Item>
+    <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} readOnly={!canEdit} className={!canEdit ? 'readonly-input' : ''} {...bindField('content')} /></Form.Item>
     {withButtons && <>
       <Divider style={{ margin: '4px 0' }} />
       <Form.List name={[...namePrefix, 'buttons']}>
@@ -129,6 +140,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [channelEditing, setChannelEditing] = useState(false);
+  const [activeField, setActiveField] = useState(null);
   const channelConversationId = Form.useWatch(['channel', 'openConversationId'], form);
   const channelPreset = matchConversationPreset(channelConversationId);
 
@@ -158,11 +170,23 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     message.success('已恢复默认');
     load();
   };
+  const insertVariable = (key) => {
+    if (!activeField) {
+      message.warning('请先点击标题或正文编辑框');
+      return;
+    }
+    const token = `{{${key}}}`;
+    const current = String(form.getFieldValue(activeField.namePath) || '');
+    const start = Number.isInteger(activeField.start) ? activeField.start : current.length;
+    const end = Number.isInteger(activeField.end) ? activeField.end : start;
+    form.setFieldValue(activeField.namePath, `${current.slice(0, start)}${token}${current.slice(end)}`);
+    setActiveField({ ...activeField, start: start + token.length, end: start + token.length });
+  };
 
   const items = templates.map((item) => ({
     key: item.key,
     label: item.label,
-    children: <TemplateFields namePrefix={['templates', item.key]} withButtons={withButtons} canEdit={canEdit} />,
+    children: <TemplateFields namePrefix={['templates', item.key]} withButtons={withButtons} canEdit={canEdit} onActiveField={setActiveField} />,
   }));
   const templateVars = collectTemplateVars(templates);
 
@@ -170,22 +194,24 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     <Toolbar onRefresh={load} onReset={reset} onSave={save} canEdit={canEdit} />
     <Form form={form} layout="vertical">
       <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item>
-      {renderVariableHelp(templateVars)}
+      {renderVariableHelp(templateVars, insertVariable, canEdit)}
       {withChannel && <Card
         size="small"
         title="群发送配置"
         extra={canEdit ? <Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button> : null}
         style={{ marginBottom: 12 }}
       >
-        <Form.Item label="群会话预设"><Select disabled={!canEdit} value={channelPreset} options={groupConversationPresets} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
-        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input readOnly={!channelEditing || channelPreset !== '__custom__'} className={!channelEditing || channelPreset !== '__custom__' ? 'readonly-input' : ''} placeholder={channelPreset === '__custom__' ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
-        <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
-        <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
-        <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
-        <Form.Item label="指定接收人" name={['channel', 'recipients']}><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={3} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
-        <Form.Item label="标题字段 Key" name={['channel', 'titleKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="留空使用模板默认标题字段" /></Form.Item>
-        <Form.Item label="内容字段 Key" name={['channel', 'contentKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="例如 spyj_neirong" /></Form.Item>
-        <Form.Item label="搜索图标" name={['channel', 'searchIcon']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="可选，群卡搜索图标地址" /></Form.Item>
+        <div className="group-channel-config-grid">
+          <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={channelPreset} options={groupConversationPresets} onChange={(value) => { if (value === '__custom__') { setChannelEditing(true); return; } form.setFieldValue(['channel', 'openConversationId'], value); setChannelEditing(false); }} /></Form.Item>
+          <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
+          <Form.Item label="群会话 ID" name={['channel', 'openConversationId']} className="group-channel-span-2"><Input readOnly={!channelEditing || channelPreset !== '__custom__'} className={!channelEditing || channelPreset !== '__custom__' ? 'readonly-input' : ''} placeholder={channelPreset === '__custom__' ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
+          <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+          <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']} className="group-channel-span-2"><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+          <Form.Item label="搜索图标" name={['channel', 'searchIcon']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="可选，填写图标地址" /></Form.Item>
+          <Form.Item label="标题字段 Key" name={['channel', 'titleKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="留空使用默认标题字段" /></Form.Item>
+          <Form.Item label="内容字段 Key" name={['channel', 'contentKey']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} placeholder="例如 spyj_neirong" /></Form.Item>
+          <Form.Item label="指定接收人" name={['channel', 'recipients']} className="group-channel-span-2"><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={2} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
+        </div>
       </Card>}
       <Collapse defaultActiveKey={[]} items={items} />
     </Form>
@@ -255,10 +281,22 @@ function GroupCardActions({ canManual, canTest }) {
       message.warning('标题和内容至少填写一项');
       return;
     }
+    const linkUrl = String(values.linkUrl || '').trim();
+    const buttons = Array.isArray(values.buttons)
+      ? values.buttons.map((item) => ({
+        ...item,
+        text: String(item?.text || '').trim(),
+        url: String(item?.url || '').trim(),
+      })).filter((item) => item.text && item.url)
+      : [];
+    const payload = {
+      ...values,
+      buttons: buttons.length ? buttons : linkUrl ? [{ text: '查看详情', url: linkUrl, color: 'blue' }] : undefined,
+    };
     return confirmRun('确认发送手动群卡？', '这会向当前群卡配置对应的群发送手动群卡，请确认内容和群会话无误。', async () => {
     setLoading(true);
     try {
-      await api('/admin/notify/group-card', { method: 'POST', body: values });
+      await api('/admin/notify/group-card', { method: 'POST', body: payload });
       message.success('手动群卡已发送');
       manualForm.resetFields();
     } catch (err) {
@@ -276,25 +314,28 @@ function GroupCardActions({ canManual, canTest }) {
       </Form>
     </Card>
     <Card size="small" title="手动群卡推送">
-      <Form form={manualForm} layout="vertical" onFinish={manualSend}>
-        <Form.Item label="标题" name="title"><Input readOnly={!canManual} /></Form.Item>
-        <Form.Item label="Markdown 内容" name="markdown"><Input.TextArea rows={5} readOnly={!canManual} /></Form.Item>
-        <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" readOnly={!canManual} /></Form.Item>
-        <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" readOnly={!canManual} /></Form.Item>
+      <Form form={manualForm} layout="vertical" onFinish={manualSend} className="group-card-manual-form">
+        <div className="group-card-manual-grid">
+          <Form.Item label="标题" name="title" className="group-card-span-2"><Input readOnly={!canManual} /></Form.Item>
+          <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" readOnly={!canManual} /></Form.Item>
+          <Form.Item label="Markdown 内容" name="markdown" className="group-card-span-all"><Input.TextArea rows={4} readOnly={!canManual} /></Form.Item>
+          <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" readOnly={!canManual} /></Form.Item>
+          <Form.Item label="快捷链接" name="linkUrl" className="group-card-span-2"><Input placeholder="可选；未配置按钮时自动生成“查看详情”按钮" readOnly={!canManual} /></Form.Item>
+        </div>
         <Form.List name="buttons">
-          {(fields, { add, remove }) => <Space direction="vertical" style={{ width: '100%' }}>
-            <Space><Typography.Text strong>按钮</Typography.Text>{canManual && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</Space>
-            {fields.map((field) => <Card size="small" key={field.key}>
-              <Space direction="vertical" style={{ width: '100%' }}>
+          {(fields, { add, remove }) => <div className="group-card-button-section">
+            <div className="group-card-button-header"><Typography.Text strong>按钮</Typography.Text>{canManual && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</div>
+            {fields.map((field) => <Card size="small" key={field.key} className="group-card-button-card">
+              <div className="group-card-button-grid">
                 <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canManual} /></Form.Item>
-                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]}><Input readOnly={!canManual} /></Form.Item>
+                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]} className="group-card-span-2"><Input readOnly={!canManual} /></Form.Item>
                 <Form.Item label="颜色" name={[field.name, 'color']}><Select disabled={!canManual} options={colorOptions} /></Form.Item>
-                {canManual && <Button danger onClick={() => remove(field.name)}>删除按钮</Button>}
-              </Space>
+                {canManual && <div className="group-card-button-actions"><Button danger onClick={() => remove(field.name)}>删除按钮</Button></div>}
+              </div>
             </Card>)}
-          </Space>}
+          </div>}
         </Form.List>
-        <Button type="primary" htmlType="submit" loading={loading} disabled={!canManual}>发送手动群卡</Button>
+        <div className="group-card-manual-actions"><Button type="primary" htmlType="submit" loading={loading} disabled={!canManual}>发送手动群卡</Button></div>
       </Form>
     </Card>
   </Space>;
