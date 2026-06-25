@@ -353,6 +353,9 @@ const DEFAULT_ATTENDANCE_REWARD_SETTINGS = {
   rewardMax: 5,
   maxPerDay: 1,
   onlyCheckin: true,
+  departmentMode: 'all',
+  departmentIds: [],
+  departmentExpandedIds: [],
   reason: '打卡奖励',
 };
 
@@ -390,6 +393,7 @@ export function normalizeAttendanceRewardSettings(input) {
     onlyCheckin: toBool(src.onlyCheckin, def.onlyCheckin),
     departmentMode: normalizeDepartmentMode(src.departmentMode),
     departmentIds: normalizeDepartmentIds(src.departmentIds),
+    departmentExpandedIds: normalizeDepartmentIds(src.departmentExpandedIds),
     reason: src.reason && String(src.reason).trim() ? String(src.reason).trim() : def.reason,
   };
 }

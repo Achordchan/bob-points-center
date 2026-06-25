@@ -2,10 +2,12 @@ import { getAttendanceRewardSettings } from './systemSettings.js';
 import { ensureAccount, getBalance, grantBob } from './ledgerService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { safeAppendAuditLog } from './auditLogService.js';
-import { getAccessToken, getUserProfile } from './dingtalkService.js';
+import { getAccessToken, getUserProfile, listSubDepartments } from './dingtalkService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
 const CUTOFF_MIN = 8 * 60 + 30; // 08:30 前算有效
+const DEPARTMENT_EXPANSION_CACHE_MS = 5 * 60 * 1000;
+const departmentExpansionCache = new Map();
 
 function randomInt(min, max) {
   const lo = Math.min(min, max);
@@ -170,7 +172,10 @@ function isOnDutyEligible(normalized, settings) {
 export function isAttendanceDepartmentAllowed(userProfile, settings) {
   const mode = String(settings?.departmentMode || 'all');
   if (mode !== 'selected') return { ok: true, skipReason: '' };
-  const allow = new Set((Array.isArray(settings?.departmentIds) ? settings.departmentIds : [])
+  const expandedIds = Array.isArray(settings?.departmentExpandedIds) && settings.departmentExpandedIds.length
+    ? settings.departmentExpandedIds
+    : settings?.departmentIds;
+  const allow = new Set((Array.isArray(expandedIds) ? expandedIds : [])
     .map((id) => String(id || '').trim())
     .filter(Boolean));
   if (allow.size === 0) return { ok: false, skipReason: 'department_not_allowed' };
@@ -179,13 +184,54 @@ export function isAttendanceDepartmentAllowed(userProfile, settings) {
   return matched ? { ok: true, skipReason: '' } : { ok: false, skipReason: 'department_not_allowed' };
 }
 
+async function collectDepartmentAndChildren(cfg, departmentIds = []) {
+  const roots = [...new Set((Array.isArray(departmentIds) ? departmentIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean))];
+  if (!roots.length) return [];
+  const cacheKey = `${cfg?.dingtalk?.corpId || ''}:${cfg?.dingtalk?.appKey || ''}:${roots.sort().join(',')}`;
+  const cached = departmentExpansionCache.get(cacheKey);
+  const now = Date.now();
+  if (cached && now - cached.at < DEPARTMENT_EXPANSION_CACHE_MS) return cached.ids;
+
+  const out = new Set(roots);
+  const queue = [...roots];
+  while (queue.length) {
+    const parent = queue.shift();
+    const subs = await listSubDepartments(cfg, { deptId: Number(parent) });
+    for (const dept of Array.isArray(subs) ? subs : []) {
+      const id = String(dept?.dept_id || '').trim();
+      if (!id || out.has(id)) continue;
+      out.add(id);
+      queue.push(id);
+    }
+  }
+  const ids = [...out];
+  departmentExpansionCache.set(cacheKey, { at: now, ids });
+  return ids;
+}
+
+async function expandAttendanceDepartmentSettings(cfg, settings) {
+  if (String(settings?.departmentMode || 'all') !== 'selected') return settings;
+  if (Array.isArray(settings?.departmentExpandedIds) && settings.departmentExpandedIds.length) return settings;
+  if (!cfg?.dingtalk?.appKey || !cfg?.dingtalk?.appSecret) return settings;
+  try {
+    const departmentExpandedIds = await collectDepartmentAndChildren(cfg, settings.departmentIds || []);
+    return { ...settings, departmentExpandedIds };
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[AttendanceReward] expand departments failed:', err?.message || err);
+    return settings;
+  }
+}
+
 function humanizeSkipMessage(skipReason, normalized) {
   const timeSuffix = normalized.check_time_text ? `（${normalized.check_time_text}）` : '';
-  if (skipReason === 'skipped_off_duty') return `下班打卡，按设置忽略奖励${timeSuffix}`;
+  if (skipReason === 'skipped_off_duty') return `下班打卡已按规则忽略${timeSuffix}`;
   if (skipReason === 'not_signed') return `未打卡，跳过奖励${timeSuffix}`;
   if (skipReason === 'skipped_late') return `打卡晚于 08:30（含宽限），跳过奖励${timeSuffix}`;
   if (skipReason === 'max_per_day') return `今日已奖励 1 次，跳过${timeSuffix}`;
-  if (skipReason === 'department_not_allowed') return `不在打卡奖励适用部门内，跳过奖励${timeSuffix}`;
+  if (skipReason === 'department_not_allowed') return `未命中奖励部门${timeSuffix}`;
   if (skipReason === 'missing_check_time') return '缺少打卡时间，跳过奖励';
   return `未满足奖励条件，跳过${timeSuffix}`;
 }
@@ -289,22 +335,27 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
   const displayName = userProfile.name || '';
   const normalized = normalizeAttendanceRecord(record, displayName || userid);
   if (!normalized.user_name_snapshot) normalized.user_name_snapshot = displayName || userid;
+  const departmentAwareSettings = await expandAttendanceDepartmentSettings(cfg, settings);
 
   const result = await db.transaction(async (tx) => {
     const existing = await ensureAttendanceRewardRow(tx, normalized, { eventSource });
     if (existing && String(existing.status || '') !== 'pending') {
-      return {
-        ok: true,
-        reused: true,
-        status: String(existing.status || ''),
-        recordId: existing.id,
-        notify_status: existing.notify_status,
-        rewardReason: existing.reward_reason,
-        amount: existing.reward_amount,
-      };
+      const existingStatus = String(existing.status || '');
+      const existingSkipReason = String(existing.skip_reason || '');
+      if (!(existingStatus === 'skipped' && existingSkipReason === 'department_not_allowed')) {
+        return {
+          ok: true,
+          reused: true,
+          status: existingStatus,
+          recordId: existing.id,
+          notify_status: existing.notify_status,
+          rewardReason: existing.reward_reason,
+          amount: existing.reward_amount,
+        };
+      }
     }
 
-    const deptEligibility = isAttendanceDepartmentAllowed(userProfile, settings);
+    const deptEligibility = isAttendanceDepartmentAllowed(userProfile, departmentAwareSettings);
     if (!deptEligibility.ok) {
       await finalizeAttendanceRecord(tx, existing.id, {
         status: 'skipped',
@@ -324,7 +375,8 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
           checkTimeMs: normalized.check_time_ms,
           checkTimeText: normalized.check_time_text,
           userDeptIds: userProfile.deptIds,
-          allowedDepartmentIds: settings.departmentIds,
+          selectedDepartmentIds: settings.departmentIds,
+          allowedDepartmentIds: departmentAwareSettings.departmentExpandedIds || settings.departmentIds,
           eventSource,
         },
       });
@@ -402,6 +454,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
       const grant = await grantBob(tx, { userid, amount, reason: rewardReason });
       await finalizeAttendanceRecord(tx, existing.id, {
         status: 'rewarded',
+        skip_reason: null,
         reward_amount: amount,
         reward_reason: rewardReason,
         notify_status: notifyOnReward ? 'pending' : 'queued',

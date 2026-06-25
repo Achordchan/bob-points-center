@@ -195,8 +195,14 @@ function parseAuditPayload(payload) {
 }
 
 function classifyAdminAudit(row = {}) {
+  const eventType = String(row.event_type || '');
   const path = String(row.path || '');
   const method = String(row.method || '').toUpperCase();
+  if (eventType === 'attendance_reward') return { event_group: 'attendance', event_label: '打卡奖励' };
+  if (eventType === 'attendance_skip') return { event_group: 'attendance', event_label: '打卡规则跳过' };
+  if (eventType === 'admin_login_success') return { event_group: 'login', event_label: '后台登录' };
+  if (eventType === 'admin_logout') return { event_group: 'login', event_label: '退出登录' };
+  if (eventType === 'admin_login_failed') return { event_group: 'login', event_label: '登录失败' };
   if (path.includes('/ledger/grant-batch')) return { event_group: 'grant', event_label: '后台发币' };
   if (path.includes('/redeem/deduct-batch')) return { event_group: 'deduct', event_label: '后台减币' };
   if (path.includes('/redeem/confirm')) return { event_group: 'redeem', event_label: '订单核销' };
@@ -209,9 +215,108 @@ function classifyAdminAudit(row = {}) {
   return { event_group: 'read', event_label: '查看' };
 }
 
+function displayActorName(row = {}) {
+  const fromUser = String(row.actor_user_name || '').trim();
+  const fromAudit = String(row.actor_name || '').trim();
+  const actorId = String(row.actor_id || '').trim();
+  if (fromUser) return fromUser;
+  if (fromAudit && fromAudit !== '管理员') return fromAudit;
+  return fromAudit || actorId || '-';
+}
+
+async function namesByUserids(db, userids = []) {
+  const ids = [...new Set((Array.isArray(userids) ? userids : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = await db.all(`SELECT userid, COALESCE(name, '') AS name FROM users WHERE userid IN (${placeholders})`, ids);
+  return new Map((rows || []).map((row) => [String(row.userid), String(row.name || '')]));
+}
+
+function summarizeTargets(userids = [], nameMap = new Map(), max = 3) {
+  const ids = [...new Set((Array.isArray(userids) ? userids : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const names = ids.slice(0, max).map((id) => {
+    const name = nameMap.get(id);
+    return name ? `${name}（${id}）` : id;
+  });
+  if (ids.length > max) names.push(`等 ${ids.length} 人`);
+  return { ids, text: names.join('、') || '-' };
+}
+
+async function inferLedgerOperation(db, row, direction) {
+  const createdAt = Number(row?.created_at || 0);
+  if (!createdAt) return { userids: [], amount: null, reason: '' };
+  const positive = direction === 'grant';
+  const rows = await db.all(
+    `SELECT l.userid, l.delta, l.reason, COALESCE(u.name, '') AS name
+     FROM ledger l
+     LEFT JOIN users u ON u.userid = l.userid
+     WHERE l.created_at BETWEEN ? AND ?
+       AND ${positive ? 'l.delta > 0' : "l.delta < 0 AND l.reason = 'admin_deduct'"}
+     ORDER BY l.id ASC
+     LIMIT 50`,
+    [createdAt - 5, createdAt + 2],
+  );
+  const userids = (rows || []).map((item) => String(item.userid));
+  const amount = rows?.length ? Math.abs(Number(rows[0].delta || 0)) : null;
+  const reason = rows?.find((item) => item.reason)?.reason || '';
+  return { userids, amount, reason, inferred: rows?.length > 0 };
+}
+
+async function buildOperationMeta(db, row = {}) {
+  const payload = parseAuditPayload(row.payload) || {};
+  const classified = classifyAdminAudit(row);
+  let targetUserids = Array.isArray(payload.userids) ? payload.userids.map(String) : [];
+  let amount = payload.amount || payload.bobAmount || payload.actualBobAmount || null;
+  let reason = payload.reason || payload.product_name || payload.productName || '';
+  let inferred = false;
+
+  if ((classified.event_group === 'grant' || classified.event_group === 'deduct') && (!targetUserids.length || !amount)) {
+    const inferredLedger = await inferLedgerOperation(db, row, classified.event_group);
+    if (!targetUserids.length) targetUserids = inferredLedger.userids;
+    if (!amount) amount = inferredLedger.amount;
+    if (!reason) reason = inferredLedger.reason;
+    inferred = inferredLedger.inferred === true;
+  }
+  if (classified.event_group === 'redeem' && payload.userid) targetUserids = [String(payload.userid)];
+  if (classified.event_group === 'role' && payload.userid) targetUserids = [String(payload.userid)];
+
+  const nameMap = await namesByUserids(db, targetUserids);
+  const targets = summarizeTargets(targetUserids, nameMap);
+  const amountNum = Number(amount || 0);
+  const total = amountNum > 0 && targets.ids.length ? amountNum * targets.ids.length : amountNum || null;
+  const summaryParts = [];
+  if (targets.ids.length) summaryParts.push(`对象：${targets.text}`);
+  if (amountNum > 0) summaryParts.push(`单人：${amountNum} BOB币`);
+  if (total && total !== amountNum) summaryParts.push(`合计：${total} BOB币`);
+  if (reason) summaryParts.push(`原因：${reason}`);
+
+  return {
+    ...classified,
+    actor_display_name: displayActorName(row),
+    payload,
+    operation_summary: summaryParts.join('；') || row.message || '-',
+    target_userids: targets.ids,
+    target_text: targets.text,
+    amount: amountNum || null,
+    amount_total: total,
+    reason: reason || '',
+    inferred: inferred ? 1 : 0,
+  };
+}
+
+async function serializeOperationRows(db, rows = []) {
+  const out = [];
+  for (const row of rows || []) {
+    // eslint-disable-next-line no-await-in-loop
+    const meta = await buildOperationMeta(db, row);
+    out.push({ ...row, ...meta });
+  }
+  return out;
+}
+
 function serializeAuditRow(row = {}) {
   const classified = classifyAdminAudit(row);
-  return { ...row, ...classified, payload: parseAuditPayload(row.payload) || row.payload };
+  return { ...row, ...classified, actor_display_name: displayActorName(row), payload: parseAuditPayload(row.payload) || row.payload };
 }
 
 async function enrichRedeemConfirmAuditRows(db, rows) {
@@ -496,6 +601,58 @@ function isActiveFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && String(value).trim() !== '') return String(value).trim();
+  }
+  return '';
+}
+
+function toJsonText(value) {
+  if (value === null || value === undefined) return '';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeDingtalkDate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n > 100000000000 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+function normalizeDingtalkUserProfile(raw = {}, deptNameMap = new Map()) {
+  const deptIds = Array.isArray(raw.dept_id_list) ? raw.dept_id_list.map((id) => String(id)).filter(Boolean) : [];
+  const deptNames = deptIds.map((id) => deptNameMap.get(id) || '').filter(Boolean);
+  return {
+    userid: firstPresent(raw.userid),
+    unionid: firstPresent(raw.unionid),
+    name: firstPresent(raw.name),
+    avatar: firstPresent(raw.avatar),
+    mobile: firstPresent(raw.mobile),
+    telephone: firstPresent(raw.telephone),
+    email: firstPresent(raw.email),
+    org_email: firstPresent(raw.org_email),
+    title: firstPresent(raw.title),
+    job_number: firstPresent(raw.job_number, raw.jobNumber),
+    work_place: firstPresent(raw.work_place, raw.workPlace),
+    remark: firstPresent(raw.remark),
+    dept_ids: deptIds,
+    dept_names: deptNames,
+    extension: raw.extension || null,
+    hired_date: normalizeDingtalkDate(raw.hired_date),
+    active: isActiveFlag(raw.active) ? 1 : 0,
+    is_admin: isActiveFlag(raw.admin) ? 1 : 0,
+    is_boss: isActiveFlag(raw.boss) ? 1 : 0,
+    leader_in_dept: raw.leader_in_dept || null,
+    exclusive_account: isActiveFlag(raw.exclusive_account) ? 1 : 0,
+    raw,
+  };
+}
+
 async function resolveAdminDisplayName(db, cfg, payload = {}) {
   const userid = payload?.userid ? String(payload.userid).trim() : '';
   if (db && userid) {
@@ -600,6 +757,33 @@ async function listDingtalkDepartmentsTree(cfg) {
     }
   }
   return out;
+}
+
+function expandDepartmentIdsFromTree(rows = [], departmentIds = []) {
+  const selected = new Set((Array.isArray(departmentIds) ? departmentIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean));
+  if (!selected.size) return [];
+  const childrenByParent = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?.dept_id || '').trim();
+    const parentId = String(row?.parent_id || '').trim();
+    if (!id || !parentId) continue;
+    if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+    childrenByParent.get(parentId).push(id);
+  }
+  const out = new Set(selected);
+  const queue = [...selected];
+  while (queue.length) {
+    const parentId = queue.shift();
+    const children = childrenByParent.get(parentId) || [];
+    for (const childId of children) {
+      if (out.has(childId)) continue;
+      out.add(childId);
+      queue.push(childId);
+    }
+  }
+  return [...out];
 }
 
 export function adminRouter() {
@@ -1482,10 +1666,24 @@ export function adminRouter() {
          LIMIT 80`,
         [userid],
       );
+      const dingtalkProfile = await db.get(
+        `SELECT userid, unionid, name, avatar, mobile, telephone, email, org_email, title, job_number, work_place, remark,
+                dept_ids, dept_names, extension, hired_date, active, is_admin, is_boss, leader_in_dept, exclusive_account, raw, updated_at
+         FROM user_dingtalk_profiles
+         WHERE userid = ?
+         LIMIT 1`,
+        [userid],
+      );
       const operations = await db.all(
         `SELECT id, event_type, actor_type, actor_id, actor_name, ip, method, path, status_code, message, payload, created_at
          FROM audit_logs
          WHERE actor_id = ?
+           AND actor_type = 'admin'
+           AND event_type NOT IN ('attendance_reward', 'attendance_skip')
+           AND (
+             COALESCE(method, '') <> 'GET'
+             OR event_type IN ('admin_login_success', 'admin_logout', 'admin_login_failed')
+           )
          ORDER BY id DESC
          LIMIT 20`,
         [userid],
@@ -1502,6 +1700,14 @@ export function adminRouter() {
           ledger,
           redeems,
           contributions,
+          dingtalk: dingtalkProfile ? {
+            ...dingtalkProfile,
+            dept_ids: parseAuditPayload(dingtalkProfile.dept_ids) || [],
+            dept_names: parseAuditPayload(dingtalkProfile.dept_names) || [],
+            extension: parseAuditPayload(dingtalkProfile.extension) || null,
+            leader_in_dept: parseAuditPayload(dingtalkProfile.leader_in_dept) || null,
+            raw: parseAuditPayload(dingtalkProfile.raw) || null,
+          } : null,
           operations: (operations || []).map(serializeAuditRow),
         },
       });
@@ -1714,7 +1920,7 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     const confirm = req.body?.confirm ? String(req.body.confirm).trim() : '';
     if (confirm !== 'CLEAR_REDEEM_HISTORY') {
-      return res.status(400).json({ error: 'missing confirm' });
+      return res.status(400).json({ error: '确认口令不正确，已取消' });
     }
 
     try {
@@ -1880,7 +2086,7 @@ export function adminRouter() {
          ORDER BY id DESC${hasLimit ? '\n         LIMIT ?' : ''}`;
       const rows = await db.all(sql, hasLimit ? [minCreatedAt, limit] : [minCreatedAt]);
       await enrichRedeemConfirmAuditRows(db, rows);
-      return res.json({ ok: true, days, limit, data: rows || [] });
+      return res.json({ ok: true, days, limit, data: (rows || []).map(serializeAuditRow) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -1891,42 +2097,66 @@ export function adminRouter() {
     const days = Math.min(90, Math.max(1, toPositiveInt(req.query?.days, 30)));
     const limit = Math.min(500, Math.max(1, toPositiveInt(req.query?.limit, 120)));
     const eventGroup = String(req.query?.event_group || '').trim();
-    const minCreatedAt = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
-    const actorId = String(req.adminSession?.userid || '').trim();
+    const dateFrom = toOptionalInt(req.query?.date_from);
+    const dateTo = toOptionalInt(req.query?.date_to);
+    const minCreatedAt = dateFrom || Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
+    const maxCreatedAt = dateTo || null;
+    const currentActorId = String(req.adminSession?.userid || '').trim();
     const isSuperAdmin = req.adminAccess?.isSuperAdmin === true;
-    if (!actorId && !isSuperAdmin) return res.json({ ok: true, data: [] });
+    const selectedActorId = isSuperAdmin ? String(req.query?.actor_id || '').trim() : currentActorId;
+    if (!selectedActorId && !isSuperAdmin) return res.json({ ok: true, data: [], actors: [] });
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const where = [
-        'created_at >= ?',
-        `(path LIKE '%/ledger/grant-batch%' OR path LIKE '%/redeem/deduct-batch%' OR path LIKE '%/redeem/confirm%' OR path LIKE '%/backup/export%' OR path LIKE '%/backup/import%' OR path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%' OR path LIKE '%/users/assign-role%' OR path LIKE '%/roles/%')`,
-      ];
+      const relevantSql = `(path LIKE '%/ledger/grant-batch%' OR path LIKE '%/redeem/deduct-batch%' OR path LIKE '%/redeem/confirm%' OR path LIKE '%/backup/export%' OR path LIKE '%/backup/import%' OR path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%' OR path LIKE '%/users/assign-role%' OR path LIKE '%/roles/%')`;
+      const where = ['a.created_at >= ?', relevantSql];
       const params = [minCreatedAt];
-      if (!isSuperAdmin) {
-        where.push('actor_id = ?');
-        params.push(actorId);
+      if (maxCreatedAt) {
+        where.push('a.created_at <= ?');
+        params.push(maxCreatedAt);
+      }
+      if (selectedActorId) {
+        where.push('a.actor_id = ?');
+        params.push(selectedActorId);
       }
       if (eventGroup) {
         const groupSql = {
-          grant: "path LIKE '%/ledger/grant-batch%'",
-          deduct: "path LIKE '%/redeem/deduct-batch%'",
-          redeem: "path LIKE '%/redeem/confirm%'",
-          backup: "(path LIKE '%/backup/export%' OR path LIKE '%/backup/import%')",
-          role: "(path LIKE '%/roles/%' OR path LIKE '%/users/assign-role%')",
-          danger: "(path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%')",
+          grant: "a.path LIKE '%/ledger/grant-batch%'",
+          deduct: "a.path LIKE '%/redeem/deduct-batch%'",
+          redeem: "a.path LIKE '%/redeem/confirm%'",
+          backup: "(a.path LIKE '%/backup/export%' OR a.path LIKE '%/backup/import%')",
+          role: "(a.path LIKE '%/roles/%' OR a.path LIKE '%/users/assign-role%')",
+          danger: "(a.path LIKE '%/users/delete%' OR a.path LIKE '%/data/reset%' OR a.path LIKE '%/history/clear%')",
         }[eventGroup];
         if (groupSql) where.push(groupSql);
       }
       const rows = await db.all(
-        `SELECT id, event_type, actor_type, actor_id, actor_name, ip, method, path, status_code, message, payload, created_at
-         FROM audit_logs
+        `SELECT a.id, a.event_type, a.actor_type, a.actor_id, a.actor_name, COALESCE(u.name, '') AS actor_user_name,
+                a.ip, a.method, a.path, a.status_code, a.message, a.payload, a.created_at
+         FROM audit_logs a
+         LEFT JOIN users u ON u.userid = a.actor_id
          WHERE ${where.join(' AND ')}
-         ORDER BY id DESC
+         ORDER BY a.id DESC
          LIMIT ?`,
         [...params, limit],
       );
+      const actorRows = isSuperAdmin ? await db.all(
+        `SELECT a.actor_id, COALESCE(NULLIF(MAX(u.name), ''), NULLIF(MAX(a.actor_name), ''), a.actor_id) AS actor_name
+         FROM audit_logs a
+         LEFT JOIN users u ON u.userid = a.actor_id
+         WHERE a.created_at >= ? AND a.actor_type = 'admin' AND COALESCE(a.actor_id, '') <> '' AND ${relevantSql}
+         GROUP BY a.actor_id
+         ORDER BY actor_name ASC`,
+        [minCreatedAt],
+      ) : [];
       await enrichRedeemConfirmAuditRows(db, rows);
-      return res.json({ ok: true, days, limit, scope: isSuperAdmin ? 'all' : 'mine', data: (rows || []).map(serializeAuditRow) });
+      return res.json({
+        ok: true,
+        days,
+        limit,
+        scope: isSuperAdmin ? 'all' : 'mine',
+        actors: (actorRows || []).map((row) => ({ userid: row.actor_id, name: row.actor_name || row.actor_id })),
+        data: await serializeOperationRows(db, rows || []),
+      });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -2315,7 +2545,10 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
 
-      const deptIds = await collectAllDeptIds(cfg);
+      const departments = await listDingtalkDepartmentsTree(cfg);
+      const deptNameMap = new Map(departments.map((dept) => [String(dept.dept_id), String(dept.name || dept.dept_id)]));
+      deptNameMap.set('1', '根部门');
+      const deptIds = ['1', ...departments.map((dept) => String(dept.dept_id))];
       const users = new Map();
 
       let fetched = 0;
@@ -2334,10 +2567,19 @@ export function adminRouter() {
             if (!isActiveFlag(u?.active)) continue;
             activeCount += 1;
 
-            const name = u?.name ? String(u.name) : '';
+            const profile = normalizeDingtalkUserProfile(u, deptNameMap);
             const existing = users.get(userid);
-            if (!existing || (name && !existing.name)) {
-              users.set(userid, { userid, name });
+            if (!existing) {
+              users.set(userid, profile);
+            } else {
+              const deptSet = new Set([...(existing.dept_ids || []), ...(profile.dept_ids || [])]);
+              const dept_ids = [...deptSet];
+              users.set(userid, {
+                ...existing,
+                ...Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== '' && value !== null && value !== undefined)),
+                dept_ids,
+                dept_names: dept_ids.map((id) => deptNameMap.get(id) || '').filter(Boolean),
+              });
             }
           }
 
@@ -2348,6 +2590,40 @@ export function adminRouter() {
       await runInTransaction(db, async (tx) => {
         for (const u of users.values()) {
           await ensureAccount(tx, { userid: u.userid, name: u.name });
+          await tx.exec(
+            `INSERT INTO user_dingtalk_profiles(
+              userid, unionid, name, avatar, mobile, telephone, email, org_email, title, job_number, work_place, remark,
+              dept_ids, dept_names, extension, hired_date, active, is_admin, is_boss, leader_in_dept, exclusive_account, raw, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+            ON CONFLICT(userid) DO UPDATE SET
+              unionid = EXCLUDED.unionid,
+              name = EXCLUDED.name,
+              avatar = EXCLUDED.avatar,
+              mobile = EXCLUDED.mobile,
+              telephone = EXCLUDED.telephone,
+              email = EXCLUDED.email,
+              org_email = EXCLUDED.org_email,
+              title = EXCLUDED.title,
+              job_number = EXCLUDED.job_number,
+              work_place = EXCLUDED.work_place,
+              remark = EXCLUDED.remark,
+              dept_ids = EXCLUDED.dept_ids,
+              dept_names = EXCLUDED.dept_names,
+              extension = EXCLUDED.extension,
+              hired_date = EXCLUDED.hired_date,
+              active = EXCLUDED.active,
+              is_admin = EXCLUDED.is_admin,
+              is_boss = EXCLUDED.is_boss,
+              leader_in_dept = EXCLUDED.leader_in_dept,
+              exclusive_account = EXCLUDED.exclusive_account,
+              raw = EXCLUDED.raw,
+              updated_at = EXCLUDED.updated_at`,
+            [
+              u.userid, u.unionid, u.name, u.avatar, u.mobile, u.telephone, u.email, u.org_email, u.title, u.job_number, u.work_place, u.remark,
+              toJsonText(u.dept_ids), toJsonText(u.dept_names), toJsonText(u.extension), u.hired_date, u.active, u.is_admin, u.is_boss,
+              toJsonText(u.leader_in_dept), u.exclusive_account, toJsonText(u.raw),
+            ],
+          );
         }
       });
       if (users.size > 0) {
@@ -2464,7 +2740,7 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     const confirm = req.body?.confirm ? String(req.body.confirm).trim() : '';
     if (confirm !== 'RESET_ALL') {
-      return res.status(400).json({ error: 'missing confirm' });
+      return res.status(400).json({ error: '确认口令不正确，已取消' });
     }
 
     try {
@@ -2768,9 +3044,21 @@ export function adminRouter() {
 
   router.post('/settings/attendance-reward', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const data = await saveAttendanceRewardSettings(db, req.body || {});
+      const input = { ...(req.body || {}) };
+      if (String(input.departmentMode || '') === 'selected' && Array.isArray(input.departmentIds) && input.departmentIds.length) {
+        try {
+          const departments = await listDingtalkDepartmentsTree(cfg);
+          input.departmentExpandedIds = expandDepartmentIdsFromTree(departments, input.departmentIds);
+        } catch {
+          input.departmentExpandedIds = input.departmentIds;
+        }
+      } else {
+        input.departmentExpandedIds = [];
+      }
+      const data = await saveAttendanceRewardSettings(db, input);
       return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

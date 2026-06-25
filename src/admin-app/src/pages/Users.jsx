@@ -1,9 +1,66 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
+import { Alert, App, Avatar, Button, Card, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import { amountText, formatTs } from '../utils.js';
 import { hasPermission } from '../permissions.js';
+
+
+function yesNo(value) {
+  return Number(value) === 1 ? '是' : '否';
+}
+
+function listText(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join('、') || '-';
+  return value || '-';
+}
+
+function objectText(value) {
+  if (!value || typeof value !== 'object') return '-';
+  const entries = Object.entries(value);
+  if (!entries.length) return '-';
+  return entries.map(([key, val]) => `${key}：${typeof val === 'object' ? JSON.stringify(val) : String(val)}`).join('；');
+}
+
+function operationStatusTag(code) {
+  if (code === null || code === undefined || code === '' || Number(code) === 0) return <Tag>已记录</Tag>;
+  const n = Number(code);
+  if (n >= 200 && n < 300) return <Tag color="green">成功</Tag>;
+  if (n >= 400) return <Tag color="red">失败</Tag>;
+  return <Tag color="orange">需确认</Tag>;
+}
+
+function operationEventTag(value) {
+  const label = String(value || '').trim();
+  return <Tag color={label.includes('危险') || label.includes('删除') ? 'red' : 'blue'}>{label || '后台操作'}</Tag>;
+}
+
+function dingtalkItems(profile) {
+  if (!profile) return [];
+  return [
+    { key: 'avatar', label: '头像', children: profile.avatar ? <Avatar src={profile.avatar} size={48} /> : '-' },
+    { key: 'name', label: '钉钉姓名', children: profile.name || '-' },
+    { key: 'userid', label: 'Userid', children: profile.userid || '-' },
+    { key: 'unionid', label: 'UnionId', children: profile.unionid || '-' },
+    { key: 'dept', label: '所属部门', children: listText(profile.dept_names) },
+    { key: 'title', label: '职位', children: profile.title || '-' },
+    { key: 'job', label: '工号', children: profile.job_number || '-' },
+    { key: 'mobile', label: '手机', children: profile.mobile || '-' },
+    { key: 'telephone', label: '座机', children: profile.telephone || '-' },
+    { key: 'email', label: '邮箱', children: profile.email || '-' },
+    { key: 'org_email', label: '企业邮箱', children: profile.org_email || '-' },
+    { key: 'work_place', label: '办公地点', children: profile.work_place || '-' },
+    { key: 'hired_date', label: '入职时间', children: profile.hired_date ? formatTs(profile.hired_date) : '-' },
+    { key: 'active', label: '账号状态', children: Number(profile.active) === 1 ? <Tag color="green">在职启用</Tag> : <Tag>未启用</Tag> },
+    { key: 'is_admin', label: '钉钉管理员', children: yesNo(profile.is_admin) },
+    { key: 'is_boss', label: '主管', children: yesNo(profile.is_boss) },
+    { key: 'exclusive', label: '专属账号', children: yesNo(profile.exclusive_account) },
+    { key: 'leader', label: '部门负责人信息', children: objectText(profile.leader_in_dept) },
+    { key: 'extension', label: '扩展信息', children: objectText(profile.extension) },
+    { key: 'remark', label: '备注', children: profile.remark || '-' },
+    { key: 'updated', label: '最近同步', children: formatTs(profile.updated_at) },
+  ];
+}
 
 export default function Users({ me }) {
   const { message } = App.useApp();
@@ -19,6 +76,7 @@ export default function Users({ me }) {
   const [op, setOp] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState([]);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [roleTarget, setRoleTarget] = useState(null);
   const [roles, setRoles] = useState([]);
   const [form] = Form.useForm();
 
@@ -103,19 +161,27 @@ export default function Users({ me }) {
     if (detail?.user?.userid) await openDetail(detail.user.userid);
   };
 
-  const assignRole = async (record, roleId) => {
+  const roleTargets = roleTarget?.userid
+    ? [roleTarget]
+    : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
+
+  const assignRole = async (roleId) => {
     const role = roles.find((item) => String(item.id) === String(roleId));
     const roleName = role?.name || '无后台角色';
+    const targets = roleTargets.filter((user) => !Number(user.is_fixed_admin));
+    if (!targets.length) return message.warning('没有可修改角色的用户');
     Modal.confirm({
       title: '确认修改后台角色？',
-      content: `将把 ${record.name || record.userid} 的后台角色改为「${roleName}」，权限会立即生效。`,
+      content: `将把 ${targets.length} 个用户的后台角色改为「${roleName}」，权限会立即生效。`,
       okText: '确认修改',
       cancelText: '取消',
       onOk: async () => {
-        await api('/admin/users/assign-role', { method: 'POST', body: { userid: record.userid, roleId: roleId || null } });
+        await Promise.all(targets.map((user) => api('/admin/users/assign-role', { method: 'POST', body: { userid: user.userid, roleId: roleId || null } })));
         message.success('后台角色已更新');
+        setRoleTarget(null);
+        if (!roleTarget?.userid) clearSelected();
         await load();
-        if (detail?.user?.userid === record.userid) await openDetail(record.userid);
+        if (detail?.user?.userid) await openDetail(detail.user.userid);
       },
     });
   };
@@ -144,7 +210,7 @@ export default function Users({ me }) {
     { title: '姓名', dataIndex: 'name', render: (v, r) => <Button type="link" onClick={() => openDetail(r.userid)}>{v || '-'}</Button> },
     { title: 'Userid', dataIndex: 'userid', ellipsis: true },
     { title: '余额', dataIndex: 'balance', render: amountText, sorter: (a, b) => Number(a.balance) - Number(b.balance) },
-    { title: '后台角色', render: (_, r) => r.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (canAssignRole ? <Select size="small" value={r.role?.id || null} placeholder="无后台角色" style={{ width: 150 }} options={[{ value: null, label: '无后台角色' }, ...roles.map((role) => ({ value: role.id, label: role.name }))]} onChange={(v) => assignRole(r, v)} /> : (r.role?.name ? <Tag color="blue">{r.role.name}</Tag> : '-')) },
+    { title: '身份', render: (_, r) => r.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (r.role?.name ? <Tag color="blue">{r.role.name}</Tag> : <Tag>普通用户</Tag>) },
     { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
     { title: '操作', fixed: 'right', render: (_, r) => <Space>{canGrant && <Button onClick={() => { setOp({ type: 'grant', userid: r.userid }); form.resetFields(); }}>发币</Button>}{canDeduct && <Button onClick={() => { setOp({ type: 'deduct', userid: r.userid }); form.resetFields(); }}>减币</Button>}</Space> },
   ];
@@ -156,6 +222,7 @@ export default function Users({ me }) {
         {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
         {canGrant && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>}
         {canDeduct && <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>}
+        {canAssignRole && <Button disabled={!selected.length} onClick={() => setRoleTarget({})}>分配后台角色</Button>}
         {canDelete && <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>}
         <Button disabled={!selected.length} onClick={clearSelected}>清空选择</Button>
       </DataToolbar>
@@ -181,15 +248,19 @@ export default function Users({ me }) {
       />
       <Drawer title="用户账户详情" open={Boolean(detail)} onClose={() => setDetail(null)} width={860}>
         {detail && <Tabs items={[
-          { key: 'info', label: '账户信息', children: <Descriptions bordered column={2} items={[
-            { key: 'name', label: '姓名', children: detail.user?.name || '-' },
-            { key: 'userid', label: 'Userid', children: detail.user?.userid || '-' },
-            { key: 'balance', label: '余额', children: amountText(detail.account?.balance) },
-            { key: 'admin', label: '后台角色', children: detail.user?.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (detail.user?.role?.name ? <Tag color="blue">{detail.user.role.name}</Tag> : '无后台角色') },
-          ]} /> },
-          { key: 'ledger', label: '余额流水', children: <Table rowKey="id" size="small" dataSource={detail.ledger || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '金额', dataIndex: 'delta', render: amountText }, { title: '原因', dataIndex: 'reason' }, { title: '单号', dataIndex: 'ref_id' }]} /> },
+          { key: 'info', label: '账户信息', children: <Space direction="vertical" style={{ width: '100%' }}>
+            <Descriptions bordered column={2} items={[
+              { key: 'name', label: '姓名', children: detail.user?.name || '-' },
+              { key: 'userid', label: 'Userid', children: detail.user?.userid || '-' },
+              { key: 'balance', label: '余额', children: amountText(detail.account?.balance) },
+              { key: 'admin', label: '后台角色', children: detail.user?.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (detail.user?.role?.name ? <Tag color="blue">{detail.user.role.name}</Tag> : '普通用户') },
+            ]} />
+            {canAssignRole && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
+          </Space> },
+          { key: 'dingtalk', label: '钉钉资料', children: detail.dingtalk ? <Descriptions bordered column={2} items={dingtalkItems(detail.dingtalk)} /> : <Empty description="暂无钉钉同步资料，请先同步通讯录" /> },
+          { key: 'ledger', label: '余额流水', children: <Table rowKey="id" size="small" dataSource={detail.ledger || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '金额', dataIndex: 'delta', render: amountText }, { title: '原因', dataIndex: 'reason', ellipsis: true }]} /> },
           { key: 'orders', label: '订单记录', children: <Table rowKey="exchange_id" size="small" dataSource={detail.redeems || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '商品', dataIndex: 'product_name' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }, { title: '状态', render: (_, r) => r.fulfilled_at ? '已核销' : '未核销' }]} /> },
-          { key: 'ops', label: '最近操作', children: <Table rowKey="id" size="small" dataSource={detail.operations || []} pagination={false} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '操作', dataIndex: 'event_label' }, { title: '状态', dataIndex: 'status_code' }, { title: '说明', dataIndex: 'message', ellipsis: true }]} /> },
+          { key: 'ops', label: '最近操作', children: <Table rowKey="id" size="small" dataSource={detail.operations || []} pagination={false} locale={{ emptyText: '暂无后台操作记录' }} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '操作', dataIndex: 'event_label', render: operationEventTag }, { title: '结果', dataIndex: 'status_code', render: operationStatusTag }, { title: '说明', dataIndex: 'message', ellipsis: true }]} /> },
         ]} />}
       </Drawer>
       <Modal title={op?.type === 'grant' ? '发币' : '减币'} open={Boolean(op)} onCancel={() => setOp(null)} onOk={() => form.submit()} okText="确认" cancelText="取消">
@@ -198,6 +269,22 @@ export default function Users({ me }) {
           <Form.Item label="金额" name="amount" rules={[{ required: true, message: '请输入金额' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
           <Form.Item label="原因" name="reason"><Input placeholder={op?.type === 'grant' ? '后台发币' : '后台减币'} /></Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title="分配后台角色"
+        open={Boolean(roleTarget)}
+        onCancel={() => setRoleTarget(null)}
+        footer={null}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Alert type="info" showIcon message={`将修改 ${roleTargets.length} 个用户的后台角色`} description={<div className="batch-recipient-list">{roleTargets.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} />
+          <Select
+            placeholder="选择后台角色"
+            style={{ width: '100%' }}
+            options={[{ value: null, label: '普通用户：无后台角色' }, ...roles.map((role) => ({ value: role.id, label: role.name }))]}
+            onChange={assignRole}
+          />
+        </Space>
       </Modal>
       <Modal
         title="确认删除用户？"

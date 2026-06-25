@@ -207,6 +207,34 @@ CREATE TABLE IF NOT EXISTS user_feedback_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_user_feedback_messages_feedback_created ON user_feedback_messages(feedback_id, created_at ASC, id ASC);
 
+CREATE TABLE IF NOT EXISTS user_dingtalk_profiles (
+  userid TEXT PRIMARY KEY,
+  unionid TEXT,
+  name TEXT,
+  avatar TEXT,
+  mobile TEXT,
+  telephone TEXT,
+  email TEXT,
+  org_email TEXT,
+  title TEXT,
+  job_number TEXT,
+  work_place TEXT,
+  remark TEXT,
+  dept_ids TEXT,
+  dept_names TEXT,
+  extension TEXT,
+  hired_date BIGINT,
+  active INTEGER,
+  is_admin INTEGER,
+  is_boss INTEGER,
+  leader_in_dept TEXT,
+  exclusive_account INTEGER,
+  raw TEXT,
+  updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_dingtalk_profiles_updated ON user_dingtalk_profiles(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS admin_backup_history (
   id BIGSERIAL PRIMARY KEY,
   action TEXT NOT NULL,
@@ -603,6 +631,11 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '[]'");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_builtin INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_enabled INTEGER NOT NULL DEFAULT 1");
+  await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS telephone TEXT");
+  await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS org_email TEXT");
+  await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS extension TEXT");
+  await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS hired_date BIGINT");
+  await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS leader_in_dept TEXT");
   await ensureAdminRoles(db);
   await db.exec(`INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
     SELECT f.id, 'user', f.userid, COALESCE(f.name, ''), f.content, f.created_at

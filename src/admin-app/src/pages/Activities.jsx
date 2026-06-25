@@ -13,12 +13,13 @@ const attendanceStatusText = { rewarded: '已奖励', skipped: '已跳过', erro
 const attendanceSourceText = { stream: '实时推送', reconcile: '自动补发/对账', audit_seed: '历史补录', historical: '历史记录' };
 const attendanceCheckTypeText = { on_duty: '上班打卡', off_duty: '下班打卡' };
 const attendanceReasonText = {
-  skipped_off_duty: '下班打卡按规则不发放',
+  skipped_off_duty: '下班打卡已按规则忽略',
   skip_not_on_duty: '非上班打卡按规则不发放',
   not_on_duty: '非上班打卡按规则不发放',
   skipped_late: '迟到打卡不发放',
   late: '迟到打卡不发放',
   duplicate: '当天已发放，重复打卡不再发放',
+  department_not_allowed: '未命中奖励部门',
   department_not_matched: '不在适用部门范围内',
 };
 
@@ -96,7 +97,7 @@ function attendanceNote(row) {
   const raw = row?.error_message || row?.skip_reason || row?.reward_reason || '';
   const key = String(raw || '').trim();
   if (attendanceReasonText[key]) return attendanceReasonText[key];
-  if (row?.check_type === 'off_duty' && row?.status === 'skipped') return '下班打卡按规则不发放';
+  if (row?.check_type === 'off_duty' && row?.status === 'skipped') return '下班打卡已按规则忽略';
   return key || '-';
 }
 

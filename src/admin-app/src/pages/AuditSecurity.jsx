@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Checkbox, Drawer, Form, Input, InputNumber, Modal, Space, Table, Tabs, Tag } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Drawer, Form, Input, InputNumber, Modal, Space, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import { formatTs } from '../utils.js';
 
 function statusTag(code) {
-  const n = Number(code || 0);
+  if (code === null || code === undefined || code === '' || Number(code) === 0) return <Tag>已记录</Tag>;
+  const n = Number(code);
   if (n >= 200 && n < 300) return <Tag color="green">成功</Tag>;
   if (n >= 400) return <Tag color="red">失败</Tag>;
-  return <Tag>未知</Tag>;
+  return <Tag color="orange">需确认</Tag>;
 }
 
 function AuditLogs() {
@@ -30,7 +31,7 @@ function AuditLogs() {
     <Table rowKey="id" loading={loading} dataSource={rows} scroll={{ x: 1180 }} columns={[
       { title: '时间', dataIndex: 'created_at', render: formatTs, width: 180 },
       { title: '事件', dataIndex: 'event_label', render: (v, r) => <Tag color={r.event_group === 'danger' ? 'red' : undefined}>{v || r.event_type}</Tag>, width: 150 },
-      { title: '操作者', render: (_, r) => r.actor_name || r.actor_id || r.actor_type, width: 180 },
+      { title: '操作者', render: (_, r) => r.actor_display_name || r.actor_name || r.actor_id || r.actor_type, width: 180 },
       { title: '路径', dataIndex: 'path', ellipsis: true },
       { title: '状态', dataIndex: 'status_code', render: statusTag, width: 100 },
       { title: '说明', dataIndex: 'message', ellipsis: true },
@@ -98,18 +99,61 @@ function RoleManagement() {
 
 function DangerZone() {
   const { message } = App.useApp();
-  const resetAll = () => Modal.confirm({
-    title: '危险区：清空全部用户业务数据',
-    content: '将删除所有积分流水和兑换订单，并把余额重置为 0。请输入 RESET_ALL 后才允许继续。',
-    okButtonProps: { danger: true }, okText: '确认执行', cancelText: '取消',
-    onOk: async () => {
-      const confirm = window.prompt('请输入确认口令：RESET_ALL');
-      if (confirm !== 'RESET_ALL') return message.warning('口令不正确，已取消');
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [form] = Form.useForm();
+
+  const submit = async (values) => {
+    if (values.confirm !== 'RESET_ALL') return message.warning('确认口令不正确，已取消');
+    setLoading(true);
+    try {
       await api('/admin/data/reset-all', { method: 'POST', body: { confirm: 'RESET_ALL' } });
-      message.success('已清空全部业务数据');
-    },
-  });
-  return <Card title="危险区" className="danger-card"><Button danger onClick={resetAll}>清空全部用户业务数据</Button></Card>;
+      message.success('积分与订单业务数据已清空');
+      setOpen(false);
+      form.resetFields();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <Card title="危险操作" className="danger-card">
+    <Space direction="vertical" style={{ width: '100%' }} size={12}>
+      <Alert
+        type="warning"
+        showIcon
+        message="仅清空积分与订单业务数据"
+        description="会删除余额流水、兑换订单、公益助力记录，并把用户余额重置为 0；不会删除用户、商品、CDK、内容、系统配置和角色权限。"
+      />
+      <Button danger onClick={() => setOpen(true)}>清空积分与订单业务数据</Button>
+    </Space>
+    <Modal
+      title="确认清空积分与订单业务数据"
+      open={open}
+      onCancel={() => setOpen(false)}
+      onOk={() => form.submit()}
+      confirmLoading={loading}
+      okText="确认清空"
+      okButtonProps={{ danger: true }}
+      cancelText="取消"
+    >
+      <Alert
+        type="error"
+        showIcon
+        message="此操作不可撤销"
+        description="执行后，所有用户余额流水、兑换订单、公益助力记录会被删除，所有用户余额会重置为 0。"
+        style={{ marginBottom: 12 }}
+      />
+      <Form form={form} layout="vertical" onFinish={submit}>
+        <Form.Item
+          name="confirm"
+          label="输入确认口令 RESET_ALL"
+          rules={[{ required: true, message: '请输入确认口令' }]}
+        >
+          <Input placeholder="RESET_ALL" autoComplete="off" />
+        </Form.Item>
+      </Form>
+    </Modal>
+  </Card>;
 }
 
 export default function AuditSecurity({ me }) {
