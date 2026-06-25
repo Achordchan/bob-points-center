@@ -1893,15 +1893,19 @@ export function adminRouter() {
     const eventGroup = String(req.query?.event_group || '').trim();
     const minCreatedAt = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
     const actorId = String(req.adminSession?.userid || '').trim();
-    if (!actorId) return res.json({ ok: true, data: [] });
+    const isSuperAdmin = req.adminAccess?.isSuperAdmin === true;
+    if (!actorId && !isSuperAdmin) return res.json({ ok: true, data: [] });
     try {
       res.setHeader('Cache-Control', 'no-store');
       const where = [
         'created_at >= ?',
-        'actor_id = ?',
         `(path LIKE '%/ledger/grant-batch%' OR path LIKE '%/redeem/deduct-batch%' OR path LIKE '%/redeem/confirm%' OR path LIKE '%/backup/export%' OR path LIKE '%/backup/import%' OR path LIKE '%/users/delete%' OR path LIKE '%/data/reset%' OR path LIKE '%/history/clear%' OR path LIKE '%/users/assign-role%' OR path LIKE '%/roles/%')`,
       ];
-      const params = [minCreatedAt, actorId];
+      const params = [minCreatedAt];
+      if (!isSuperAdmin) {
+        where.push('actor_id = ?');
+        params.push(actorId);
+      }
       if (eventGroup) {
         const groupSql = {
           grant: "path LIKE '%/ledger/grant-batch%'",
@@ -1922,7 +1926,7 @@ export function adminRouter() {
         [...params, limit],
       );
       await enrichRedeemConfirmAuditRows(db, rows);
-      return res.json({ ok: true, days, limit, data: (rows || []).map(serializeAuditRow) });
+      return res.json({ ok: true, days, limit, scope: isSuperAdmin ? 'all' : 'mine', data: (rows || []).map(serializeAuditRow) });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

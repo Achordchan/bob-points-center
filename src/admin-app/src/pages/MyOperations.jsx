@@ -33,11 +33,12 @@ function payloadSummary(payload) {
   return parts.join('，') || '-';
 }
 
-export default function MyOperations() {
+export default function MyOperations({ me }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState([]);
   const [eventGroup, setEventGroup] = useState('');
   const [loading, setLoading] = useState(false);
+  const isSuperAdmin = me?.isSuperAdmin === true;
 
   const load = async (nextGroup = eventGroup) => {
     setLoading(true);
@@ -53,20 +54,23 @@ export default function MyOperations() {
 
   useEffect(() => { load().catch(() => null); }, []);
 
-  return <Card title="我的操作记录" extra={<Space><Select value={eventGroup} onChange={(v) => { setEventGroup(v); load(v); }} options={eventOptions} style={{ width: 160 }} /></Space>}>
+  const columns = [
+    { title: '时间', dataIndex: 'created_at', render: formatTs, width: 180 },
+    ...(isSuperAdmin ? [{ title: '操作者', render: (_, r) => r.actor_name ? `${r.actor_name}（${r.actor_id || '-'}）` : (r.actor_id || '-'), width: 220 }] : []),
+    { title: '操作', dataIndex: 'event_label', render: (v, r) => <Tag color={r.event_group === 'danger' ? 'red' : 'blue'}>{v || '后台操作'}</Tag>, width: 150 },
+    { title: '结果', dataIndex: 'status_code', render: statusTag, width: 100 },
+    { title: '内容', render: (_, r) => payloadSummary(r.payload), ellipsis: true },
+    { title: '路径', dataIndex: 'path', ellipsis: true },
+  ];
+
+  return <Card title={isSuperAdmin ? '全部管理员操作记录' : '我的操作记录'} extra={<Space><Select value={eventGroup} onChange={(v) => { setEventGroup(v); load(v); }} options={eventOptions} style={{ width: 160 }} /></Space>}>
     <Table
       rowKey="id"
       loading={loading}
       dataSource={rows}
       pagination={{ pageSize: 20, showSizeChanger: true }}
-      columns={[
-        { title: '时间', dataIndex: 'created_at', render: formatTs, width: 180 },
-        { title: '操作', dataIndex: 'event_label', render: (v, r) => <Tag color={r.event_group === 'danger' ? 'red' : 'blue'}>{v || '后台操作'}</Tag>, width: 150 },
-        { title: '结果', dataIndex: 'status_code', render: statusTag, width: 100 },
-        { title: '内容', render: (_, r) => payloadSummary(r.payload), ellipsis: true },
-        { title: '路径', dataIndex: 'path', ellipsis: true },
-      ]}
-      scroll={{ x: 980 }}
+      columns={columns}
+      scroll={{ x: isSuperAdmin ? 1180 : 980 }}
     />
   </Card>;
 }

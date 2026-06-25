@@ -47,13 +47,13 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDi
       </Sider>
       <Layout>
         <Header className="topbar">
-          <Typography.Title level={4} className="page-title">{activeKey === 'myOperations' ? '我的操作记录' : selected?.label || '首页概览'}</Typography.Title>
+          <Typography.Title level={4} className="page-title">{activeKey === 'myOperations' ? (user?.isSuperAdmin ? '管理员操作记录' : '我的操作记录') : selected?.label || '首页概览'}</Typography.Title>
           <Space wrap>
             <Button className="dingtalk-pill" type={connected ? 'primary' : 'default'} ghost={connected} onClick={onOpenDingtalk}>
               钉钉：{connected ? org : '未连接'}
             </Button>
             <Button href="/docs" target="_blank">API 文档</Button>
-            <Dropdown menu={{ items: [{ key: 'my-operations', label: '我的操作记录', onClick: () => onChange('myOperations') }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
+            <Dropdown menu={{ items: [{ key: 'my-operations', label: user?.isSuperAdmin ? '管理员操作记录' : '我的操作记录', onClick: () => onChange('myOperations') }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
               <Button icon={<SettingOutlined />}>{user?.name || '管理员'}</Button>
             </Dropdown>
           </Space>
