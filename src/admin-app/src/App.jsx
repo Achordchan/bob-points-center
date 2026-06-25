@@ -79,7 +79,7 @@ export default function AdminApp() {
   };
 
   const Page = pages[activeKey] || pages.dashboard;
-  const common = { onOpenDingtalk: () => setModalOpen(true), dingtalk, reloadDingtalk: loadDingtalk };
+  const common = { onOpenDingtalk: () => setModalOpen(true), dingtalk, reloadDingtalk: loadDingtalk, onNavigate: setActiveKey };
 
   return (
     <>
