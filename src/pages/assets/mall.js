@@ -339,6 +339,48 @@
     document.getElementById(id).textContent = text;
   }
 
+  function stripHtml(value) {
+    const box = document.createElement('div');
+    box.innerHTML = String(value || '');
+    return (box.textContent || box.innerText || '').trim();
+  }
+
+  function sanitizeRichHtml(value) {
+    const template = document.createElement('template');
+    template.innerHTML = String(value || '');
+    const allowedTags = new Set(['A', 'B', 'BR', 'DIV', 'EM', 'I', 'IMG', 'LI', 'OL', 'P', 'SPAN', 'STRONG', 'U', 'UL']);
+    const allowedAttrs = new Set(['href', 'src', 'alt', 'title', 'target', 'rel']);
+    template.content.querySelectorAll('*').forEach((node) => {
+      if (!allowedTags.has(node.tagName)) {
+        node.replaceWith(document.createTextNode(node.textContent || ''));
+        return;
+      }
+      Array.from(node.attributes).forEach((attr) => {
+        const name = attr.name.toLowerCase();
+        const valueText = String(attr.value || '').trim();
+        if (!allowedAttrs.has(name) || name.startsWith('on')) {
+          node.removeAttribute(attr.name);
+          return;
+        }
+        if ((name === 'href' || name === 'src') && !/^(https?:|data:image\/)/i.test(valueText)) {
+          node.removeAttribute(attr.name);
+        }
+      });
+      if (node.tagName === 'A') {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
+    return template.innerHTML;
+  }
+
+  function setRichHtml(id, html, fallback = '-') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const safe = sanitizeRichHtml(html);
+    el.innerHTML = safe || escapeHtml(fallback);
+  }
+
   function renderUserHint() {
     const safeName = state.sessionUserName ? String(state.sessionUserName).trim() : '';
     const base = safeName ? `你好，${safeName}` : '你好';
@@ -1099,7 +1141,7 @@
     rail.innerHTML = visibleRows.map((row) => {
       const total = Number(row?.total_bob_amount || 0);
       const target = Number(row?.target_bob_amount || 0);
-      const summary = row?.summary ? String(row.summary) : '';
+      const summary = row?.summary ? stripHtml(row.summary) : '';
       const imageUrl = row?.cover_image_url ? String(row.cover_image_url) : '';
       const statusText = row?.status === 'paused' ? '暂停助力' : (row?.goal_reached ? '已达标' : '进行中');
       return (
@@ -1127,18 +1169,18 @@
     if (image) image.src = imageUrl;
     setHidden('charityHeroMediaWrap', !imageUrl);
     setText('charityHeroTitle', row?.project_name ? String(row.project_name) : '-');
-    setText('charityHeroSummary', row?.summary ? String(row.summary) : '-');
+    setRichHtml('charityHeroSummary', row?.summary ? String(row.summary) : '', '-');
     setText('charityTargetAmount', `${Number(row?.target_bob_amount || 0)} BOB 币`);
     setText('charityTotalAmount', `${Number(row?.total_bob_amount || 0)} BOB 币`);
     setText('charityDonorCount', `${Number(row?.donor_count || 0)} 人`);
     setText('charityContributionCount', `${Number(row?.contribution_count || 0)} 次`);
-    setText('charityRulesText', row?.rules_text ? String(row.rules_text) : '暂无规则');
+    setRichHtml('charityRulesText', row?.rules_text ? String(row.rules_text) : '', '暂无规则');
     setText('charityProgressText', `当前进度 ${Number(row?.progress_percent || 0)}%`);
     const progress = document.getElementById('charityProgressValue');
     if (progress) progress.style.width = `${Math.max(0, Math.min(100, Number(row?.progress_percent || 0)))}%`;
     const statusRow = document.getElementById('charityStatusRow');
     if (statusRow) {
-      statusRow.innerHTML = row?.execution_note ? `<span class="pill">${escapeHtml(String(row.execution_note))}</span>` : '';
+      statusRow.innerHTML = row?.execution_note ? `<div class="charityExecutionNote">${sanitizeRichHtml(row.execution_note)}</div>` : '';
       statusRow.classList.toggle('hidden', !row?.execution_note);
     }
     const amountSelect = document.getElementById('charityAmountSelect');

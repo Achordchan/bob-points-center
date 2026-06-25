@@ -13,15 +13,17 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
 .danger-card { border-color: rgba(255, 77, 79, .35); background: #fffafa; }
 .ant-table-wrapper { width: 100%; }
 .page-loading { min-height: 220px; display: grid; place-items: center; color: rgba(15, 23, 42, .58); }
+.readonly-input { color: rgba(15, 23, 42, .72) !important; background: #f8fafc !important; cursor: default; }
+.template-variable-help { padding: 10px 12px; border: 1px solid rgba(15, 23, 42, .08); border-radius: 10px; background: #f8fafc; }
+.template-variable-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 8px; }
+.template-variable-item { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: rgba(15, 23, 42, .72); }
+.template-variable-item code { flex: none; padding: 2px 6px; border-radius: 6px; background: #fff; color: #1677ff; font-size: 12px; }
+.template-variable-item span { min-width: 0; }
 @media (max-width: 900px) {
   .topbar { align-items: flex-start; flex-direction: column; }
   .content-wrap { padding: 12px; }
 }
 .dashboard-progress { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(15, 23, 42, .08); }
-.health-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(15, 23, 42, .06); }
-.health-row:last-child { border-bottom: 0; }
-@media (max-width: 640px) { .health-row { align-items: flex-start; flex-direction: column; } }
-
 .dashboard-main-col { display: flex; }
 .dashboard-equal-card { flex: 1; width: 100%; }
 .dashboard-equal-card > .ant-card-body { height: calc(100% - 56px); }
@@ -67,3 +69,15 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
 .product-limit-round-title { font-weight: 600; color: rgba(15, 23, 42, .88); }
 .product-limit-round-text { margin-top: 2px; color: rgba(15, 23, 42, .58); }
 @media (max-width: 640px) { .product-limit-round-panel { align-items: stretch; flex-direction: column; } }
+@media (max-width: 640px) { .template-variable-grid { grid-template-columns: 1fr; } }
+
+.rich-text-editor { border: 1px solid rgba(15, 23, 42, .12); border-radius: 12px; overflow: hidden; background: #fff; }
+.rich-text-toolbar { width: 100%; padding: 10px; border-bottom: 1px solid rgba(15, 23, 42, .08); background: #f8fafc; }
+.rich-text-content { padding: 12px; outline: none; line-height: 1.8; word-break: break-word; }
+.rich-text-content:focus { box-shadow: inset 0 0 0 2px rgba(22, 119, 255, .18); }
+.rich-text-content:empty::before { content: "请输入内容"; color: rgba(15, 23, 42, .36); }
+.rich-text-content img { max-width: 100%; height: auto; border-radius: 10px; display: block; margin: 8px 0; }
+.batch-recipient-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; max-height: 140px; overflow: auto; }
+
+.dashboard-link-card { cursor: pointer; }
+.dashboard-link-card .ant-statistic-title a { font-weight: 600; }

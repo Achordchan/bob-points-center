@@ -2773,3 +2773,37 @@ body.modalOpenFixed {
     padding: 10px 10px;
   }
 }
+
+.charityHeroSummary img,
+.charityRulesText img,
+.charityExecutionNote img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 14px;
+  display: block;
+  margin: 10px 0;
+}
+
+.charityHeroSummary a,
+.charityRulesText a,
+.charityExecutionNote a {
+  color: #1677ff;
+  text-decoration: none;
+}
+
+.charityHeroSummary p,
+.charityRulesText p,
+.charityExecutionNote p {
+  margin: 0 0 8px;
+}
+
+.charityExecutionNote {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.72);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  color: rgba(15, 23, 42, 0.78);
+  line-height: 1.8;
+  word-break: break-word;
+}

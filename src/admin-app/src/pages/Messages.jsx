@@ -29,6 +29,38 @@ const colorOptions = [
   { value: 'red', label: '红色' },
 ];
 
+const variableDescriptions = {
+  name: '接收消息的用户姓名',
+  reason: '发币或减币的业务原因',
+  amount: '本次变动的 BOB 币数量',
+  balance: '操作完成后的账户余额',
+  exchange_id: '订单或核销单号',
+  product_name: '商品名称',
+  to_name: '转账接收人姓名',
+  from_name: '转账发起人姓名',
+  activity_id: '红包活动编号',
+  project_name: '公益项目名称',
+  title: '群消息标题',
+  content: '群消息正文',
+  open_time: '商城开启时间',
+  close_time: '商城关闭时间',
+  stock: '商品当前库存',
+};
+
+function renderVariableHelp(vars) {
+  const keys = Array.from(String(vars || '').matchAll(/\{\{([^}]+)\}\}/g)).map((m) => m[1]).filter(Boolean);
+  if (!keys.length) return null;
+  return <div className="template-variable-help">
+    <Typography.Text type="secondary">变量说明</Typography.Text>
+    <div className="template-variable-grid">
+      {keys.map((key) => <div className="template-variable-item" key={key}>
+        <code>{`{{${key}}}`}</code>
+        <span>{variableDescriptions[key] || '模板变量'}</span>
+      </div>)}
+    </div>
+  </div>;
+}
+
 function Toolbar({ onRefresh, onReset, onSave }) {
   return <Space className="table-toolbar" wrap>
     <Button onClick={onRefresh}>刷新</Button>
@@ -42,7 +74,7 @@ function TemplateFields({ namePrefix, vars, withButtons = false }) {
     <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch /></Form.Item>
     <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
     <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} /></Form.Item>
-    <Typography.Text type="secondary">可用变量：{vars}</Typography.Text>
+    {renderVariableHelp(vars)}
     {withButtons && <>
       <Divider style={{ margin: '4px 0' }} />
       <Form.List name={[...namePrefix, 'buttons']}>
@@ -66,12 +98,14 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [channelEditing, setChannelEditing] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await api(loadPath);
       form.setFieldsValue(data.data || {});
+      setChannelEditing(false);
     } finally {
       setLoading(false);
     }
@@ -83,6 +117,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     const payload = await form.validateFields();
     await api(savePath, { method: 'POST', body: payload });
     message.success(`${title}已保存`);
+    setChannelEditing(false);
     load();
   };
 
@@ -102,13 +137,18 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     <Toolbar onRefresh={load} onReset={reset} onSave={save} />
     <Form form={form} layout="vertical">
       <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch /></Form.Item>
-      {withChannel && <Card size="small" title="群发送配置" style={{ marginBottom: 12 }}>
-        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input /></Form.Item>
-        <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input /></Form.Item>
-        <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input /></Form.Item>
-        <Form.Item label="指定接收人" name={['channel', 'recipients']}><Input.TextArea rows={3} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
+      {withChannel && <Card
+        size="small"
+        title="群发送配置"
+        extra={<Button onClick={() => setChannelEditing((v) => !v)}>{channelEditing ? '锁定配置' : '编辑配置'}</Button>}
+        style={{ marginBottom: 12 }}
+      >
+        <Form.Item label="群会话 ID" name={['channel', 'openConversationId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+        <Form.Item label="卡片模板 ID" name={['channel', 'cardTemplateId']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+        <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
+        <Form.Item label="指定接收人" name={['channel', 'recipients']}><Input.TextArea readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} rows={3} placeholder="多个 Userid 可用换行或逗号分隔" /></Form.Item>
       </Card>}
-      <Collapse defaultActiveKey={[templates[0]?.key]} items={items} />
+      <Collapse defaultActiveKey={[]} items={items} />
     </Form>
   </Card>;
 }

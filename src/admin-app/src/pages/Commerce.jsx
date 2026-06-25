@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { App, Button, Card, Drawer, Form, Image, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag } from 'antd';
 import { api } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
@@ -10,6 +10,11 @@ function Products() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [keyword, setKeyword] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [stockFilter, setStockFilter] = useState('all');
+  const [limitFilter, setLimitFilter] = useState('all');
   const [form] = Form.useForm();
   const load = async () => {
     setLoading(true);
@@ -22,6 +27,22 @@ function Products() {
     }
   };
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
+  const filteredRows = useMemo(() => {
+    const q = String(keyword || '').trim().toLowerCase();
+    return rows.filter((row) => {
+      const text = `${row.product_id || ''} ${row.product_name || ''}`.toLowerCase();
+      if (q && !text.includes(q)) return false;
+      if (statusFilter !== 'all' && row.status !== statusFilter) return false;
+      const stock = row.stock;
+      const stockNumber = Number(stock);
+      if (stockFilter === 'limited' && (stock === null || stock === undefined || stock === '')) return false;
+      if (stockFilter === 'empty' && !(stock !== null && stock !== undefined && stock !== '' && stockNumber <= 0)) return false;
+      if (stockFilter === 'available' && !(stock === null || stock === undefined || stock === '' || stockNumber > 0)) return false;
+      if (limitFilter === 'limited' && Number(row.limit_per_user || 0) <= 0) return false;
+      if (limitFilter === 'unlimited' && Number(row.limit_per_user || 0) > 0) return false;
+      return true;
+    });
+  }, [keyword, limitFilter, rows, statusFilter, stockFilter]);
   const watchedProductId = Form.useWatch('product_id', form);
   const watchedLimit = Form.useWatch('limit_per_user', form);
   const savedEditing = rows.find((row) => String(row.product_id) === String(watchedProductId || editing?.product_id || ''));
@@ -77,9 +98,59 @@ function Products() {
     });
   };
   const remove = (row) => Modal.confirm({ title: '危险区：删除商品', content: `确认删除 ${row.product_name}？`, okButtonProps: { danger: true }, onOk: async () => { await api('/admin/mall/self/products/delete', { method: 'POST', body: { product_id: row.product_id } }); message.success('已删除'); load(); } });
+  const selectedRows = rows.filter((row) => selected.includes(row.product_id));
+  const batchSetStatus = (status) => {
+    if (!selectedRows.length) return;
+    Modal.confirm({
+      title: status === 'on' ? '批量上架商品' : '批量下架商品',
+      content: `将处理 ${selectedRows.length} 个商品。`,
+      okText: '确认',
+      cancelText: '取消',
+      onOk: async () => {
+        await Promise.all(selectedRows.map((row) => api('/admin/mall/self/products', {
+          method: 'POST',
+          body: { ...row, status, cdk_enabled: Number(row.cdk_enabled) === 1 ? 1 : 0 },
+        })));
+        message.success(status === 'on' ? '已批量上架' : '已批量下架');
+        setSelected([]);
+        await load();
+      },
+    });
+  };
+  const batchRemove = () => {
+    if (!selectedRows.length) return;
+    Modal.confirm({
+      title: '危险区：批量删除商品',
+      content: `确认删除 ${selectedRows.length} 个商品？此操作不可撤销。`,
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        await Promise.all(selectedRows.map((row) => api('/admin/mall/self/products/delete', { method: 'POST', body: { product_id: row.product_id } })));
+        message.success('已批量删除');
+        setSelected([]);
+        await load();
+      },
+    });
+  };
   return <>
-    <DataToolbar onRefresh={load} onCreate={() => open({ product_id: `P${Date.now().toString(36).toUpperCase()}`, status: 'on', cdk_enabled: false })} createText="新增商品" />
-    <Table rowKey="product_id" loading={loading} dataSource={rows} scroll={{ x: 1080 }} columns={[
+    <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={load} onCreate={() => open({ product_id: `P${Date.now().toString(36).toUpperCase()}`, status: 'on', cdk_enabled: false })} createText="新增商品" searchPlaceholder="搜索商品名称 / ID">
+      <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 120 }} options={[{ value: 'all', label: '全部状态' }, { value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} />
+      <Select value={stockFilter} onChange={setStockFilter} style={{ width: 130 }} options={[{ value: 'all', label: '全部库存' }, { value: 'available', label: '可售库存' }, { value: 'empty', label: '库存为 0' }, { value: 'limited', label: '限库存' }]} />
+      <Select value={limitFilter} onChange={setLimitFilter} style={{ width: 130 }} options={[{ value: 'all', label: '全部限购' }, { value: 'limited', label: '已限购' }, { value: 'unlimited', label: '不限购' }]} />
+      {selected.length > 0 && <Tag color="blue">已选 {selected.length} 个</Tag>}
+      <Button disabled={!selected.length} onClick={() => batchSetStatus('on')}>批量上架</Button>
+      <Button disabled={!selected.length} onClick={() => batchSetStatus('off')}>批量下架</Button>
+      <Button danger disabled={!selected.length} onClick={batchRemove}>批量删除</Button>
+      <Button disabled={!selected.length} onClick={() => setSelected([])}>清空选择</Button>
+    </DataToolbar>
+    <Table
+      rowKey="product_id"
+      loading={loading}
+      dataSource={filteredRows}
+      rowSelection={{ selectedRowKeys: selected, onChange: setSelected, preserveSelectedRowKeys: true }}
+      scroll={{ x: 1080 }}
+      columns={[
       { title: '图片', dataIndex: 'image_url', width: 86, render: (url) => url ? <Image src={url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 8 }} /> : '-' },
       { title: '商品ID', dataIndex: 'product_id', ellipsis: true },
       { title: '名称', dataIndex: 'product_name' },
@@ -88,10 +159,11 @@ function Products() {
       { title: '限购', render: (_, r) => Number(r.limit_per_user) > 0 ? `每人 ${Number(r.limit_per_user)} · 第 ${Math.max(1, Number(r.limit_round || 1))} 轮` : '不限' },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'on' ? 'success' : 'default'}>{v === 'on' ? '上架' : '下架'}</Tag> },
       { title: '操作', fixed: 'right', render: (_, r) => <Space><Button onClick={() => open(r)}>编辑</Button><Button danger onClick={() => remove(r)}>删除</Button></Space> },
-    ]} />
+    ]}
+    />
     <Drawer title={savedEditing ? "商品编辑" : "新增商品"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={620} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
       <Form form={form} layout="vertical" onFinish={save}>
-        <Form.Item label="商品ID" name="product_id" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item label="商品ID" name="product_id" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
         <Form.Item label="名称" name="product_name" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item label="金额" name="bob_amount" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
         <Form.Item label="库存" name="stock"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="留空为不限" /></Form.Item>
@@ -118,6 +190,7 @@ function Cdks() {
   const [rows, setRows] = useState([]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [generated, setGenerated] = useState(null);
   const [form] = Form.useForm();
   const load = async () => {
     setLoading(true);
@@ -135,13 +208,36 @@ function Cdks() {
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const generate = async (values) => {
     const data = await api('/admin/cdks/generate', { method: 'POST', body: values });
-    message.success('CDK 已生成');
-    if (data.codes?.length) downloadText(`cdk-${data.batch_id || Date.now()}.txt`, data.codes.join('\n'));
+    const codes = Array.isArray(data.codes) ? data.codes : [];
+    const batchId = data.batch_id || Date.now();
+    setGenerated({ batchId, codes, createdAt: Date.now() });
+    message.success(`已生成 ${codes.length} 个 CDK`);
+    if (codes.length) downloadText(`cdk-${batchId}.txt`, codes.join('\n'));
     load();
+  };
+  const copyGenerated = async () => {
+    if (!generated?.codes?.length) return;
+    try {
+      await navigator.clipboard.writeText(generated.codes.join('\n'));
+      message.success('CDK 已复制');
+    } catch {
+      message.warning('复制失败，请手动选中文本复制');
+    }
+  };
+  const downloadGenerated = () => {
+    if (!generated?.codes?.length) return;
+    downloadText(`cdk-${generated.batchId}.txt`, generated.codes.join('\n'));
   };
   const remove = (id) => Modal.confirm({ title: '危险区：删除 CDK', content: '仅未兑换 CDK 可删除。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/cdks/delete', { method: 'POST', body: { ids: [id] } }); message.success('已删除'); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item><Button type="primary" htmlType="submit">生成并导出</Button><Button onClick={load}>刷新</Button></Form></Card>
+    {generated?.codes?.length > 0 && <Card
+      size="small"
+      title={`本次生成：${generated.codes.length} 个 CDK`}
+      extra={<Space><Button onClick={copyGenerated}>复制全部</Button><Button onClick={downloadGenerated}>下载</Button><Button onClick={() => setGenerated(null)}>收起</Button></Space>}
+    >
+      <Input.TextArea value={generated.codes.join('\n')} rows={Math.min(8, Math.max(3, generated.codes.length))} readOnly />
+    </Card>}
     <Table rowKey="id" loading={loading} dataSource={rows} scroll={{ x: 1120 }} columns={[
       { title: '商品', dataIndex: 'product_name' }, { title: 'CDK', dataIndex: 'cdk_code', ellipsis: true },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'unused' ? 'success' : v === 'redeemed' ? 'red' : 'default'}>{v === 'unused' ? '未兑换' : v === 'redeemed' ? '已兑换' : v}</Tag> },

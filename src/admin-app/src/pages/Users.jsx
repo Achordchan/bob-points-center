@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Switch, Table, Tabs, Tag } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Switch, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import { amountText, formatTs } from '../utils.js';
@@ -12,6 +12,7 @@ export default function Users() {
   const [pageSize, setPageSize] = useState(30);
   const [keyword, setKeyword] = useState('');
   const [selected, setSelected] = useState([]);
+  const [selectedUsers, setSelectedUsers] = useState({});
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [op, setOp] = useState(null);
@@ -25,7 +26,15 @@ export default function Users() {
     setLoading(true);
     try {
       const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: nextPageSize, keyword: normalizeKeyword(nextKeyword) })}`);
-      setRows(data.data || []);
+      const nextRows = data.data || [];
+      setRows(nextRows);
+      setSelectedUsers((prev) => {
+        const next = { ...prev };
+        nextRows.forEach((row) => {
+          if (selected.includes(row.userid)) next[row.userid] = row;
+        });
+        return next;
+      });
       setTotal(data.total || 0);
       setPage(data.page || nextPage);
       setPageSize(data.pageSize || nextPageSize);
@@ -46,6 +55,28 @@ export default function Users() {
     setDetail(data.data);
   };
 
+  const rememberSelectedRows = (keys, selectedRows = []) => {
+    const nextKeys = keys.map(String);
+    setSelected(nextKeys);
+    setSelectedUsers((prev) => {
+      const next = {};
+      nextKeys.forEach((userid) => {
+        const known = selectedRows.find((row) => String(row.userid) === userid) || rows.find((row) => String(row.userid) === userid) || prev[userid];
+        next[userid] = known || { userid };
+      });
+      return next;
+    });
+  };
+
+  const clearSelected = () => {
+    setSelected([]);
+    setSelectedUsers({});
+  };
+
+  const recipientRows = op?.userid
+    ? [rows.find((row) => row.userid === op.userid) || selectedUsers[op.userid] || { userid: op.userid }]
+    : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
+
   const submitOp = async (values) => {
     const userids = op.userid ? [op.userid] : selected;
     const path = op.type === 'grant' ? '/admin/ledger/grant-batch' : '/admin/redeem/deduct-batch';
@@ -54,6 +85,7 @@ export default function Users() {
       : { userids, amount: values.amount, product_name: values.reason || '后台减币' };
     await api(path, { method: 'POST', body });
     message.success(op.type === 'grant' ? '发币完成' : '减币完成');
+    if (!op.userid) clearSelected();
     setOp(null);
     await load();
     if (detail?.user?.userid) await openDetail(detail.user.userid);
@@ -75,7 +107,7 @@ export default function Users() {
     try {
       const data = await api('/admin/users/delete', { method: 'POST', body: { userids: deleteTarget } });
       message.success(`已删除 ${data.deleted || deleteTarget.length} 个用户`);
-      setSelected([]);
+      clearSelected();
       setDeleteTarget([]);
       await load(1, keyword);
     } catch (err) {
@@ -98,16 +130,18 @@ export default function Users() {
     <Card>
       <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1, keyword)} searchPlaceholder="搜索姓名 / Userid">
         <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>
+        {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
         <Button disabled={!selected.length} onClick={() => { setOp({ type: 'grant' }); form.resetFields(); }}>批量发币</Button>
         <Button disabled={!selected.length} onClick={() => { setOp({ type: 'deduct' }); form.resetFields(); }}>批量减币</Button>
         <Button danger disabled={!selected.length} onClick={() => deleteUsers(selected)}>危险区：删除</Button>
+        <Button disabled={!selected.length} onClick={clearSelected}>清空选择</Button>
       </DataToolbar>
       <Table
         rowKey="userid"
         loading={loading}
         columns={columns}
         dataSource={rows}
-        rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
+        rowSelection={{ selectedRowKeys: selected, preserveSelectedRowKeys: true, onChange: rememberSelectedRows }}
         pagination={{
           current: page,
           pageSize,
@@ -135,6 +169,7 @@ export default function Users() {
         ]} />}
       </Drawer>
       <Modal title={op?.type === 'grant' ? '发币' : '减币'} open={Boolean(op)} onCancel={() => setOp(null)} onOk={() => form.submit()} okText="确认" cancelText="取消">
+        {op && <Alert type={op.type === 'deduct' ? 'warning' : 'info'} showIcon message={`本次将${op.type === 'grant' ? '发币给' : '减币'} ${recipientRows.length} 人`} description={<div className="batch-recipient-list">{recipientRows.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} style={{ marginBottom: 12 }} />}
         <Form form={form} layout="vertical" onFinish={submitOp}>
           <Form.Item label="金额" name="amount" rules={[{ required: true, message: '请输入金额' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
           <Form.Item label="原因" name="reason"><Input placeholder={op?.type === 'grant' ? '后台发币' : '后台减币'} /></Form.Item>
@@ -151,6 +186,7 @@ export default function Users() {
         cancelText="取消"
       >
         将删除 {deleteTarget.length} 个用户及关联账户、余额流水、核销记录，此操作不可撤销。
+        <div className="batch-recipient-list">{deleteTarget.map((userid) => { const user = selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid }; return <Tag key={userid}>{user.name ? `${user.name}（${userid}）` : userid}</Tag>; })}</div>
       </Modal>
     </Card>
   );
