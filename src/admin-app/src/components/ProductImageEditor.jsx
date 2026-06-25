@@ -18,11 +18,12 @@ function successText(result) {
   return `图片已转为 WebP，节省 ${Math.round(saved / 1024)} KB`;
 }
 
-export default function ProductImageEditor({ value, onChange }) {
+export default function ProductImageEditor({ value, onChange, emptyText = '未设置商品图片', disabled = false }) {
   const { message } = App.useApp();
   const imageUrl = String(value || '').trim();
 
   const applyFile = async (file) => {
+    if (disabled) return false;
     const invalid = validateImageFile(file);
     if (invalid) {
       message.warning(invalid);
@@ -41,7 +42,7 @@ export default function ProductImageEditor({ value, onChange }) {
   const handlePaste = async (event) => {
     const imageItem = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith('image/'));
     const file = imageItem?.getAsFile();
-    if (!file) return;
+    if (!file || disabled) return;
     event.preventDefault();
     await applyFile(file);
   };
@@ -50,17 +51,17 @@ export default function ProductImageEditor({ value, onChange }) {
     <div className="product-image-preview">
       {imageUrl ? <Image src={imageUrl} className="product-image-preview-img" /> : <div className="product-image-empty">
         <PictureOutlined />
-        <Typography.Text type="secondary">未设置商品图片</Typography.Text>
+        <Typography.Text type="secondary">{emptyText}</Typography.Text>
       </div>}
     </div>
     <Space direction="vertical" className="product-image-controls" size={10}>
       <Space wrap>
-        <Upload accept="image/*" showUploadList={false} beforeUpload={applyFile}>
-          <Button type="primary" icon={<InboxOutlined />}>上传图片</Button>
+        <Upload accept="image/*" showUploadList={false} beforeUpload={applyFile} disabled={disabled}>
+          <Button type="primary" icon={<InboxOutlined />} disabled={disabled}>上传图片</Button>
         </Upload>
-        <Button icon={<DeleteOutlined />} disabled={!imageUrl} onClick={() => onChange('')}>移除图片</Button>
+        <Button icon={<DeleteOutlined />} disabled={disabled || !imageUrl} onClick={() => onChange('')}>移除图片</Button>
       </Space>
-      <Typography.Text type="secondary">{imageUrl ? imageSourceType(imageUrl) : '支持上传图片，或点击此区域后粘贴截图。'}</Typography.Text>
+      <Typography.Text type="secondary">{imageUrl ? imageSourceType(imageUrl) : disabled ? '当前权限仅可查看图片。' : '支持上传图片，或点击此区域后粘贴截图。'}</Typography.Text>
     </Space>
   </div>;
 }

@@ -158,6 +158,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
   if (p.startsWith('/cdks')) return m === 'GET' ? 'commerce:view' : 'commerce:cdk';
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
+  if (p.startsWith('/settings/dingtalk/departments')) return ['integrations:view', 'activities:view'];
   if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
   if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';
   if (p.startsWith('/notify') || p.startsWith('/settings/notify') || p.startsWith('/settings/group-card')) return m === 'GET' ? 'messages:view' : 'messages:edit';
@@ -166,6 +167,7 @@ function matchPathPermission(method, path) {
     if (p.endsWith('/delete')) return 'content:delete';
     return 'content:edit';
   }
+  if (p.startsWith('/image-optimization/upload')) return ['integrations:edit', 'commerce:edit', 'activities:edit', 'content:edit'];
   if (p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
   if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export';
@@ -201,7 +203,8 @@ export function adminAccessMiddleware() {
       req.adminAccess = access;
       const permission = matchPathPermission(req.method, req.path);
       if (permission === 'super' && !access.isSuperAdmin) return res.status(403).json({ error: '权限不足，无法执行该操作' });
-      if (permission && permission !== 'super' && !hasAdminPermission(access, permission)) return res.status(403).json({ error: '权限不足，无法执行该操作' });
+      if (Array.isArray(permission) && !permission.some((key) => hasAdminPermission(access, key))) return res.status(403).json({ error: '权限不足，无法执行该操作' });
+      if (permission && !Array.isArray(permission) && permission !== 'super' && !hasAdminPermission(access, permission)) return res.status(403).json({ error: '权限不足，无法执行该操作' });
       return next();
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
