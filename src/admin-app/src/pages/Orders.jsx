@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Modal, Space, Table, Tabs, Tag } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Modal, Space, Table, Tabs } from 'antd';
 import { api } from '../api.js';
 import { amountText, formatTs, orderAmount } from '../utils.js';
 import RedeemScanner from '../components/RedeemScanner.jsx';
+
+function verifierText(row) {
+  const name = String(row?.fulfilled_name || '').trim();
+  const userid = String(row?.fulfilled_by || '').trim();
+  if (name && userid) return `${name} (${userid})`;
+  return name || userid || '-';
+}
 
 function RedeemCenter({ onRedeemed }) {
   const { message } = App.useApp();
@@ -50,16 +57,19 @@ function OrderTable({ type, onOpen, reloadKey }) {
   };
   useEffect(() => { load(); }, [type, reloadKey]);
 
+  const columns = [
+    { title: '时间', dataIndex: type === 'history' ? 'fulfilled_at' : 'created_at', render: formatTs },
+    { title: '用户', render: (_, r) => r.name ? `${r.name} (${r.userid})` : r.userid },
+    { title: '兑换单号', dataIndex: 'exchange_id', ellipsis: true },
+    { title: '商品', dataIndex: 'product_name' },
+    { title: '金额', render: (_, r) => amountText(orderAmount(r)) },
+  ];
+  if (type === 'history') columns.push({ title: '核销人', render: (_, r) => verifierText(r) });
+  columns.push({ title: '操作', render: (_, r) => <Button onClick={() => onOpen(r.exchange_id)}>详情</Button> });
+
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <Space><Button onClick={load}>刷新</Button>{type === 'history' && <Button danger onClick={() => Modal.confirm({ title: '危险区：清空已核销历史', content: '该操作会隐藏历史核销记录，请确认不再需要追溯。', okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => { await api('/admin/redeem/history/clear', { method: 'POST', body: { confirm: 'CLEAR_REDEEM_HISTORY' } }); message.success('已清空'); load(); } })}>危险区：清空历史</Button>}</Space>
-    <Table rowKey="exchange_id" loading={loading} dataSource={rows} scroll={{ x: 980 }} columns={[
-      { title: '时间', dataIndex: type === 'history' ? 'fulfilled_at' : 'created_at', render: formatTs },
-      { title: '用户', render: (_, r) => r.name ? `${r.name} (${r.userid})` : r.userid },
-      { title: '兑换单号', dataIndex: 'exchange_id', ellipsis: true },
-      { title: '商品', dataIndex: 'product_name' },
-      { title: '金额', render: (_, r) => amountText(orderAmount(r)) },
-      { title: '操作', render: (_, r) => <Button onClick={() => onOpen(r.exchange_id)}>详情</Button> },
-    ]} />
+    <Table rowKey="exchange_id" loading={loading} dataSource={rows} scroll={{ x: type === 'history' ? 1120 : 980 }} columns={columns} />
   </Space>;
 }
 
@@ -85,6 +95,7 @@ export default function Orders() {
         { key: 'source', label: '来源', children: detail.order?.redeem_source === 'cdk' ? 'CDK' : '商城' },
         { key: 'created', label: '下单时间', children: formatTs(detail.order?.created_at) },
         { key: 'fulfilled', label: '核销时间', children: formatTs(detail.order?.fulfilled_at) },
+        { key: 'verifier', label: '核销人', children: verifierText(detail.order) },
       ]} />}
     </Drawer>
   </Card>;

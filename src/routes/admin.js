@@ -58,6 +58,12 @@ import {
 import { getUserName, sendOrQueueNotify } from '../services/notifyOpsService.js';
 import { requireAdminSession } from '../middleware/requireAdminSession.js';
 import { verifyEncoded, QRSignError } from '../utils/qr.js';
+import {
+  getImageOptimizationOverview,
+  optimizeUploadedImage,
+  runImageOptimizationBatch,
+  saveImageOptimizationSettings,
+} from '../services/imageOptimizationService.js';
 
 function getPackageMeta() {
   try {
@@ -89,17 +95,31 @@ async function getServerInfo(req, cfg) {
     .map((item) => item.address)
     .filter(Boolean);
   const host = req.hostname || '';
+  const cpus = os.cpus() || [];
   return {
-    service: 'BOB 币管理端',
+    service: 'BOB 币发行管理',
     version: packageMeta.version,
+    environment: process.env.NODE_ENV || 'production',
     author: 'Achord',
+    authorEmail: 'achordchan@gmail.com',
+    authorPhone: '13160235855',
+    authorRegion: '中国',
     host,
+    hostname: os.hostname(),
     ip: process.env.SERVER_PUBLIC_IP || process.env.BAOTA_HOST || await resolveHostIp(host) || ips[0] || '',
+    localIps: ips,
     node: process.version,
     runtime: `Node.js ${process.version} / Express`,
     frontend: 'React + Vite + Ant Design',
     database: cfg?.db?.kind === 'postgres' ? 'PostgreSQL' : String(cfg?.db?.kind || '-'),
     platform: `${os.type()} ${os.release()}`,
+    arch: os.arch(),
+    cpu: cpus[0]?.model || '',
+    cpuCores: cpus.length,
+    memoryTotalMb: Math.round(os.totalmem() / 1024 / 1024),
+    memoryFreeMb: Math.round(os.freemem() / 1024 / 1024),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+    pid: process.pid,
     uptimeSeconds: Math.floor(process.uptime()),
   };
 }
@@ -234,6 +254,27 @@ function normalizeAnnouncementLevel(value) {
   const v = value ? String(value).trim() : '';
   if (v === 'info' || v === 'success' || v === 'warning' || v === 'danger') return v;
   return 'info';
+}
+
+async function attachFeedbackMessages(db, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const ids = list.map((row) => Number(row?.id || 0)).filter((id) => Number.isFinite(id) && id > 0);
+  if (!ids.length) return list;
+  const placeholders = ids.map(() => '?').join(',');
+  const messages = await db.all(
+    `SELECT id, feedback_id, sender_type, sender_id, sender_name, content, created_at
+     FROM user_feedback_messages
+     WHERE feedback_id IN (${placeholders})
+     ORDER BY feedback_id ASC, created_at ASC, id ASC`,
+    ids,
+  );
+  const grouped = new Map();
+  (messages || []).forEach((item) => {
+    const key = Number(item.feedback_id || 0);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(item);
+  });
+  return list.map((row) => ({ ...row, messages: grouped.get(Number(row.id || 0)) || [] }));
 }
 
 function isTruthyFlag(value) {
@@ -1415,12 +1456,24 @@ export function adminRouter() {
       const order = await db.get(
         `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
                 r.bob_amount, r.fulfilled_at, r.created_at,
+                COALESCE(r.fulfilled_by, audit.actor_id, '') AS fulfilled_by,
+                COALESCE(r.fulfilled_name, audit.actor_name, '') AS fulfilled_name,
                 CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount,
                 c.cdk_code, c.batch_id
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
+         LEFT JOIN LATERAL (
+           SELECT a.actor_id, a.actor_name
+             FROM audit_logs a
+            WHERE r.fulfilled_at IS NOT NULL
+              AND a.path LIKE '/admin/redeem/confirm%'
+              AND COALESCE(a.status_code, 0) BETWEEN 200 AND 299
+              AND a.payload LIKE '%' || r.exchange_id || '%'
+            ORDER BY a.created_at DESC, a.id DESC
+            LIMIT 1
+         ) audit ON TRUE
          WHERE r.exchange_id = ?
            AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')
          LIMIT 1`,
@@ -1509,11 +1562,22 @@ export function adminRouter() {
       const rows = await db.all(
         `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
                 r.bob_amount, r.fulfilled_at, r.created_at,
+                COALESCE(r.fulfilled_by, audit.actor_id, '') AS fulfilled_by,
+                COALESCE(r.fulfilled_name, audit.actor_name, '') AS fulfilled_name,
                 CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
+         LEFT JOIN LATERAL (
+           SELECT a.actor_id, a.actor_name
+             FROM audit_logs a
+            WHERE a.path LIKE '/admin/redeem/confirm%'
+              AND COALESCE(a.status_code, 0) BETWEEN 200 AND 299
+              AND a.payload LIKE '%' || r.exchange_id || '%'
+            ORDER BY a.created_at DESC, a.id DESC
+            LIMIT 1
+         ) audit ON TRUE
          WHERE r.fulfilled_at IS NOT NULL
            AND COALESCE(r.hidden, 0) = 0
            AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')${whereCursorSql}
@@ -1812,7 +1876,8 @@ export function adminRouter() {
          LIMIT ?`,
         [...params, limit],
       );
-      return res.json({ ok: true, count: (rows || []).length, data: rows || [] });
+      const data = await attachFeedbackMessages(db, rows || []);
+      return res.json({ ok: true, count: data.length, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -1829,13 +1894,23 @@ export function adminRouter() {
     const actorName = payload?.name ? String(payload.name) : '';
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const r = await db.run(
-        `UPDATE user_feedback
-         SET status = ?, reply = ?, handled_by = ?, handled_name = ?, handled_at = unixepoch(), updated_at = unixepoch()
-         WHERE id = ?`,
-        [status, reply, actorId, actorName, id],
-      );
-      if (!r?.changes) return res.status(400).json({ error: 'feedback not found' });
+      const row = await db.get('SELECT id FROM user_feedback WHERE id = ?', [id]);
+      if (!row) return res.status(400).json({ error: 'feedback not found' });
+      await runInTransaction(db, async (tx) => {
+        if (reply) {
+          await tx.run(
+            `INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
+             VALUES(?, 'admin', ?, ?, ?, unixepoch())`,
+            [id, actorId, actorName, reply],
+          );
+        }
+        await tx.run(
+          `UPDATE user_feedback
+           SET status = ?, reply = CASE WHEN ? <> '' THEN ? ELSE reply END, handled_by = ?, handled_name = ?, handled_at = unixepoch(), updated_at = unixepoch()
+           WHERE id = ?`,
+          [status, reply, reply, actorId, actorName, id],
+        );
+      });
       publishMoreChanged('feedback');
       return res.json({ ok: true, id });
     } catch (err) {
@@ -2345,6 +2420,51 @@ export function adminRouter() {
     }
   });
 
+
+  router.get('/settings/image-optimization', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await getImageOptimizationOverview(db);
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/settings/image-optimization', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await saveImageOptimizationSettings(db, req.body || {});
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/image-optimization/upload', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await optimizeUploadedImage(db, req.body || {});
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(400).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/image-optimization/batch', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await runImageOptimizationBatch(db, { mode: req.body?.mode || 'pending' });
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
   router.get('/settings/dingtalk', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
@@ -2540,7 +2660,10 @@ export function adminRouter() {
         bobAmount: Number.isFinite(displayBobAmount) && displayBobAmount > 0 ? displayBobAmount : payload.bob_amount,
         actualBobAmount: payload.bob_amount,
         userid: payload.userid,
+        fulfilledBy: req.adminSession?.userid || '',
+        fulfilledName: req.adminSession?.name || '',
       };
+      const admin = req.adminSession || {};
       const result = await redeemConfirmWithNotify(db, cfg, {
         exchangeId: payload.exchange_id,
         userid: payload.userid,
@@ -2549,6 +2672,8 @@ export function adminRouter() {
         bobAmount: payload.bob_amount,
         reason: 'redeem',
         awaitNotify: false,
+        fulfilledBy: admin?.userid ? String(admin.userid) : '',
+        fulfilledName: admin?.name ? String(admin.name) : '',
       });
       publishMallRealtimeEvent('order_updated', {
         userid: String(payload.userid || ''),
@@ -2611,6 +2736,7 @@ export function adminRouter() {
     'content_announcements',
     'system_versions',
     'user_feedback',
+    'user_feedback_messages',
     'audit_logs',
     'system_settings',
   ];
@@ -2629,6 +2755,41 @@ export function adminRouter() {
       }
     }
   }
+
+  async function appendBackupHistory(db, req, input) {
+    const payload = getAdminSessionPayload(req) || {};
+    await db.run(
+      `INSERT INTO admin_backup_history(action, mode, filename, status, actor_id, actor_name, details, created_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+      [
+        input.action,
+        input.mode,
+        input.filename || '',
+        input.status || '完成',
+        payload?.userid ? String(payload.userid) : '',
+        payload?.name ? String(payload.name) : '',
+        input.details ? JSON.stringify(input.details) : null,
+      ],
+    );
+  }
+
+  router.get('/backup/history', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const limit = Math.min(100, Math.max(1, toPositiveInt(req.query?.limit, 30)));
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const rows = await db.all(
+        `SELECT id, action, mode, filename, status, actor_id, actor_name, details, created_at AS at
+         FROM admin_backup_history
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        [limit],
+      );
+      return res.json({ ok: true, data: rows || [] });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
 
   // GET /admin/backup/export?mode=settings|full
   router.get('/backup/export', requireAdminSession(), async (req, res) => {
@@ -2649,11 +2810,13 @@ export function adminRouter() {
         _meta: {
           version: 1,
           mode,
+          filename,
           exportedAt: now.toISOString(),
           tables: Object.fromEntries(tables.map((t) => [t, data[t]?.length ?? 0])),
         },
         data,
       };
+      await appendBackupHistory(db, req, { action: '导出', mode, filename, status: '完成', details: payload._meta });
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       return res.json(payload);
@@ -2952,10 +3115,10 @@ export function adminRouter() {
           try {
             // eslint-disable-next-line no-await-in-loop
             await db.exec(
-              `INSERT INTO redeems(id, exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, hidden, limit_round, created_at)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(exchange_id) DO NOTHING`,
+              `INSERT INTO redeems(id, exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, fulfilled_by, fulfilled_name, hidden, limit_round, created_at)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(exchange_id) DO NOTHING`,
               [row.id ?? null, row.exchange_id, row.userid, row.product_id, row.product_name ?? null,
-                row.bob_amount, row.fulfilled_at ?? null, row.hidden ?? 0,
+                row.bob_amount, row.fulfilled_at ?? null, row.fulfilled_by ?? null, row.fulfilled_name ?? null, row.hidden ?? 0,
                 row.limit_round ?? 1,
                 row.created_at ?? Math.floor(Date.now() / 1000)],
             );
@@ -3089,6 +3252,27 @@ export function adminRouter() {
         report.user_feedback = count;
       }
 
+      if (Array.isArray(backupData.user_feedback_messages)) {
+        let count = 0;
+        for (const row of backupData.user_feedback_messages) {
+          if (!row?.id || !row?.feedback_id || !row?.content) continue;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await db.exec(
+              `INSERT INTO user_feedback_messages(id, feedback_id, sender_type, sender_id, sender_name, content, created_at)
+               VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
+              [row.id, row.feedback_id, row.sender_type ?? 'user', row.sender_id ?? null,
+                row.sender_name ?? null, row.content, row.created_at ?? Math.floor(Date.now() / 1000)],
+            );
+            count++;
+          } catch { /* skip */ }
+        }
+        if (mode === 'overwrite' && count > 0) {
+          try { await db.exec(`SELECT setval(pg_get_serial_sequence('user_feedback_messages', 'id'), (SELECT MAX(id) FROM user_feedback_messages))`, []); } catch { /* skip */ }
+        }
+        report.user_feedback_messages = count;
+      }
+
       if (Array.isArray(backupData.audit_logs)) {
         let count = 0;
         for (const row of backupData.audit_logs) {
@@ -3165,6 +3349,13 @@ export function adminRouter() {
       }
     }
 
+    await appendBackupHistory(db, req, {
+      action: '导入',
+      mode,
+      filename: backup._meta?.filename || req.body?.filename || '',
+      status: '完成',
+      details: { backupMode: backup._meta?.mode || '', report },
+    });
     publishMallRealtimeFullRefresh('backup_import');
     return res.json({ ok: true, mode, report });
   });

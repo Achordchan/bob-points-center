@@ -9,6 +9,13 @@ createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ConfigProvider
       locale={zhCN}
+      form={{
+        validateMessages: {
+          required: '请填写${label}',
+          types: { number: '${label}必须是数字' },
+          number: { min: '${label}不能小于${min}', max: '${label}不能大于${max}' },
+        },
+      }}
       theme={{
         token: {
           colorPrimary: '#1677ff',

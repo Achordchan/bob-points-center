@@ -33,3 +33,13 @@ export function downloadText(filename, text) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+
+export function localTablePagination(label = '条', pageSize = 10) {
+  return {
+    defaultPageSize: pageSize,
+    showSizeChanger: true,
+    pageSizeOptions: [10, 20, 30, 50, 100],
+    showTotal: (total) => `共 ${total} ${label}`,
+  };
+}

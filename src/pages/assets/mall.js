@@ -2554,11 +2554,24 @@
         const content = x?.content ? String(x.content) : '';
         const reply = x?.reply ? String(x.reply) : '';
         const timeText = fmtTs(x?.created_at);
+        const messages = Array.isArray(x?.messages) && x.messages.length
+          ? x.messages
+          : [
+            ...(content ? [{ sender_type: 'user', sender_name: '我', content, created_at: x?.created_at }] : []),
+            ...(reply ? [{ sender_type: 'admin', sender_name: '管理员', content: reply, created_at: x?.handled_at }] : []),
+          ];
+        const thread = messages.map((m) => `<div class="moreFeedbackMsg ${m?.sender_type === 'admin' ? 'isAdmin' : 'isUser'}">
+          <div class="moreFeedbackMsgMeta">${m?.sender_type === 'admin' ? '管理员' : '我'} · ${escapeHtml(fmtTs(m?.created_at) || '')}</div>
+          <div class="moreFeedbackMsgText">${escapeHtml(m?.content ? String(m.content) : '-')}</div>
+        </div>`).join('');
         return `<div class="moreItem">
           <div class="moreItemTitle">${escapeHtml(category)} · ${escapeHtml(status)}</div>
-          <div class="moreItemText">${escapeHtml(content)}</div>
-          ${reply ? `<div class="moreItemText">管理员回复：${escapeHtml(reply)}</div>` : ''}
+          <div class="moreFeedbackThread">${thread}</div>
           <div class="moreItemMeta">${escapeHtml(timeText || '')}</div>
+          <div class="moreFeedbackReply">
+            <textarea data-feedback-reply-text="${escapeHtml(String(x?.id || ''))}" maxlength="2000" placeholder="继续补充这条反馈"></textarea>
+            <button class="secondary" type="button" data-feedback-reply-submit="${escapeHtml(String(x?.id || ''))}">追加回复</button>
+          </div>
         </div>`;
       })
       .join('');
@@ -3002,6 +3015,36 @@
       contentBox.value = '';
       if (contactBox) contactBox.value = '';
       showNotice('反馈已提交，感谢你的建议', 'success');
+      await loadMoreData();
+    } finally {
+      if (btn) btn.disabled = prevDisabled;
+    }
+  }
+
+  async function submitMoreFeedbackReply(id) {
+    const feedbackId = Number(id);
+    if (!Number.isFinite(feedbackId) || feedbackId <= 0) return;
+    const box = document.querySelector(`[data-feedback-reply-text="${String(feedbackId)}"]`);
+    const content = box?.value ? String(box.value).trim() : '';
+    if (!content) {
+      showNotice('请先填写补充内容', 'error');
+      return;
+    }
+    const btn = document.querySelector(`[data-feedback-reply-submit="${String(feedbackId)}"]`);
+    const prevDisabled = btn ? btn.disabled : false;
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await safeFetchJson(`/mall/more/feedback/${feedbackId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      if (!resp?.data?.ok) {
+        showNotice(resp?.data?.error ? String(resp.data.error) : '追加失败', 'error');
+        return;
+      }
+      box.value = '';
+      showNotice('已追加反馈', 'success');
       await loadMoreData();
     } finally {
       if (btn) btn.disabled = prevDisabled;
@@ -3671,6 +3714,15 @@
           if (btnMoreFeedbackSubmit) {
             btnMoreFeedbackSubmit.addEventListener('click', () => {
               submitMoreFeedback();
+            });
+          }
+          const moreMyFeedback = document.getElementById('moreMyFeedback');
+          if (moreMyFeedback) {
+            moreMyFeedback.addEventListener('click', (ev) => {
+              const target = ev?.target;
+              const btn = target?.closest ? target.closest('[data-feedback-reply-submit]') : null;
+              const id = btn?.getAttribute ? btn.getAttribute('data-feedback-reply-submit') : '';
+              if (id) submitMoreFeedbackReply(id);
             });
           }
 

@@ -1,23 +1,34 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Card, Drawer, Form, Image, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
+import { App, Alert, Button, Card, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
 import RichTextEditor from '../components/RichTextEditor.jsx';
-import { amountText, formatTs } from '../utils.js';
+import { amountText, formatTs, localTablePagination } from '../utils.js';
 
 const redPacketStatusText = { pending: '待开始', active: '进行中', ended: '已结束', cancelled: '已取消' };
 const charityStatusText = { active: '启用', paused: '暂停', archived: '归档' };
 const executionStatusText = { pending: '待执行', in_progress: '执行中', completed: '已完成' };
+const attendanceStatusText = { rewarded: '已奖励', skipped: '已跳过', error: '异常', pending: '待处理' };
+const attendanceSourceText = { stream: '实时推送', reconcile: '自动补发/对账', audit_seed: '历史补录', historical: '历史记录' };
 
 function statusText(map, value) {
   return map[value] || value || '-';
+}
+
+
+function packetClaimUser(row) {
+  const name = String(row?.name || '').trim();
+  const userid = String(row?.userid || '').trim();
+  if (name && userid) return `${name} (${userid})`;
+  return name || userid || '-';
 }
 
 function RedPackets() {
   const { message } = App.useApp();
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
+  const [detail, setDetail] = useState(null);
   const [form] = Form.useForm();
   const load = async () => { setStatus((await api('/admin/red-packet/status')).data); setHistory((await api('/admin/red-packet/history')).data || []); };
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
@@ -28,7 +39,198 @@ function RedPackets() {
       <Form form={form} layout="inline" onFinish={start}><Form.Item name="total_amount" rules={[{ required: true }]}><InputNumber min={1} placeholder="总金额" /></Form.Item><Form.Item name="total_count" rules={[{ required: true }]}><InputNumber min={1} placeholder="人数" /></Form.Item><Form.Item name="countdown_seconds" rules={[{ required: true }]}><InputNumber min={0} placeholder="倒计时秒" /></Form.Item><Form.Item name="duration_minutes" rules={[{ required: true }]}><InputNumber min={1} placeholder="持续分钟" /></Form.Item><Form.Item name="sponsor"><Input placeholder="赞助人" /></Form.Item><Button type="primary" htmlType="submit">创建并开始</Button><Button onClick={load}>刷新</Button></Form>
     </Card>
     <DataToolbar onRefresh={load}><Button danger onClick={clear}>危险区：清空历史</Button></DataToolbar>
-    <Table rowKey="id" dataSource={history} scroll={{ x: 980 }} columns={[{ title: 'ID', dataIndex: 'id' }, { title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '总额', dataIndex: 'total_amount', render: amountText }, { title: '份数', dataIndex: 'total_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(redPacketStatusText, v) }, { title: '赞助人', dataIndex: 'sponsor' }]} />
+    <Table rowKey="id" dataSource={history} pagination={localTablePagination('个活动')} scroll={{ x: 1080 }} columns={[{ title: 'ID', dataIndex: 'id' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '总额', dataIndex: 'total_amount', render: amountText }, { title: '份数', dataIndex: 'total_count' }, { title: '已抢', dataIndex: 'claimed_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(redPacketStatusText, v) }, { title: '赞助人', dataIndex: 'sponsor' }, { title: '操作', fixed: 'right', render: (_, r) => <Button onClick={() => setDetail(r)}>详情</Button> }]} />
+    <Drawer title="红包详情" open={Boolean(detail)} onClose={() => setDetail(null)} width={720}>
+      {detail && <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Descriptions bordered column={1} size="small" items={[
+          { key: 'id', label: '活动ID', children: detail.id },
+          { key: 'created', label: '创建时间', children: formatTs(detail.created_at) },
+          { key: 'start', label: '发起时间', children: formatTs(detail.start_at) },
+          { key: 'end', label: '结束时间', children: formatTs(detail.end_at) },
+          { key: 'amount', label: '总额', children: amountText(detail.total_amount) },
+          { key: 'count', label: '份数', children: `${detail.claimed_count || 0}/${detail.total_count || 0}` },
+          { key: 'status', label: '状态', children: statusText(redPacketStatusText, detail.status) },
+          { key: 'sponsor', label: '赞助人', children: detail.sponsor || '-' },
+        ]} />
+        <Table
+          rowKey={(row) => `${row.userid || 'unknown'}_${row.claimed_at || 0}_${row.amount || 0}`}
+          size="small"
+          pagination={localTablePagination('条记录', 8)}
+          dataSource={detail.claimed_items || []}
+          columns={[
+            { title: '领取时间', dataIndex: 'claimed_at', render: formatTs },
+            { title: '领取人', render: (_, row) => packetClaimUser(row) },
+            { title: '金额', dataIndex: 'amount', render: amountText },
+          ]}
+        />
+      </Space>}
+    </Drawer>
+  </Space>;
+}
+
+
+function todayDate() {
+  const d = new Date();
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function attendanceUser(row) {
+  const name = String(row?.user_name_snapshot || '').trim();
+  const userid = String(row?.userid || '').trim();
+  if (name && userid && name !== userid) return `${name} (${userid})`;
+  return name || userid || '-';
+}
+
+function AttendanceRewards({ dingtalk }) {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [departments, setDepartments] = useState([]);
+  const [mode, setMode] = useState('all');
+  const [days, setDays] = useState(7);
+  const [summaryRows, setSummaryRows] = useState([]);
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+
+  const loadSettings = async () => {
+    const data = await api('/admin/settings/attendance-reward');
+    form.setFieldsValue(data.data || {});
+    setMode(data.data?.departmentMode || 'all');
+    return data.data || {};
+  };
+
+  const loadDepartments = async (selectedSettings = null) => {
+    if (!dingtalk?.connected) {
+      setDepartments([]);
+      return;
+    }
+    const data = await api('/admin/settings/dingtalk/departments');
+    setDepartments(data.data || []);
+    if (selectedSettings) form.setFieldValue('departmentIds', selectedSettings.departmentIds || []);
+  };
+
+  const loadStatus = async (nextDays = days) => {
+    const data = await api(`/admin/settings/attendance-reward/status?days=${nextDays}`);
+    setSummaryRows(data.data || []);
+  };
+
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const settings = await loadSettings();
+      await Promise.all([loadDepartments(settings), loadStatus(days)]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadAll().catch((e) => message.error(e.message)); }, [dingtalk?.connected]);
+
+  const save = async (values) => {
+    setSaving(true);
+    try {
+      await api('/admin/settings/attendance-reward', { method: 'POST', body: { ...values, departmentMode: mode, departmentIds: mode === 'selected' ? values.departmentIds || [] : [] } });
+      message.success('打卡奖励已保存');
+      await loadAll();
+    } catch (err) {
+      message.error(err.message || '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeDays = async (value) => {
+    const next = Number(value || 7);
+    setDays(next);
+    await loadStatus(next).catch((e) => message.error(e.message));
+  };
+
+  const openDetail = async (date) => {
+    const data = await api(`/admin/settings/attendance-reward/detail?date=${date}`);
+    setDetail({ date: data.work_date || date, rows: data.rows || [] });
+  };
+
+  const reconcile = (date) => Modal.confirm({
+    title: '确认执行打卡对账？',
+    content: '系统会根据当天打卡记录补发缺失的 BOB 币奖励。本次不发送钉钉消息。',
+    okText: '确认对账',
+    cancelText: '取消',
+    onOk: async () => {
+      setReconciling(true);
+      try {
+        await api('/admin/settings/attendance-reward/reconcile', { method: 'POST', body: { date, notify: false } });
+        message.success('打卡对账已完成');
+        await loadStatus(days);
+        await openDetail(date);
+      } finally {
+        setReconciling(false);
+      }
+    },
+  });
+
+  const today = summaryRows.find((row) => row.work_date === todayDate()) || summaryRows[0] || null;
+  const detailRows = detail?.rows || [];
+
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    {!dingtalk?.connected && <Alert type="warning" showIcon message="钉钉未连接，部门选择和实时打卡奖励不可用。" />}
+    <Card title="打卡奖励配置" extra={<Button type="primary" loading={saving} onClick={() => form.submit()}>保存</Button>} loading={loading}>
+      <Form form={form} layout="vertical" onFinish={save} className="settings-form">
+        <Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" /></Form.Item>
+        <Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} /></Form.Item>
+        <Form.Item label="奖励范围"><Space><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} /></Form.Item><span>—</span><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} /></Form.Item></Space></Form.Item>
+        <Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} /></Form.Item>
+        <Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item label="适用部门"><Select value={mode} onChange={setMode} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} style={{ width: 160 }} /></Form.Item>
+        {mode === 'selected' && <Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item>}
+        <Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" /></Form.Item>
+      </Form>
+    </Card>
+
+    <Card title="今日摘要" extra={<Button onClick={() => loadStatus(days)}>刷新</Button>}>
+      <Row gutter={[16, 16]}>
+        <Col xs={12} md={5}><Statistic title="已奖励" value={Number(today?.rewarded_count || 0)} /></Col>
+        <Col xs={12} md={5}><Statistic title="自动补发" value={Number(today?.auto_compensated_count || 0)} /></Col>
+        <Col xs={12} md={5}><Statistic title="已跳过" value={Number(today?.skipped_count || 0)} /></Col>
+        <Col xs={12} md={5}><Statistic title="异常" value={Number(today?.error_count || 0)} /></Col>
+        <Col xs={24} md={4}><Statistic title="总发放" value={Number(today?.total_reward_amount || 0)} suffix="BOB" /></Col>
+      </Row>
+    </Card>
+
+    <Card title="打卡奖励历史" extra={<Space><Select value={days} onChange={changeDays} style={{ width: 120 }} options={[{ value: 7, label: '近 7 天' }, { value: 14, label: '近 14 天' }]} /><Button onClick={() => loadStatus(days)}>刷新</Button></Space>}>
+      <Table rowKey="work_date" dataSource={summaryRows} pagination={localTablePagination('天')} columns={[
+        { title: '日期', dataIndex: 'work_date' },
+        { title: '总记录', dataIndex: 'total_records' },
+        { title: '已奖励', dataIndex: 'rewarded_count' },
+        { title: '已跳过', dataIndex: 'skipped_count' },
+        { title: '异常', dataIndex: 'error_count', render: (v) => Number(v) > 0 ? <Tag color="red">{v}</Tag> : 0 },
+        { title: '自动补发', dataIndex: 'auto_compensated_count' },
+        { title: '总发放', dataIndex: 'total_reward_amount', render: amountText },
+        { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
+        { title: '操作', render: (_, row) => <Space><Button onClick={() => openDetail(row.work_date)}>详情</Button><Button loading={reconciling} onClick={() => reconcile(row.work_date)}>对账补发</Button></Space> },
+      ]} />
+    </Card>
+
+    <Drawer title="打卡奖励明细" open={Boolean(detail)} onClose={() => setDetail(null)} width={920} extra={detail && <Button loading={reconciling} onClick={() => reconcile(detail.date)}>对账补发</Button>}>
+      {detail && <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Descriptions bordered size="small" column={2} items={[
+          { key: 'date', label: '日期', children: detail.date },
+          { key: 'count', label: '记录数', children: detailRows.length },
+        ]} />
+        <Table rowKey={(row) => `${row.userid}_${row.check_time_ms}`} size="small" dataSource={detailRows} pagination={localTablePagination('条记录')} scroll={{ x: 960 }} columns={[
+          { title: '打卡时间', dataIndex: 'check_time_text', width: 160 },
+          { title: '用户', render: (_, row) => attendanceUser(row), width: 220 },
+          { title: '类型', dataIndex: 'check_type', width: 120 },
+          { title: '来源', dataIndex: 'event_source', width: 130, render: (v) => attendanceSourceText[v] || v || '-' },
+          { title: '状态', dataIndex: 'status', width: 110, render: (v) => <Tag color={v === 'rewarded' ? 'green' : v === 'error' ? 'red' : 'default'}>{attendanceStatusText[v] || v || '-'}</Tag> },
+          { title: '奖励', dataIndex: 'reward_amount', width: 110, render: (v, row) => row.status === 'rewarded' ? amountText(v) : '-' },
+          { title: '说明', render: (_, row) => row.error_message || row.skip_reason || row.reward_reason || '-' },
+        ]} />
+      </Space>}
+    </Drawer>
   </Space>;
 }
 
@@ -47,9 +249,9 @@ function Charity() {
   const save = async (values) => { await api('/admin/charity/projects/save', { method: 'POST', body: values }); message.success('公益项目已保存'); setEditing(null); form.resetFields(); loadProjects(); loadContribs(); };
   return <Space direction="vertical" style={{ width: '100%' }}>
     <DataToolbar onRefresh={() => { loadProjects(); loadContribs(); }} onCreate={() => open({ project_id: `CHARITY_${Date.now().toString(36).toUpperCase()}`, status: 'active', execution_status: 'pending' })} createText="新增公益项目" />
-    <Table rowKey="project_id" dataSource={projects} scroll={{ x: 1180 }} columns={[{ title: '封面', dataIndex: 'cover_image_url', width: 86, render: (url) => url ? <Image src={url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 8 }} /> : '-' }, { title: '项目ID', dataIndex: 'project_id', ellipsis: true }, { title: '名称', dataIndex: 'project_name' }, { title: '目标BOB币', dataIndex: 'target_bob_amount', render: amountText }, { title: '已助力', dataIndex: 'total_bob_amount', render: amountText }, { title: '人数', dataIndex: 'donor_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(charityStatusText, v) }, { title: '执行', dataIndex: 'execution_status', render: (v) => statusText(executionStatusText, v) }, { title: '操作', render: (_, r) => <Button onClick={() => open(r)}>编辑</Button> }]} />
+    <Table rowKey="project_id" dataSource={projects} pagination={localTablePagination('个项目')} scroll={{ x: 1180 }} columns={[{ title: '封面', dataIndex: 'cover_image_url', width: 86, render: (url) => url ? <Image src={url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 8 }} /> : '-' }, { title: '项目ID', dataIndex: 'project_id', ellipsis: true }, { title: '名称', dataIndex: 'project_name' }, { title: '目标BOB币', dataIndex: 'target_bob_amount', render: amountText }, { title: '已助力', dataIndex: 'total_bob_amount', render: amountText }, { title: '人数', dataIndex: 'donor_count' }, { title: '状态', dataIndex: 'status', render: (v) => statusText(charityStatusText, v) }, { title: '执行', dataIndex: 'execution_status', render: (v) => statusText(executionStatusText, v) }, { title: '操作', render: (_, r) => <Button onClick={() => open(r)}>编辑</Button> }]} />
     <Card size="small" title="助力记录" extra={<Select allowClear placeholder="项目筛选" style={{ width: 220 }} value={projectFilter || undefined} onChange={(v) => setProjectFilter(v || '')} options={projects.map((p) => ({ value: p.project_id, label: p.project_name }))} />}>
-      <Table rowKey="id" size="small" dataSource={contribs} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '项目', dataIndex: 'project_name' }, { title: '用户', dataIndex: 'user_name_snapshot' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }]} />
+      <Table rowKey="id" size="small" dataSource={contribs} pagination={localTablePagination('条记录')} columns={[{ title: '时间', dataIndex: 'created_at', render: formatTs }, { title: '项目', dataIndex: 'project_name' }, { title: '用户', dataIndex: 'user_name_snapshot' }, { title: '金额', dataIndex: 'bob_amount', render: amountText }]} />
     </Card>
     <Drawer title={editing?.id ? "编辑公益项目" : "新增公益项目"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={680} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
       <Form form={form} layout="vertical" onFinish={save}>
@@ -68,6 +270,6 @@ function Charity() {
   </Space>;
 }
 
-export default function Activities() {
-  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets /> }, { key: 'charity', label: '公益助力', children: <Charity /> }]} /></Card>;
+export default function Activities(props) {
+  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets /> }, { key: 'attendance', label: '打卡奖励', children: <AttendanceRewards {...props} /> }, { key: 'charity', label: '公益助力', children: <Charity /> }]} /></Card>;
 }

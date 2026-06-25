@@ -202,8 +202,8 @@ export async function adminDeductBatchWithNotify(db, cfg, { userids, baseExchang
   return { ok, count: results.length, results };
 }
 
-export async function redeemConfirmWithNotify(db, cfg, { exchangeId, userid, productId, productName, bobAmount, reason, awaitNotify } = {}) {
-  const result = await confirmRedeem(db, { exchangeId, userid, productId, productName, bobAmount, reason });
+export async function redeemConfirmWithNotify(db, cfg, { exchangeId, userid, productId, productName, bobAmount, reason, awaitNotify, fulfilledBy, fulfilledName } = {}) {
+  const result = await confirmRedeem(db, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName });
 
   const displayName = await getUserName(db, userid);
   const title = displayName ? `【BOB币中心】核销完成 ${displayName}` : '【BOB币中心】核销完成';

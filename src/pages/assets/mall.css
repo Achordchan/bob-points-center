@@ -2807,3 +2807,52 @@ body.modalOpenFixed {
   line-height: 1.8;
   word-break: break-word;
 }
+.moreFeedbackThread {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.moreFeedbackMsg {
+  max-width: 92%;
+  padding: 8px 10px;
+  border: 1px solid var(--mx-line);
+  border-radius: 12px;
+  background: rgba(248,250,252,0.9);
+}
+
+.moreFeedbackMsg.isAdmin {
+  justify-self: end;
+  background: rgba(239,246,255,0.95);
+}
+
+.moreFeedbackMsgMeta {
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: rgba(15, 23, 42, 0.52);
+}
+
+.moreFeedbackMsgText {
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(15, 23, 42, 0.88);
+}
+
+.moreFeedbackReply {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.moreFeedbackReply textarea {
+  width: 100%;
+  min-height: 72px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--mx-line);
+  border-radius: 10px;
+  resize: vertical;
+  font-size: 14px;
+}

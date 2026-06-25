@@ -163,6 +163,7 @@ function Products() {
     />
     <Drawer title={savedEditing ? "商品编辑" : "新增商品"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} width={620} extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
       <Form form={form} layout="vertical" onFinish={save}>
+        <Form.Item label="商品图片" name="image_url"><ProductImageEditor /></Form.Item>
         <Form.Item label="商品ID" name="product_id" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
         <Form.Item label="名称" name="product_name" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item label="金额" name="bob_amount" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
@@ -178,7 +179,6 @@ function Products() {
         <Form.Item label="状态" name="status"><Select options={[{ value: 'on', label: '上架' }, { value: 'off', label: '下架' }]} /></Form.Item>
         <Form.Item label="启用 CDK" name="cdk_enabled" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item label="排序" name="sort"><InputNumber precision={0} style={{ width: '100%' }} /></Form.Item>
-        <Form.Item label="商品图片" name="image_url"><ProductImageEditor /></Form.Item>
         <Form.Item label="备注" name="remark"><Input.TextArea rows={3} /></Form.Item>
       </Form>
     </Drawer>
@@ -191,6 +191,7 @@ function Cdks() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generated, setGenerated] = useState(null);
+  const [generatedOpen, setGeneratedOpen] = useState(false);
   const [form] = Form.useForm();
   const load = async () => {
     setLoading(true);
@@ -211,6 +212,7 @@ function Cdks() {
     const codes = Array.isArray(data.codes) ? data.codes : [];
     const batchId = data.batch_id || Date.now();
     setGenerated({ batchId, codes, createdAt: Date.now() });
+    setGeneratedOpen(true);
     message.success(`已生成 ${codes.length} 个 CDK`);
     if (codes.length) downloadText(`cdk-${batchId}.txt`, codes.join('\n'));
     load();
@@ -230,14 +232,16 @@ function Cdks() {
   };
   const remove = (id) => Modal.confirm({ title: '危险区：删除 CDK', content: '仅未兑换 CDK 可删除。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/cdks/delete', { method: 'POST', body: { ids: [id] } }); message.success('已删除'); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
-    <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item><Button type="primary" htmlType="submit">生成并导出</Button><Button onClick={load}>刷新</Button></Form></Card>
-    {generated?.codes?.length > 0 && <Card
-      size="small"
-      title={`本次生成：${generated.codes.length} 个 CDK`}
-      extra={<Space><Button onClick={copyGenerated}>复制全部</Button><Button onClick={downloadGenerated}>下载</Button><Button onClick={() => setGenerated(null)}>收起</Button></Space>}
+    <Card size="small" title="生成 CDK"><Form form={form} layout="inline" onFinish={generate}><Form.Item name="product_id" rules={[{ required: true, message: '请选择商品' }]}><Select placeholder="选择商品" style={{ width: 260 }} options={products.map((p) => ({ value: p.product_id, label: `${p.product_name} (${amountText(p.bob_amount)})` }))} /></Form.Item><Form.Item name="quantity" rules={[{ required: true, message: '请输入生成数量' }]}><InputNumber min={1} max={500} precision={0} placeholder="数量" /></Form.Item><Button type="primary" htmlType="submit">生成并导出</Button><Button onClick={load}>刷新</Button></Form></Card>
+    <Modal
+      title={`本次生成：${generated?.codes?.length || 0} 个 CDK`}
+      open={generatedOpen}
+      onCancel={() => setGeneratedOpen(false)}
+      footer={<Space><Button onClick={copyGenerated}>复制全部</Button><Button onClick={downloadGenerated}>下载</Button><Button type="primary" onClick={() => setGeneratedOpen(false)}>完成</Button></Space>}
+      width={680}
     >
-      <Input.TextArea value={generated.codes.join('\n')} rows={Math.min(8, Math.max(3, generated.codes.length))} readOnly />
-    </Card>}
+      <Input.TextArea value={(generated?.codes || []).join('\n')} rows={Math.min(10, Math.max(4, generated?.codes?.length || 0))} readOnly />
+    </Modal>
     <Table rowKey="id" loading={loading} dataSource={rows} scroll={{ x: 1120 }} columns={[
       { title: '商品', dataIndex: 'product_name' }, { title: 'CDK', dataIndex: 'cdk_code', ellipsis: true },
       { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === 'unused' ? 'success' : v === 'redeemed' ? 'red' : 'default'}>{v === 'unused' ? '未兑换' : v === 'redeemed' ? '已兑换' : v}</Tag> },

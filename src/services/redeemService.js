@@ -84,17 +84,17 @@ export async function createRedeemOrderInTx(db, { exchangeId, userid, productId,
   };
 }
 
-export async function confirmRedeem(db, { exchangeId, userid, productId, productName, bobAmount, reason }) {
+export async function confirmRedeem(db, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName }) {
   if (db?.__txScoped === true) {
-    return await confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason });
+    return await confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName });
   }
   if (typeof db.transaction === 'function') {
-    return await db.transaction(async (tx) => await confirmRedeemInTx(tx, { exchangeId, userid, productId, productName, bobAmount, reason }));
+    return await db.transaction(async (tx) => await confirmRedeemInTx(tx, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName }));
   }
-  return await confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason });
+  return await confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName });
 }
 
-export async function confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason }) {
+export async function confirmRedeemInTx(db, { exchangeId, userid, productId, productName, bobAmount, reason, fulfilledBy, fulfilledName }) {
   const amount = toInt(bobAmount);
   if (!exchangeId) {
     throw new Error('missing exchange_id');
@@ -108,6 +108,8 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
 
   const cleanReason = reason ? String(reason) : 'redeem';
   const cleanProductName = productName === null || productName === undefined ? null : String(productName);
+  const cleanFulfilledBy = fulfilledBy === null || fulfilledBy === undefined ? '' : String(fulfilledBy).trim();
+  const cleanFulfilledName = fulfilledName === null || fulfilledName === undefined ? '' : String(fulfilledName).trim();
 
   await ensureAccount(db, { userid });
 
@@ -129,8 +131,8 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
     }
 
     await db.run(
-      'UPDATE redeems SET fulfilled_at = unixepoch() WHERE exchange_id = ? AND fulfilled_at IS NULL',
-      [String(exchangeId)],
+      'UPDATE redeems SET fulfilled_at = unixepoch(), fulfilled_by = ?, fulfilled_name = ? WHERE exchange_id = ? AND fulfilled_at IS NULL',
+      [cleanFulfilledBy || null, cleanFulfilledName || null, String(exchangeId)],
     );
     const row = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
     return {
@@ -147,8 +149,8 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
 
   try {
     await db.run(
-      'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at) VALUES(?, ?, ?, ?, ?, unixepoch())',
-      [String(exchangeId), String(userid), String(productId), cleanProductName, amount],
+      'INSERT INTO redeems(exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, fulfilled_by, fulfilled_name) VALUES(?, ?, ?, ?, ?, unixepoch(), ?, ?)',
+      [String(exchangeId), String(userid), String(productId), cleanProductName, amount, cleanFulfilledBy || null, cleanFulfilledName || null],
     );
   } catch (err) {
     if (isUniqueViolation(err)) {

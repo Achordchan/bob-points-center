@@ -9,6 +9,23 @@ function metricValue(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+
+function formatUptime(seconds) {
+  const total = Number(seconds || 0);
+  if (!Number.isFinite(total) || total <= 0) return '-';
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  return `${days} 天 ${hours} 小时 ${minutes} 分钟`;
+}
+
+function formatMemory(info) {
+  const total = Number(info?.memoryTotalMb || 0);
+  const free = Number(info?.memoryFreeMb || 0);
+  if (!total) return '-';
+  return `${Math.round((total - free) / 1024)} / ${Math.round(total / 1024)} GB`;
+}
+
 export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
   const [summary, setSummary] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
@@ -73,14 +90,27 @@ export default function Dashboard({ dingtalk, onOpenDingtalk, onNavigate }) {
 
       <Card title="系统信息">
         <div className="system-info-grid">
-          <div><Typography.Text type="secondary">服务器 IP</Typography.Text><b>{systemInfo?.ip || '-'}</b></div>
+          <div><Typography.Text type="secondary">服务名称</Typography.Text><b>{systemInfo?.service || '-'}</b></div>
           <div><Typography.Text type="secondary">访问域名</Typography.Text><b>{systemInfo?.host || '-'}</b></div>
-          <div><Typography.Text type="secondary">技术栈</Typography.Text><b>{systemInfo?.frontend || '-'}</b></div>
+          <div><Typography.Text type="secondary">公网 IP</Typography.Text><b>{systemInfo?.ip || '-'}</b></div>
+          <div><Typography.Text type="secondary">内网 IP</Typography.Text><b>{systemInfo?.localIps?.join('、') || '-'}</b></div>
+          <div><Typography.Text type="secondary">主机名</Typography.Text><b>{systemInfo?.hostname || '-'}</b></div>
+          <div><Typography.Text type="secondary">系统</Typography.Text><b>{systemInfo?.platform || '-'}</b></div>
+          <div><Typography.Text type="secondary">架构</Typography.Text><b>{systemInfo?.arch || '-'}</b></div>
+          <div><Typography.Text type="secondary">CPU</Typography.Text><b>{systemInfo?.cpu ? `${systemInfo.cpu} × ${systemInfo.cpuCores || 1}` : '-'}</b></div>
+          <div><Typography.Text type="secondary">内存占用</Typography.Text><b>{formatMemory(systemInfo)}</b></div>
+          <div><Typography.Text type="secondary">运行环境</Typography.Text><b>{systemInfo?.environment || '-'}</b></div>
           <div><Typography.Text type="secondary">后端</Typography.Text><b>{systemInfo?.runtime || '-'}</b></div>
+          <div><Typography.Text type="secondary">前端</Typography.Text><b>{systemInfo?.frontend || '-'}</b></div>
           <div><Typography.Text type="secondary">数据库</Typography.Text><b>{systemInfo?.database || '-'}</b></div>
           <div><Typography.Text type="secondary">版本号</Typography.Text><b>{systemInfo?.version || '-'}</b></div>
+          <div><Typography.Text type="secondary">进程 ID</Typography.Text><b>{systemInfo?.pid || '-'}</b></div>
+          <div><Typography.Text type="secondary">运行时长</Typography.Text><b>{formatUptime(systemInfo?.uptimeSeconds)}</b></div>
+          <div><Typography.Text type="secondary">时区</Typography.Text><b>{systemInfo?.timezone || '-'}</b></div>
           <div><Typography.Text type="secondary">作者</Typography.Text><b>{systemInfo?.author || '-'}</b></div>
-          <div><Typography.Text type="secondary">系统</Typography.Text><b>{systemInfo?.platform || '-'}</b></div>
+          <div><Typography.Text type="secondary">邮箱</Typography.Text><b>{systemInfo?.authorEmail || '-'}</b></div>
+          <div><Typography.Text type="secondary">手机号</Typography.Text><b>{systemInfo?.authorPhone || '-'}</b></div>
+          <div><Typography.Text type="secondary">地区</Typography.Text><b>{systemInfo?.authorRegion || '-'}</b></div>
         </div>
       </Card>
 

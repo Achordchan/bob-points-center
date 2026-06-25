@@ -47,11 +47,29 @@ const variableDescriptions = {
   stock: '商品当前库存',
 };
 
-function renderVariableHelp(vars) {
+function parseTemplateVars(vars) {
   const keys = Array.from(String(vars || '').matchAll(/\{\{([^}]+)\}\}/g)).map((m) => m[1]).filter(Boolean);
+  return keys;
+}
+
+function collectTemplateVars(templates) {
+  const seen = new Set();
+  const keys = [];
+  templates.forEach((item) => {
+    parseTemplateVars(item.vars).forEach((key) => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    });
+  });
+  return keys;
+}
+
+function renderVariableHelp(keys) {
   if (!keys.length) return null;
   return <div className="template-variable-help">
-    <Typography.Text type="secondary">变量说明</Typography.Text>
+    <Typography.Text type="secondary">模板变量</Typography.Text>
     <div className="template-variable-grid">
       {keys.map((key) => <div className="template-variable-item" key={key}>
         <code>{`{{${key}}}`}</code>
@@ -69,12 +87,11 @@ function Toolbar({ onRefresh, onReset, onSave }) {
   </Space>;
 }
 
-function TemplateFields({ namePrefix, vars, withButtons = false }) {
+function TemplateFields({ namePrefix, withButtons = false }) {
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <Form.Item label="启用" name={[...namePrefix, 'enabled']} valuePropName="checked"><Switch /></Form.Item>
     <Form.Item label="标题" name={[...namePrefix, 'title']} rules={[{ required: true, message: '请输入标题' }]}><Input /></Form.Item>
     <Form.Item label="正文" name={[...namePrefix, 'content']} rules={[{ required: true, message: '请输入正文' }]}><Input.TextArea rows={6} /></Form.Item>
-    {renderVariableHelp(vars)}
     {withButtons && <>
       <Divider style={{ margin: '4px 0' }} />
       <Form.List name={[...namePrefix, 'buttons']}>
@@ -130,13 +147,15 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const items = templates.map((item) => ({
     key: item.key,
     label: item.label,
-    children: <TemplateFields namePrefix={['templates', item.key]} vars={item.vars} withButtons={withButtons} />,
+    children: <TemplateFields namePrefix={['templates', item.key]} withButtons={withButtons} />,
   }));
+  const templateVars = collectTemplateVars(templates);
 
   return <Card loading={loading}>
     <Toolbar onRefresh={load} onReset={reset} onSave={save} />
     <Form form={form} layout="vertical">
       <Form.Item label="总开关" name="enabled" valuePropName="checked"><Switch /></Form.Item>
+      {renderVariableHelp(templateVars)}
       {withChannel && <Card
         size="small"
         title="群发送配置"

@@ -1,30 +1,7 @@
 import { useEffect, useState } from 'react';
-import { App, Alert, Button, Card, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload } from 'antd';
+import { App, Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload } from 'antd';
 import { api } from '../api.js';
 import { formatTs } from '../utils.js';
-
-function Attendance({ dingtalk }) {
-  const { message } = App.useApp(); const [form] = Form.useForm(); const [departments, setDepartments] = useState([]); const [mode, setMode] = useState('all');
-  const load = async () => { const data = await api('/admin/settings/attendance-reward'); form.setFieldsValue(data.data || {}); setMode(data.data?.departmentMode || 'all'); };
-  const loadDepartments = async () => { if (!dingtalk?.connected) return setDepartments([]); setDepartments((await api('/admin/settings/dingtalk/departments')).data || []); };
-  useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
-  useEffect(() => { loadDepartments().catch(() => setDepartments([])); }, [dingtalk?.connected]);
-  const save = async (values) => { await api('/admin/settings/attendance-reward', { method: 'POST', body: { ...values, departmentMode: mode, departmentIds: mode === 'selected' ? values.departmentIds || [] : [] } }); message.success('打卡奖励已保存'); load(); };
-  return <Card title="钉钉打卡奖励" extra={<Button type="primary" onClick={() => form.submit()}>保存</Button>}>
-    {!dingtalk?.connected && <Typography.Paragraph type="warning">请先完成钉钉连接。当前不阻断本地管理功能，但部门选择不可用。</Typography.Paragraph>}
-    <Form form={form} layout="vertical" onFinish={save} className="settings-form">
-      <Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch /></Form.Item>
-      <Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch /></Form.Item>
-      <Form.Item name="lateGraceMinutes" label="宽限分钟数"><InputNumber min={0} precision={0} /></Form.Item>
-      <Form.Item label="奖励范围"><Space><Form.Item name="rewardMin" noStyle><InputNumber min={1} precision={0} /></Form.Item><span>—</span><Form.Item name="rewardMax" noStyle><InputNumber min={1} precision={0} /></Form.Item></Space></Form.Item>
-      <Form.Item name="maxPerDay" label="每日上限"><InputNumber min={1} precision={0} /></Form.Item>
-      <Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch /></Form.Item>
-      <Form.Item label="适用部门"><Select value={mode} onChange={setMode} options={[{ value: 'all', label: '全部部门' }, { value: 'selected', label: '指定部门' }]} style={{ width: 160 }} /></Form.Item>
-      {mode === 'selected' && <Form.Item name="departmentIds" label="部门多选"><Select mode="multiple" disabled={!dingtalk?.connected} placeholder={dingtalk?.connected ? '选择部门' : '请先完成钉钉连接'} options={departments.map((d) => ({ value: String(d.dept_id), label: `${'　'.repeat(Number(d.depth || 0))}${d.name}` }))} /></Form.Item>}
-      <Form.Item name="reason" label="奖励理由"><Input placeholder="打卡奖励" /></Form.Item>
-    </Form>
-  </Card>;
-}
 
 function Tokens() {
   const { message } = App.useApp(); const [rows, setRows] = useState([]);
@@ -37,23 +14,9 @@ function Tokens() {
 }
 
 const settingsTables = ['system_settings', 'mall_products', 'charity_projects', 'mall_opening_schedule', 'content_faq', 'content_announcements', 'system_versions'];
-const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'audit_logs', 'system_settings'];
-const backupHistoryKey = 'bob_admin_backup_history_v1';
-
+const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'system_settings'];
 function tableRowsFromMap(map = {}) {
   return Object.entries(map).map(([table, count]) => ({ table, count }));
-}
-
-function readBackupHistory() {
-  try {
-    return JSON.parse(localStorage.getItem(backupHistoryKey) || '[]');
-  } catch {
-    return [];
-  }
-}
-
-function writeBackupHistory(rows) {
-  localStorage.setItem(backupHistoryKey, JSON.stringify(rows.slice(0, 30)));
 }
 
 function downloadJson(filename, data) {
@@ -80,13 +43,14 @@ function Backup() {
   const [importDetail, setImportDetail] = useState(null);
   const [importReport, setImportReport] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [history, setHistory] = useState(() => readBackupHistory());
+  const [history, setHistory] = useState([]);
 
-  const remember = (row) => {
-    const next = [{ ...row, id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}` }, ...history];
-    setHistory(next.slice(0, 30));
-    writeBackupHistory(next);
+  const loadHistory = async () => {
+    const data = await api('/admin/backup/history?limit=30');
+    setHistory(data.data || []);
   };
+
+  useEffect(() => { loadHistory().catch((e) => message.error(e.message || '备份历史加载失败')); }, []);
 
   const exportBackup = async (mode) => {
     setBusy(true);
@@ -95,11 +59,11 @@ function Backup() {
       const res = await fetch(`/admin/backup/export?mode=${mode}`, { credentials: 'include' });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?._meta) throw new Error(data?.error || '导出失败');
-      const filename = backupFilename(mode);
+      const filename = data?._meta?.filename || backupFilename(mode);
       downloadJson(filename, data);
       const detail = { mode, filename, meta: data._meta };
       setExportDetail(detail);
-      remember({ action: '导出', mode, filename, at: Math.floor(Date.now() / 1000), status: '完成' });
+      await loadHistory();
       message.success('备份已导出');
     } catch (err) {
       message.error(err.message || '导出失败');
@@ -128,9 +92,9 @@ function Backup() {
     const run = async () => {
       setBusy(true);
       try {
-        const data = await api('/admin/backup/import', { method: 'POST', body: { backup: importDetail.backup, mode: importMode } });
+        const data = await api('/admin/backup/import', { method: 'POST', body: { backup: importDetail.backup, mode: importMode, filename: importDetail.filename } });
         setImportReport(data.report || {});
-        remember({ action: '导入', mode: importMode, filename: importDetail.filename, at: Math.floor(Date.now() / 1000), status: '完成' });
+        await loadHistory();
         message.success('备份导入完成');
       } catch (err) {
         message.error(err.message || '导入失败');
@@ -200,11 +164,101 @@ function Backup() {
         { title: '文件', dataIndex: 'filename', ellipsis: true },
         { title: '状态', dataIndex: 'status' },
       ]} />
-      <Typography.Text type="secondary">历史记录保存在当前浏览器，用于追溯最近导出和导入操作。</Typography.Text>
+      <Typography.Text type="secondary">历史记录保存在服务器，用于追溯最近导出和导入操作。</Typography.Text>
     </Card>
   </Space>;
 }
 
-export default function Integrations(props) {
-  return <Tabs items={[{ key: 'ding', label: '钉钉与打卡', children: <Attendance {...props} /> }, { key: 'token', label: 'BOB Token', children: <Tokens /> }, { key: 'backup', label: '备份', children: <Backup /> }]} />;
+
+function ImageOptimization() {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [overview, setOverview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await api('/admin/settings/image-optimization');
+      setOverview(data.data || {});
+      form.setFieldsValue(data.data?.settings || {});
+    } catch (err) {
+      message.error(err.message || '图片优化状态加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async (values) => {
+    setLoading(true);
+    try {
+      await api('/admin/settings/image-optimization', { method: 'POST', body: values });
+      message.success('图片优化配置已保存');
+      await load();
+    } catch (err) {
+      message.error(err.message || '保存失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runBatch = async (mode) => {
+    setRunning(true);
+    try {
+      const data = await api('/admin/image-optimization/batch', { method: 'POST', body: { mode } });
+      const job = data.data || {};
+      message.success(`处理完成：成功 ${job.success || 0}，失败 ${job.failed || 0}`);
+      await load();
+    } catch (err) {
+      message.error(err.message || '处理失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const stats = overview?.stats || {};
+  const lastJob = overview?.lastJob || null;
+  const errorRows = (lastJob?.errors || []).map((error, index) => ({ id: index + 1, error }));
+
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    <Card title="图片优化" extra={<Space wrap><Button loading={loading} onClick={load}>刷新</Button><Button type="primary" loading={running} onClick={() => runBatch('pending')}>转换未优化图片</Button><Button loading={running} onClick={() => runBatch('retry')}>重试</Button></Space>}>
+      <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 4 }} items={[
+        { key: 'total', label: '图片总数', children: stats.total ?? 0 },
+        { key: 'converted', label: '已转 WebP', children: stats.converted ?? 0 },
+        { key: 'pending', label: '待处理', children: stats.pending ?? 0 },
+        { key: 'external', label: '外链图片', children: stats.external ?? 0 },
+      ]} />
+    </Card>
+
+    <Card title="处理规则">
+      <Form form={form} layout="vertical" onFinish={save} className="settings-form">
+        <Form.Item name="enabled" label="启用上传转 WebP" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="quality" label="WebP 质量"><InputNumber min={60} max={95} precision={0} /></Form.Item>
+        <Form.Item label="最大尺寸"><Space><Form.Item name="maxWidth" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="宽" /></Form.Item><Form.Item name="maxHeight" noStyle><InputNumber min={320} max={4096} precision={0} addonAfter="高" /></Form.Item></Space></Form.Item>
+        <Form.Item name="keepOriginal" label="保留原图" valuePropName="checked"><Switch /></Form.Item>
+        <Button type="primary" loading={loading} onClick={() => form.submit()}>保存配置</Button>
+      </Form>
+    </Card>
+
+    <Card title="最近一次处理">
+      {lastJob ? <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }} items={[
+          { key: 'time', label: '时间', children: formatTs(lastJob.endedAt || lastJob.startedAt) },
+          { key: 'total', label: '处理数', children: lastJob.total || 0 },
+          { key: 'success', label: '成功', children: lastJob.success || 0 },
+          { key: 'failed', label: '失败', children: lastJob.failed || 0 },
+          { key: 'skipped', label: '跳过', children: lastJob.skipped || 0 },
+          { key: 'mode', label: '模式', children: lastJob.mode === 'retry' ? '重试' : '未优化图片' },
+        ]} />
+        {errorRows.length > 0 && <Table size="small" rowKey="id" pagination={{ pageSize: 5 }} dataSource={errorRows} columns={[{ title: '失败原因', dataIndex: 'error' }]} />}
+      </Space> : <Typography.Text type="secondary">暂无处理记录</Typography.Text>}
+    </Card>
+  </Space>;
+}
+
+export default function Integrations() {
+  return <Tabs items={[{ key: 'token', label: 'BOB Token', children: <Tokens /> }, { key: 'backup', label: '备份', children: <Backup /> }, { key: 'images', label: '图片优化', children: <ImageOptimization /> }]} />;
 }

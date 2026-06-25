@@ -39,8 +39,7 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, onOpenDi
     <Layout className="admin-shell">
       <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed} width={232}>
         <div className="brand">
-          <div className="brand-mark">B</div>
-          {!collapsed && <div><b>BOB 管理端</b></div>}
+          {!collapsed && <b>BOB币发行管理</b>}
         </div>
         <Menu theme="dark" mode="inline" selectedKeys={[activeKey]} items={navItems} onClick={({ key }) => onChange(key)} />
       </Sider>

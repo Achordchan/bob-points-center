@@ -21,12 +21,15 @@
     "@alicloud/tea-util": "latest",
     "@ant-design/icons": "^6.2.5",
     "@ant-design/pro-components": "^2.8.10",
+    "@wangeditor/editor": "^5.1.23",
+    "@wangeditor/editor-for-react": "^1.0.6",
     "antd": "^5.29.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "pg": "^8.19.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "sharp": "^0.35.2",
     "ws": "^8.19.0"
   },
   "devDependencies": {

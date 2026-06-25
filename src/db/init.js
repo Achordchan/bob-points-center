@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS redeems (
   product_name TEXT,
   bob_amount BIGINT NOT NULL,
   fulfilled_at BIGINT,
+  fulfilled_by TEXT,
+  fulfilled_name TEXT,
   hidden INTEGER NOT NULL DEFAULT 0,
   limit_round INTEGER NOT NULL DEFAULT 1,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
@@ -168,6 +170,31 @@ CREATE TABLE IF NOT EXISTS user_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_user_feedback_userid_created ON user_feedback(userid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_feedback_status_created ON user_feedback(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS user_feedback_messages (
+  id BIGSERIAL PRIMARY KEY,
+  feedback_id BIGINT NOT NULL,
+  sender_type TEXT NOT NULL,
+  sender_id TEXT,
+  sender_name TEXT,
+  content TEXT NOT NULL,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (feedback_id) REFERENCES user_feedback(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_messages_feedback_created ON user_feedback_messages(feedback_id, created_at ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS admin_backup_history (
+  id BIGSERIAL PRIMARY KEY,
+  action TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  filename TEXT,
+  status TEXT NOT NULL DEFAULT 'success',
+  actor_id TEXT,
+  actor_name TEXT,
+  details TEXT,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr})
+);
+CREATE INDEX IF NOT EXISTS idx_admin_backup_history_created ON admin_backup_history(created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS system_versions (
   id BIGSERIAL PRIMARY KEY,
@@ -546,7 +573,18 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS cdk_enabled INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
+  await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_by TEXT");
+  await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_name TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
+  await db.exec(`INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
+    SELECT f.id, 'user', f.userid, COALESCE(f.name, ''), f.content, f.created_at
+    FROM user_feedback f
+    WHERE NOT EXISTS (SELECT 1 FROM user_feedback_messages m WHERE m.feedback_id = f.id AND m.sender_type = 'user')`);
+  await db.exec(`INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
+    SELECT f.id, 'admin', COALESCE(f.handled_by, ''), COALESCE(f.handled_name, ''), f.reply, COALESCE(f.handled_at, f.updated_at, f.created_at)
+    FROM user_feedback f
+    WHERE COALESCE(f.reply, '') <> ''
+      AND NOT EXISTS (SELECT 1 FROM user_feedback_messages m WHERE m.feedback_id = f.id AND m.sender_type = 'admin')`);
   await db.run('INSERT INTO mall_opening_schedule(id, is_open, auto_enabled) VALUES(1, 1, 0) ON CONFLICT DO NOTHING');
   await seedSystemVersions(db);
   return db;

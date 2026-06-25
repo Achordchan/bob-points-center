@@ -138,6 +138,27 @@ function normalizeFeedbackCategory(value) {
   return 'suggestion';
 }
 
+async function attachFeedbackMessages(db, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const ids = list.map((row) => Number(row?.id || 0)).filter((id) => Number.isFinite(id) && id > 0);
+  if (!ids.length) return list;
+  const placeholders = ids.map(() => '?').join(',');
+  const messages = await db.all(
+    `SELECT id, feedback_id, sender_type, sender_id, sender_name, content, created_at
+     FROM user_feedback_messages
+     WHERE feedback_id IN (${placeholders})
+     ORDER BY feedback_id ASC, created_at ASC, id ASC`,
+    ids,
+  );
+  const grouped = new Map();
+  (messages || []).forEach((item) => {
+    const key = Number(item.feedback_id || 0);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(item);
+  });
+  return list.map((row) => ({ ...row, messages: grouped.get(Number(row.id || 0)) || [] }));
+}
+
 async function ensureMallOpeningRow(db) {
   const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
   if (row) return row;
@@ -635,7 +656,8 @@ export function mallRouter() {
          LIMIT ?`,
         [userid, limit],
       );
-      return res.json({ ok: true, count: (rows || []).length, data: rows || [] });
+      const data = await attachFeedbackMessages(db, rows || []);
+      return res.json({ ok: true, count: data.length, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -659,13 +681,54 @@ export function mallRouter() {
     }
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const r = await db.run(
-        `INSERT INTO user_feedback(userid, name, category, content, contact, status, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, 'pending', unixepoch(), unixepoch())`,
-        [userid, name || '', category, content, contact || ''],
-      );
-      publishMoreChanged('feedback', { userids: [userid], feedback_id: Number(r?.lastID || 0) });
-      return res.json({ ok: true, id: Number(r?.lastID || 0) });
+      let feedbackId = 0;
+      await db.transaction(async (tx) => {
+        const r = await tx.run(
+          `INSERT INTO user_feedback(userid, name, category, content, contact, status, created_at, updated_at)
+           VALUES(?, ?, ?, ?, ?, 'pending', unixepoch(), unixepoch())`,
+          [userid, name || '', category, content, contact || ''],
+        );
+        feedbackId = Number(r?.lastID || 0);
+        await tx.run(
+          `INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
+           VALUES(?, 'user', ?, ?, ?, unixepoch())`,
+          [feedbackId, userid, name || '', content],
+        );
+      });
+      publishMoreChanged('feedback', { userids: [userid], feedback_id: feedbackId });
+      return res.json({ ok: true, id: feedbackId });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/more/feedback/:id/messages', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const name = req.webSession?.name ? String(req.webSession.name) : '';
+    const id = toOptionalInt(req.params?.id);
+    const content = req.body?.content ? String(req.body.content).trim() : '';
+    if (!userid) return res.status(401).json({ error: 'unauthorized' });
+    if (!id) return res.status(400).json({ error: 'missing id' });
+    if (!content) return res.status(400).json({ error: 'missing content' });
+    if (content.length > 2000) return res.status(400).json({ error: 'content too long' });
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const row = await db.get('SELECT id FROM user_feedback WHERE id = ? AND userid = ?', [id, userid]);
+      if (!row) return res.status(404).json({ error: 'feedback not found' });
+      await db.transaction(async (tx) => {
+        await tx.run(
+          `INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
+           VALUES(?, 'user', ?, ?, ?, unixepoch())`,
+          [id, userid, name || '', content],
+        );
+        await tx.run(
+          `UPDATE user_feedback SET status = 'pending', updated_at = unixepoch() WHERE id = ?`,
+          [id],
+        );
+      });
+      publishMoreChanged('feedback', { userids: [userid], feedback_id: id });
+      return res.json({ ok: true, id });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
