@@ -85,6 +85,58 @@ function toOptionalInt(value) {
   return toInt(text);
 }
 
+function parseAuditPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === 'object') return payload;
+  try {
+    return JSON.parse(String(payload));
+  } catch {
+    return null;
+  }
+}
+
+async function enrichRedeemConfirmAuditRows(db, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const payloadByRow = new Map();
+  const exchangeIds = [];
+  for (const row of list) {
+    const payload = parseAuditPayload(row?.payload);
+    if (!payload) continue;
+    payloadByRow.set(row, payload);
+    const exchangeId = payload.exchangeId || payload.exchange_id;
+    const cleanExchangeId = exchangeId === null || exchangeId === undefined ? '' : String(exchangeId).trim();
+    if (cleanExchangeId.startsWith('CDK_')) exchangeIds.push(cleanExchangeId);
+  }
+  const uniqueExchangeIds = Array.from(new Set(exchangeIds));
+  if (!uniqueExchangeIds.length) return list;
+
+  const placeholders = uniqueExchangeIds.map(() => '?').join(',');
+  const cdkRows = await db.all(
+    `SELECT redeem_exchange_id, product_bob_amount
+       FROM redeem_cdks
+      WHERE redeem_exchange_id IN (${placeholders})`,
+    uniqueExchangeIds,
+  );
+  const amountByExchangeId = new Map((cdkRows || []).map((row) => [
+    String(row.redeem_exchange_id || ''),
+    Number(row.product_bob_amount),
+  ]));
+
+  for (const row of list) {
+    const payload = payloadByRow.get(row);
+    if (!payload) continue;
+    const exchangeId = payload.exchangeId || payload.exchange_id;
+    const amount = amountByExchangeId.get(String(exchangeId || ''));
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    row.payload = JSON.stringify({
+      ...payload,
+      cdkProductBobAmount: amount,
+      displayBobAmount: amount,
+    });
+  }
+  return list;
+}
+
 async function runInTransaction(db, fn) {
   if (typeof db?.transaction === 'function') {
     return await db.transaction(fn);
@@ -1203,9 +1255,13 @@ export function adminRouter() {
       }
 
       const rows = await db.all(
-        `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at
+        `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
+                r.bob_amount, r.fulfilled_at, r.created_at,
+                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
+         LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
          WHERE r.fulfilled_at IS NOT NULL AND COALESCE(r.hidden, 0) = 0${whereCursorSql}
          ORDER BY r.fulfilled_at DESC, r.exchange_id DESC
          LIMIT ?`,
@@ -1247,9 +1303,13 @@ export function adminRouter() {
       }
 
       const rows = await db.all(
-        `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at
+        `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
+                r.bob_amount, r.fulfilled_at, r.created_at,
+                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
+         LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
          WHERE r.fulfilled_at IS NULL${whereCursorSql}
          ORDER BY r.created_at DESC, r.exchange_id DESC
          LIMIT ?`,
@@ -1326,6 +1386,7 @@ export function adminRouter() {
          WHERE created_at >= ?
          ORDER BY id DESC${hasLimit ? '\n         LIMIT ?' : ''}`;
       const rows = await db.all(sql, hasLimit ? [minCreatedAt, limit] : [minCreatedAt]);
+      await enrichRedeemConfirmAuditRows(db, rows);
       return res.json({ ok: true, days, limit, data: rows || [] });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -2132,12 +2193,18 @@ export function adminRouter() {
 
     try {
       const db = req.app.locals.db;
+      const cdkRow = await db.get(
+        'SELECT product_bob_amount FROM redeem_cdks WHERE redeem_exchange_id = ? LIMIT 1',
+        [String(payload.exchange_id || '')],
+      );
+      const displayBobAmount = Number(cdkRow?.product_bob_amount);
       req.auditLogPayload = {
         action: 'redeem_confirm',
         exchangeId: payload.exchange_id,
         productId: payload.product_id,
         productName: payload.product_name,
-        bobAmount: payload.bob_amount,
+        bobAmount: Number.isFinite(displayBobAmount) && displayBobAmount > 0 ? displayBobAmount : payload.bob_amount,
+        actualBobAmount: payload.bob_amount,
         userid: payload.userid,
       };
       const result = await redeemConfirmWithNotify(db, cfg, {

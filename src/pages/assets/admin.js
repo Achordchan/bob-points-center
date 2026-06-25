@@ -568,7 +568,7 @@
       const payload = parsePayload(row);
       if (!payload) return '';
       const name = payload.productName || payload.product_name;
-      const amount = payload.bobAmount ?? payload.bob_amount;
+      const amount = payload.displayBobAmount ?? payload.cdkProductBobAmount ?? payload.bobAmount ?? payload.bob_amount;
       const parts = [];
       if (name) parts.push(String(name));
       if (Number.isFinite(Number(amount))) parts.push(`扣${Number(amount)}BOB`);
@@ -3022,6 +3022,34 @@
     await loadCdkList();
   }
 
+  function formatRedeemDeductText(row) {
+    const source = row?.redeem_source ? String(row.redeem_source) : '';
+    const exchangeId = row?.exchange_id ? String(row.exchange_id) : '';
+    const isCdk = source === 'cdk' || exchangeId.startsWith('CDK_');
+    const amount = isCdk ? Number(row?.cdk_product_bob_amount ?? row?.bob_amount) : Number(row?.bob_amount);
+    if (!Number.isFinite(amount)) return '-';
+    return amount > 0 ? `-${amount}` : '0';
+  }
+
+  function renderRedeemTableRow(row, { fulfilled = false } = {}) {
+    const ts = formatTs(fulfilled ? (row?.fulfilled_at || row?.created_at) : row?.created_at);
+    const userid = row?.userid ? String(row.userid) : '';
+    const name = row?.name ? String(row.name) : '';
+    const exchangeId = row?.exchange_id ? String(row.exchange_id) : '';
+    const productId = row?.product_id ? String(row.product_id) : '';
+    const productName = row?.product_name ? String(row.product_name) : '';
+    const productText = productName && productId ? `${productName} (${productId})` : (productName || productId);
+    const amountText = formatRedeemDeductText(row);
+    return `<tr>
+      <td class="muted">${safeText(ts)}</td>
+      <td class="muted">${safeText(userid)}</td>
+      <td>${safeText(name || '-')}</td>
+      <td class="muted">${safeText(exchangeId)}</td>
+      <td>${safeText(productText)}</td>
+      <td>${safeText(amountText)}</td>
+    </tr>`;
+  }
+
   async function loadRedeemHistory() {
     const stat = document.getElementById('redeemHistoryStat');
     const tbody = document.getElementById('redeemHistoryTable');
@@ -3041,25 +3069,7 @@
 
     const rows = Array.isArray(r.data.data) ? r.data.data : [];
     tbody.innerHTML = rows
-      .map((x) => {
-        const ts = formatTs(x?.fulfilled_at || x?.created_at);
-        const userid = x?.userid ? String(x.userid) : '';
-        const name = x?.name ? String(x.name) : '';
-        const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
-        const productId = x?.product_id ? String(x.product_id) : '';
-        const productName = x?.product_name ? String(x.product_name) : '';
-        const productText = productName && productId ? `${productName} (${productId})` : (productName || productId);
-        const amount = Number(x?.bob_amount);
-        const amountText = Number.isFinite(amount) ? `-${amount}` : '-';
-        return `<tr>
-          <td class="muted">${safeText(ts)}</td>
-          <td class="muted">${safeText(userid)}</td>
-          <td>${safeText(name || '-')}</td>
-          <td class="muted">${safeText(exchangeId)}</td>
-          <td>${safeText(productText)}</td>
-          <td>${safeText(amountText)}</td>
-        </tr>`;
-      })
+      .map((x) => renderRedeemTableRow(x, { fulfilled: true }))
       .join('');
 
     stat.textContent = `已加载 ${rows.length} 条${redeemHistoryState.hasMore ? '（可继续加载）' : ''}`;
@@ -3099,25 +3109,7 @@
 
       const rows = Array.isArray(r.data.data) ? r.data.data : [];
       const html = rows
-        .map((x) => {
-          const ts = formatTs(x?.fulfilled_at || x?.created_at);
-          const userid = x?.userid ? String(x.userid) : '';
-          const name = x?.name ? String(x.name) : '';
-          const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
-          const productId = x?.product_id ? String(x.product_id) : '';
-          const productName = x?.product_name ? String(x.product_name) : '';
-          const productText = productName && productId ? `${productName} (${productId})` : (productName || productId);
-          const amount = Number(x?.bob_amount);
-          const amountText = Number.isFinite(amount) ? `-${amount}` : '-';
-          return `<tr>
-            <td class="muted">${safeText(ts)}</td>
-            <td class="muted">${safeText(userid)}</td>
-            <td>${safeText(name || '-')}</td>
-            <td class="muted">${safeText(exchangeId)}</td>
-            <td>${safeText(productText)}</td>
-            <td>${safeText(amountText)}</td>
-          </tr>`;
-        })
+        .map((x) => renderRedeemTableRow(x, { fulfilled: true }))
         .join('');
 
       tbody.insertAdjacentHTML('beforeend', html);
@@ -3177,25 +3169,7 @@
 
     const rows = Array.isArray(r.data.data) ? r.data.data : [];
     tbody.innerHTML = rows
-      .map((x) => {
-        const ts = formatTs(x?.created_at);
-        const userid = x?.userid ? String(x.userid) : '';
-        const name = x?.name ? String(x.name) : '';
-        const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
-        const productId = x?.product_id ? String(x.product_id) : '';
-        const productName = x?.product_name ? String(x.product_name) : '';
-        const productText = productName && productId ? `${productName} (${productId})` : (productName || productId);
-        const amount = Number(x?.bob_amount);
-        const amountText = Number.isFinite(amount) ? `-${amount}` : '-';
-        return `<tr>
-          <td class="muted">${safeText(ts)}</td>
-          <td class="muted">${safeText(userid)}</td>
-          <td>${safeText(name || '-')}</td>
-          <td class="muted">${safeText(exchangeId)}</td>
-          <td>${safeText(productText)}</td>
-          <td>${safeText(amountText)}</td>
-        </tr>`;
-      })
+      .map((x) => renderRedeemTableRow(x))
       .join('');
 
     stat.textContent = `已加载 ${rows.length} 条${redeemPendingState.hasMore ? '（可继续加载）' : ''}`;
@@ -3226,25 +3200,7 @@
 
       const rows = Array.isArray(r.data.data) ? r.data.data : [];
       const html = rows
-        .map((x) => {
-          const ts = formatTs(x?.created_at);
-          const userid = x?.userid ? String(x.userid) : '';
-          const name = x?.name ? String(x.name) : '';
-          const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
-          const productId = x?.product_id ? String(x.product_id) : '';
-          const productName = x?.product_name ? String(x.product_name) : '';
-          const productText = productName && productId ? `${productName} (${productId})` : (productName || productId);
-          const amount = Number(x?.bob_amount);
-          const amountText = Number.isFinite(amount) ? `-${amount}` : '-';
-          return `<tr>
-            <td class="muted">${safeText(ts)}</td>
-            <td class="muted">${safeText(userid)}</td>
-            <td>${safeText(name || '-')}</td>
-            <td class="muted">${safeText(exchangeId)}</td>
-            <td>${safeText(productText)}</td>
-            <td>${safeText(amountText)}</td>
-          </tr>`;
-        })
+        .map((x) => renderRedeemTableRow(x))
         .join('');
 
       tbody.insertAdjacentHTML('beforeend', html);
