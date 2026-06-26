@@ -97,13 +97,33 @@ function getRawConversation(data) {
   return nested && typeof nested === 'object' ? { ...raw, ...nested } : raw;
 }
 
+function collectConversationCandidates(value, key = '', result = [], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return result;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const text = String(value).trim();
+    if (text) result.push({ key, value: text });
+    return result;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectConversationCandidates(item, `${key}[${index}]`, result, depth + 1));
+    return result;
+  }
+  if (typeof value === 'object') {
+    Object.entries(value).forEach(([childKey, childValue]) => {
+      collectConversationCandidates(childValue, key ? `${key}.${childKey}` : childKey, result, depth + 1);
+    });
+  }
+  return result;
+}
+
 function extractDingtalkConversation(data) {
   const source = getRawConversation(data);
-  const candidates = [source.openConversationId, source.openCid, source.cid, source.chatId, source.conversationId, source.id]
-    .map((item) => String(item || '').trim())
-    .filter(Boolean);
-  const openConversationId = candidates.find(isLikelyDingtalkGroupConversationId) || '';
-  const chatId = candidates.find((item) => item !== openConversationId && !isLikelyDingtalkGroupConversationId(item)) || '';
+  const candidates = collectConversationCandidates(data);
+  const openConversationId = (
+    candidates.find((item) => /open.*conversation/i.test(item.key) && isLikelyDingtalkGroupConversationId(item.value))
+    || candidates.find((item) => isLikelyDingtalkGroupConversationId(item.value))
+  )?.value || '';
+  const chatId = candidates.find((item) => /(^|\.)(chatId|cid|conversationId|id)$/i.test(item.key) && item.value !== openConversationId)?.value || '';
   const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
   return { openConversationId, chatId, name };
 }

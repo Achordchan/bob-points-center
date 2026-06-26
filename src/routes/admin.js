@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
   buildJsapiConfig,
-  convertDingtalkChatIdToOpenConversationId,
   getAccessToken,
   getDingtalkOrganizationProfile,
   getV1AccessToken,
@@ -2966,31 +2965,12 @@ export function adminRouter() {
       || isGroupFlag
       || memberCount > 2;
     if (explicitSingle) return res.status(400).json({ error: '不能选择单聊，请选择群聊' });
-    if (incomingOpenConversationId && !isStandardGroupConversationId && !chatId) {
-      return res.status(400).json({ error: '钉钉群会话 ID 格式不正确，请重新选择群聊' });
+    if (!incomingOpenConversationId || !isStandardGroupConversationId) {
+      return res.status(400).json({ error: '钉钉没有返回可用群会话 ID，请重新选择群聊' });
     }
     try {
       res.setHeader('Cache-Control', 'no-store');
-      let openConversationId = incomingOpenConversationId;
-      try {
-        if (!isStandardDingtalkGroupOpenConversationId(openConversationId)) {
-          openConversationId = await withTimeout(
-            convertDingtalkChatIdToOpenConversationId(cfg, chatId),
-            5000,
-            '钉钉群会话转换超时，请重新选择群聊',
-          );
-        } else if (hasDingtalkApiCredential(cfg)) {
-          await withTimeout(
-            queryDingtalkOpenGroupBaseInfo(cfg, openConversationId),
-            5000,
-            '钉钉群聊校验超时，请重新选择群聊',
-          );
-        } else if (!explicitGroup) {
-          return res.status(400).json({ error: '无法确认该会话是群聊，请在钉钉客户端重新选择群聊' });
-        }
-      } catch (err) {
-        return res.status(400).json({ error: String(err?.message || err) });
-      }
+      const openConversationId = incomingOpenConversationId;
       const current = await getGroupCardSettings(db);
       const oldPresets = Array.isArray(current?.channelPresets) ? current.channelPresets : [];
       const nextPresets = [

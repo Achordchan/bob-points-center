@@ -90,34 +90,6 @@ export function isStandardDingtalkGroupOpenConversationId(value) {
   return /^cid[A-Za-z0-9+/]{22}==$/.test(String(value || '').trim());
 }
 
-export async function convertDingtalkChatIdToOpenConversationId(cfg, chatId) {
-  const id = String(chatId || '').trim();
-  if (!id) throw new Error('缺少钉钉群会话');
-  const token = await getV1AccessToken(cfg);
-  const client = createImClient();
-  const headers = new dingtalkim_1_0.ChatIdToOpenConversationIdHeaders({});
-  headers.xAcsDingtalkAccessToken = token;
-  let resp;
-  try {
-    resp = await client.chatIdToOpenConversationIdWithOptions(
-      id,
-      headers,
-      new Util.RuntimeOptions({}),
-    );
-  } catch (err) {
-    const message = String(err?.message || err);
-    if (message.toLowerCase().includes('invalid') || message.toLowerCase().includes('invalidechatid')) {
-      throw new Error('钉钉返回的会话不是可转换的群聊，请重新选择群聊');
-    }
-    throw err;
-  }
-  const openConversationId = String(resp?.body?.openConversationId || '').trim();
-  if (!isStandardDingtalkGroupOpenConversationId(openConversationId)) {
-    throw new Error('选择的不是可用钉钉群聊，请重新选择群聊');
-  }
-  return openConversationId;
-}
-
 export async function queryDingtalkOpenGroupBaseInfo(cfg, openConversationId) {
   const id = String(openConversationId || '').trim();
   if (!isStandardDingtalkGroupOpenConversationId(id)) {
