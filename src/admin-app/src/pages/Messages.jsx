@@ -133,7 +133,7 @@ function getConversationTypeText(source) {
 }
 
 function isLikelyDingtalkGroupConversationId(value) {
-  return /^cid[A-Za-z0-9+/]{22}==$/.test(String(value || '').trim());
+  return /^cid[A-Za-z0-9+/=_-]{8,}$/.test(String(value || '').trim());
 }
 
 function isSingleConversation(data) {
@@ -425,7 +425,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       }), 20000, '钉钉选择群聊超时，请重新选择');
       assertGroupConversation(selected);
       const conversation = extractDingtalkConversation(selected);
-      if (!conversation.openConversationId && !conversation.chatId) throw new Error('钉钉没有返回群会话 ID');
+      if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
       const presetName = String(conversation.name || '').trim() || '钉钉群聊';
       const conversationMeta = getRawConversation(selected);
       const data = await api('/admin/settings/group-card/preset', {
@@ -433,7 +433,6 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
         body: {
           name: presetName,
           openConversationId: conversation.openConversationId,
-          chatId: conversation.chatId,
           conversationType: conversationMeta.type ?? conversationMeta.chatType ?? conversationMeta.conversationType ?? conversationMeta.bizType ?? '',
           isGroup: conversationMeta.isGroup ?? conversationMeta.group ?? null,
           memberCount: conversationMeta.memberCount || conversationMeta.membersCount || conversationMeta.userCount || null,

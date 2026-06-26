@@ -2946,11 +2946,9 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
     const rawOpenConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
-    const rawChatId = req.body?.chatId ? String(req.body.chatId).trim() : '';
-    const incomingOpenConversationId = rawOpenConversationId || (isStandardDingtalkGroupOpenConversationId(rawChatId) ? rawChatId : '');
-    const chatId = isStandardDingtalkGroupOpenConversationId(rawChatId) ? '' : rawChatId;
+    const incomingOpenConversationId = rawOpenConversationId;
     const name = req.body?.name ? String(req.body.name).trim() : '';
-    if (!incomingOpenConversationId && !chatId) return res.status(400).json({ error: '缺少钉钉群会话' });
+    if (!incomingOpenConversationId) return res.status(400).json({ error: '缺少钉钉群会话' });
     if (!name) return res.status(400).json({ error: 'missing preset name' });
     const rawConversationType = req.body?.conversationType ?? '';
     const conversationType = String(rawConversationType).toLowerCase();

@@ -87,7 +87,7 @@ function createImClient() {
 }
 
 export function isStandardDingtalkGroupOpenConversationId(value) {
-  return /^cid[A-Za-z0-9+/]{22}==$/.test(String(value || '').trim());
+  return /^cid[A-Za-z0-9+/=_-]{8,}$/.test(String(value || '').trim());
 }
 
 export async function queryDingtalkOpenGroupBaseInfo(cfg, openConversationId) {
