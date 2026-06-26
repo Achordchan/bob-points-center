@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { App as AntApp, ConfigProvider } from 'antd';
+import { App as AntApp, ConfigProvider, Empty } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import AdminApp from './App.jsx';
 import './styles.css';
@@ -9,6 +9,7 @@ createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ConfigProvider
       locale={zhCN}
+      renderEmpty={() => <Empty image={false} description="暂无数据" />}
       form={{
         validateMessages: {
           required: '请填写${label}',

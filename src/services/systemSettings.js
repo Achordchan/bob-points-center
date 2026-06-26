@@ -216,7 +216,7 @@ function normalizeOptionalRecipients(value) {
 function normalizeGroupChannelPresets(value, fallback = []) {
   const source = Array.isArray(value) ? value : fallback;
   const seen = new Set();
-  return source
+  const items = source
     .map((item) => {
       const src = item && typeof item === 'object' ? item : {};
       const openConversationId = normalizeOptionalText(src.openConversationId);
@@ -230,10 +230,13 @@ function normalizeGroupChannelPresets(value, fallback = []) {
     })
     .filter(Boolean)
     .slice(0, 30);
+  if (items.length || source === fallback || !fallback.length) return items;
+  return normalizeGroupChannelPresets(fallback, []);
 }
 
 export function normalizeGroupCardSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
+  const allowEmptyChannelPresets = src.channelPresetsEmpty === true;
   const defaults = DEFAULT_GROUP_CARD_SETTINGS.templates || {};
   const nextTemplates = {};
   for (const [key, def] of Object.entries(defaults)) {
@@ -245,9 +248,14 @@ export function normalizeGroupCardSettings(input) {
       buttons: normalizeButtons(curr?.buttons, def.buttons),
     };
   }
+  const channelPresets = normalizeGroupChannelPresets(
+    src.channelPresets,
+    allowEmptyChannelPresets ? [] : DEFAULT_GROUP_CARD_SETTINGS.channelPresets,
+  );
   return {
     enabled: toBool(src.enabled, DEFAULT_GROUP_CARD_SETTINGS.enabled),
-    channelPresets: normalizeGroupChannelPresets(src.channelPresets, DEFAULT_GROUP_CARD_SETTINGS.channelPresets),
+    channelPresets,
+    channelPresetsEmpty: allowEmptyChannelPresets && channelPresets.length === 0,
     channel: {
       openConversationId: normalizeOptionalText(src?.channel?.openConversationId),
       cardTemplateId: normalizeOptionalText(src?.channel?.cardTemplateId),

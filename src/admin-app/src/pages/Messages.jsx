@@ -38,20 +38,28 @@ const defaultGroupConversationPresets = [
 
 const CUSTOM_CHANNEL_PRESET = '__custom__';
 
-function normalizeChannelPresets(value, currentOpenConversationId = '') {
-  const source = Array.isArray(value) && value.length ? value : defaultGroupConversationPresets;
+function normalizeChannelPresets(value, currentOpenConversationId = '', allowEmpty = false) {
+  const normalize = (source) => {
+    const seen = new Set();
+    return source
+      .map((item) => {
+        const openConversationId = String(item?.openConversationId || '').trim();
+        if (!openConversationId || seen.has(openConversationId)) return null;
+        seen.add(openConversationId);
+        return {
+          name: String(item?.name || '未命名群聊').trim() || '未命名群聊',
+          openConversationId,
+        };
+      })
+      .filter(Boolean);
+  };
+  const source = Array.isArray(value) ? value : defaultGroupConversationPresets;
+  let items = normalize(source);
+  if (!items.length && !allowEmpty && source !== defaultGroupConversationPresets) {
+    items = normalize(defaultGroupConversationPresets);
+  }
   const seen = new Set();
-  const items = source
-    .map((item) => {
-      const openConversationId = String(item?.openConversationId || '').trim();
-      if (!openConversationId || seen.has(openConversationId)) return null;
-      seen.add(openConversationId);
-      return {
-        name: String(item?.name || '未命名群聊').trim() || '未命名群聊',
-        openConversationId,
-      };
-    })
-    .filter(Boolean);
+  items.forEach((item) => seen.add(item.openConversationId));
   const current = String(currentOpenConversationId || '').trim();
   if (current && !seen.has(current)) {
     items.unshift({ name: '当前配置群', openConversationId: current });
@@ -60,41 +68,66 @@ function normalizeChannelPresets(value, currentOpenConversationId = '') {
 }
 
 function buildConversationPresetOptions(presets) {
+  const items = Array.isArray(presets) ? presets : normalizeChannelPresets(presets);
   return [
-    ...normalizeChannelPresets(presets).map((item) => ({ label: item.name, value: item.openConversationId })),
+    ...items.map((item) => ({ label: item.name, value: item.openConversationId })),
     { label: '自定义群', value: CUSTOM_CHANNEL_PRESET },
   ];
 }
 
-function matchConversationPreset(value, presets) {
+function matchConversationPreset(value, presets, useFirstWhenEmpty = false) {
+  const normalized = Array.isArray(presets) ? presets : normalizeChannelPresets(presets);
   const current = String(value || '').trim();
-  return buildConversationPresetOptions(presets).find((item) => item.value === current)?.value || '__custom__';
+  if (current && normalized.some((item) => item.openConversationId === current)) return current;
+  if (!current && useFirstWhenEmpty && normalized[0]?.openConversationId) return normalized[0].openConversationId;
+  return CUSTOM_CHANNEL_PRESET;
 }
 
-function extractDingtalkConversation(data) {
+function getPresetName(value, presets) {
+  const current = String(value || '').trim();
+  const items = Array.isArray(presets) ? presets : normalizeChannelPresets(presets);
+  return items.find((item) => item.openConversationId === current)?.name || '';
+}
+
+function getRawConversation(data) {
   const raw = Array.isArray(data) ? data[0] : (data && typeof data === 'object' ? data : {});
   const nested = Array.isArray(raw.chats)
     ? raw.chats[0]
     : (Array.isArray(raw.conversations) ? raw.conversations[0] : (raw.data && typeof raw.data === 'object' ? raw.data : null));
-  const source = nested && typeof nested === 'object' ? { ...raw, ...nested } : raw;
+  return nested && typeof nested === 'object' ? { ...raw, ...nested } : raw;
+}
+
+function extractDingtalkConversation(data) {
+  const source = getRawConversation(data);
   const openConversationId = String(
-    source.openConversationId || source.cid || source.conversationId || source.chatId || source.id || '',
+    source.openConversationId || source.openCid || source.cid || source.conversationId || source.chatId || source.id || '',
   ).trim();
   const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
   return { openConversationId, name };
 }
 
 function isSingleConversation(data) {
-  const raw = Array.isArray(data) ? data[0] : (data && typeof data === 'object' ? data : {});
-  const nested = Array.isArray(raw.chats)
-    ? raw.chats[0]
-    : (Array.isArray(raw.conversations) ? raw.conversations[0] : (raw.data && typeof raw.data === 'object' ? raw.data : null));
-  const source = nested && typeof nested === 'object' ? { ...raw, ...nested } : raw;
+  const source = getRawConversation(data);
   const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
-  if (['single', 'private', 'p2p', 'one2one', '1'].includes(typeText)) return true;
+  if (['single', 'private', 'p2p', 'one2one', 'oto', '1'].includes(typeText)) return true;
   if (source.isGroup === false || source.group === false) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
   return memberCount > 0 && memberCount <= 2;
+}
+
+function isLikelyGroupConversation(data) {
+  const source = getRawConversation(data);
+  const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
+  if (['group', 'enterprise_group', 'org_group', '2'].includes(typeText)) return true;
+  if (source.isGroup === true || source.group === true) return true;
+  const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
+  return memberCount > 2;
+}
+
+function assertGroupConversation(data) {
+  if (isSingleConversation(data)) throw new Error('不能选择单聊，请选择群聊');
+  if (isLikelyGroupConversation(data)) return;
+  throw new Error('钉钉返回内容无法确认是群聊，未保存');
 }
 
 function withTimeout(promise, ms, message) {
@@ -207,12 +240,23 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
   const [selectingGroup, setSelectingGroup] = useState(false);
+  const [presetManagerOpen, setPresetManagerOpen] = useState(false);
   const [channelEditing, setChannelEditing] = useState(false);
   const [channelPresets, setChannelPresets] = useState(defaultGroupConversationPresets);
   const [selectedChannelPreset, setSelectedChannelPreset] = useState(CUSTOM_CHANNEL_PRESET);
   const [inDingtalk, setInDingtalk] = useState(false);
   const [activeField, setActiveField] = useState(null);
   const channelPresetOptions = useMemo(() => buildConversationPresetOptions(channelPresets), [channelPresets]);
+
+  const setChannelOpenConversationId = (value) => {
+    const currentChannel = form.getFieldValue('channel') || {};
+    form.setFieldsValue({
+      channel: {
+        ...currentChannel,
+        openConversationId: value || null,
+      },
+    });
+  };
 
   const load = async () => {
     setLoading(true);
@@ -221,9 +265,14 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       const nextData = data.data || {};
       form.setFieldsValue(nextData);
       if (withChannel) {
-        const presets = normalizeChannelPresets(nextData.channelPresets, nextData?.channel?.openConversationId);
+        const currentChannelId = nextData?.channel?.openConversationId;
+        const presets = normalizeChannelPresets(nextData.channelPresets, currentChannelId, nextData.channelPresetsEmpty === true);
+        const selectedPreset = matchConversationPreset(currentChannelId, presets, true);
         setChannelPresets(presets);
-        setSelectedChannelPreset(matchConversationPreset(nextData?.channel?.openConversationId, presets));
+        setSelectedChannelPreset(selectedPreset);
+        if (selectedPreset !== CUSTOM_CHANNEL_PRESET) {
+          setChannelOpenConversationId(selectedPreset);
+        }
       }
       setChannelEditing(false);
     } finally {
@@ -235,8 +284,18 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
   useEffect(() => { setInDingtalk(isDingtalkClient()); }, []);
 
   const save = async () => {
-    const payload = await form.validateFields();
-    if (withChannel) payload.channelPresets = channelPresets;
+    await form.validateFields();
+    const payload = form.getFieldsValue(true);
+    if (withChannel) {
+      payload.channelPresets = channelPresets;
+      payload.channelPresetsEmpty = channelPresets.length === 0;
+      payload.channel = { ...(payload.channel || {}) };
+      if (selectedChannelPreset !== CUSTOM_CHANNEL_PRESET) {
+        payload.channel.openConversationId = selectedChannelPreset;
+      } else {
+        payload.channel.openConversationId = String(payload.channel.openConversationId || '').trim() || null;
+      }
+    }
     await api(savePath, { method: 'POST', body: payload });
     message.success(`${title}已保存`);
     setChannelEditing(false);
@@ -255,8 +314,44 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       setChannelEditing(true);
       return;
     }
-    form.setFieldValue(['channel', 'openConversationId'], value);
+    setChannelOpenConversationId(value);
     setChannelEditing(false);
+  };
+
+  const persistChannelPresets = async (nextPresets, nextChannelId) => {
+    const payload = form.getFieldsValue(true);
+    payload.channelPresets = nextPresets;
+    payload.channelPresetsEmpty = nextPresets.length === 0;
+    if (nextChannelId !== undefined) {
+      payload.channel = { ...(payload.channel || {}), openConversationId: nextChannelId || null };
+      setChannelOpenConversationId(nextChannelId || null);
+    }
+    const saved = await api(savePath, { method: 'POST', body: payload });
+    const savedData = saved.data || payload;
+    const presets = normalizeChannelPresets(savedData.channelPresets, savedData?.channel?.openConversationId, savedData.channelPresetsEmpty === true);
+    setChannelPresets(presets);
+    setSelectedChannelPreset(matchConversationPreset(savedData?.channel?.openConversationId, presets, true));
+    setChannelEditing(false);
+  };
+
+  const removeChannelPreset = async (preset) => {
+    const ok = await new Promise((resolve) => {
+      modal.confirm({
+        title: '删除群预设？',
+        content: `删除“${preset.name}”后不会删除钉钉群，只会从后台预设列表移除。`,
+        okText: '删除',
+        cancelText: '取消',
+        okButtonProps: { danger: true },
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+    if (!ok) return;
+    const nextPresets = channelPresets.filter((item) => item.openConversationId !== preset.openConversationId);
+    const currentId = form.getFieldValue(['channel', 'openConversationId']);
+    const nextChannelId = currentId === preset.openConversationId ? (nextPresets[0]?.openConversationId || '') : undefined;
+    await persistChannelPresets(nextPresets, nextChannelId);
+    message.success('群预设已删除');
   };
 
   const chooseDingtalkGroup = async () => {
@@ -267,34 +362,53 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     }
     setSelectingGroup(true);
     try {
-      const { dd, cfg } = await initDingtalkJsapi(['biz.chat.chooseConversationByCorpId']);
-      if (!dd?.biz?.chat?.chooseConversationByCorpId) {
+      const { dd, cfg } = await initDingtalkJsapi(['biz.chat.pickConversation', 'biz.chat.chooseConversationByCorpId']);
+      if (!dd?.biz?.chat?.pickConversation && !dd?.biz?.chat?.chooseConversationByCorpId) {
         throw new Error('当前钉钉版本不支持选择群聊，请升级钉钉客户端');
       }
       const selected = await withTimeout(new Promise((resolve, reject) => {
-        dd.biz.chat.chooseConversationByCorpId({
+        const options = {
           corpId: cfg.corpId,
           isConfirm: true,
           max: 1,
+          multiple: false,
+          onSuccess: (data) => resolve(data),
+          onFail: (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊')),
+        };
+        if (dd?.biz?.chat?.pickConversation) {
+          dd.biz.chat.pickConversation({
+            ...options,
+            onlyGroup: true,
+            conversationTypes: ['group'],
+            onSuccess: (data) => resolve(data),
+          });
+          return;
+        }
+        dd.biz.chat.chooseConversationByCorpId({
+          ...options,
           onlyGroup: true,
           conversationTypes: ['group'],
-          onSuccess: resolve,
-          onFail: (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊')),
         });
       }), 20000, '钉钉选择群聊超时，请重新选择');
-      if (isSingleConversation(selected)) throw new Error('不能选择单聊，请选择群聊');
+      assertGroupConversation(selected);
       const conversation = extractDingtalkConversation(selected);
       if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
-      if (!/^cid/i.test(conversation.openConversationId)) throw new Error('当前选择不是群聊，请选择群会话');
       const presetName = String(conversation.name || '').trim() || '钉钉群聊';
+      const conversationMeta = getRawConversation(selected);
       const data = await api('/admin/settings/group-card/preset', {
         method: 'POST',
-        body: { name: presetName, openConversationId: conversation.openConversationId },
+        body: {
+          name: presetName,
+          openConversationId: conversation.openConversationId,
+          conversationType: conversationMeta.type || conversationMeta.chatType || conversationMeta.conversationType || conversationMeta.bizType || '',
+          isGroup: conversationMeta.isGroup ?? conversationMeta.group ?? null,
+          memberCount: conversationMeta.memberCount || conversationMeta.membersCount || conversationMeta.userCount || null,
+        },
       });
       const nextPresets = normalizeChannelPresets(data?.data?.channelPresets, conversation.openConversationId);
       setChannelPresets(nextPresets);
       setSelectedChannelPreset(conversation.openConversationId);
-      form.setFieldValue(['channel', 'openConversationId'], conversation.openConversationId);
+      setChannelOpenConversationId(conversation.openConversationId);
       setChannelEditing(false);
       message.success('群聊已保存为预设');
     } catch (err) {
@@ -350,6 +464,8 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     setActiveField({ ...activeField, start: start + token.length, end: start + token.length });
   };
 
+  const selectedPresetName = getPresetName(selectedChannelPreset, channelPresets);
+
   const items = templates.map((item) => ({
     key: item.key,
     label: item.label,
@@ -379,11 +495,17 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
             : '普通浏览器保留群预设；在钉钉客户端内打开后台后，可以直接选择群聊并保存为群预设。'}
         />
         <div className="group-channel-config-grid group-channel-basic-grid">
-          <Form.Item label="群会话预设" className="group-channel-span-2"><Select disabled={!canEdit} value={selectedChannelPreset} options={channelPresetOptions} onChange={selectChannelPreset} /></Form.Item>
+          <Form.Item label="群会话预设" className="group-channel-span-2">
+            <Select disabled={!canEdit} value={selectedChannelPreset} options={channelPresetOptions} onChange={selectChannelPreset} />
+            <Typography.Text type="secondary" className="group-channel-current">
+              {selectedChannelPreset === CUSTOM_CHANNEL_PRESET ? '当前为自定义群，请在高级配置里填写群会话 ID。' : `当前选择：${selectedPresetName || '群预设'}`}
+            </Typography.Text>
+          </Form.Item>
           <div className="group-channel-actions">
             {inDingtalk
               ? <Button type="primary" htmlType="button" onClick={chooseDingtalkGroup} loading={selectingGroup} disabled={!canEdit}>从钉钉选择群聊</Button>
               : <Typography.Text type="secondary">钉钉客户端内可选择群聊</Typography.Text>}
+            {canEdit && <Button htmlType="button" onClick={() => setPresetManagerOpen(true)}>管理预设</Button>}
             <Button htmlType="button" onClick={checkGroupCardConfig} loading={checking}>检测配置</Button>
           </div>
           <Form.Item label="全员广播" name={['channel', 'broadcastAll']} valuePropName="checked"><Switch disabled={!channelEditing} /></Form.Item>
@@ -395,6 +517,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
           items={[{
             key: 'advanced',
             label: '高级配置：群 ID、模板和字段映射',
+            forceRender: true,
             children: <div className="group-channel-config-grid">
               <Form.Item label="群会话 ID" name={['channel', 'openConversationId']} className="group-channel-span-2"><Input readOnly={!channelEditing || selectedChannelPreset !== CUSTOM_CHANNEL_PRESET} className={!channelEditing || selectedChannelPreset !== CUSTOM_CHANNEL_PRESET ? 'readonly-input' : ''} placeholder={selectedChannelPreset === CUSTOM_CHANNEL_PRESET ? '填写钉钉群 openConversationId' : '已从预设自动填入'} /></Form.Item>
               <Form.Item label="操作人 Userid" name={['channel', 'operatorUserid']}><Input readOnly={!channelEditing} className={!channelEditing ? 'readonly-input' : ''} /></Form.Item>
@@ -408,6 +531,23 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       </Card>}
       <Collapse defaultActiveKey={[]} items={items} />
     </Form>
+    {withChannel && <Modal
+      title="管理群预设"
+      open={presetManagerOpen}
+      onCancel={() => setPresetManagerOpen(false)}
+      footer={<Button onClick={() => setPresetManagerOpen(false)}>关闭</Button>}
+      width={640}
+    >
+      {channelPresets.length ? <div className="group-channel-preset-list">
+        {channelPresets.map((preset) => <div className="group-channel-preset-item" key={preset.openConversationId}>
+          <div>
+            <Typography.Text strong>{preset.name}</Typography.Text>
+            <Typography.Text type="secondary">已保存为后台群预设</Typography.Text>
+          </div>
+          <Button danger size="small" onClick={() => removeChannelPreset(preset)} disabled={!canEdit}>删除</Button>
+        </div>)}
+      </div> : <Alert type="info" showIcon message="暂无群预设" description="可以在钉钉客户端内选择群聊后保存为预设。" />}
+    </Modal>}
     {extraPanel}
   </Card>;
 }

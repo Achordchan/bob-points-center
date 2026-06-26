@@ -2943,6 +2943,19 @@ export function adminRouter() {
     const name = req.body?.name ? String(req.body.name).trim() : '';
     if (!openConversationId) return res.status(400).json({ error: 'missing openConversationId' });
     if (!name) return res.status(400).json({ error: 'missing preset name' });
+    const conversationType = req.body?.conversationType ? String(req.body.conversationType).toLowerCase() : '';
+    const hasGroupFlag = req.body?.isGroup !== undefined && req.body?.isGroup !== null;
+    const isGroupFlag = req.body?.isGroup === true || req.body?.isGroup === 'true';
+    const memberCount = Number(req.body?.memberCount || 0);
+    const hasConversationMeta = Boolean(conversationType || hasGroupFlag || memberCount);
+    const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '1'].includes(conversationType)
+      || (hasGroupFlag && !isGroupFlag)
+      || (memberCount > 0 && memberCount <= 2);
+    const explicitGroup = ['group', 'enterprise_group', 'org_group', '2'].includes(conversationType)
+      || isGroupFlag
+      || memberCount > 2;
+    if (explicitSingle) return res.status(400).json({ error: '不能选择单聊，请选择群聊' });
+    if (hasConversationMeta && !explicitGroup) return res.status(400).json({ error: '钉钉返回内容无法确认是群聊，未保存' });
     try {
       res.setHeader('Cache-Control', 'no-store');
       const current = await getGroupCardSettings(db);
@@ -2954,6 +2967,7 @@ export function adminRouter() {
       const saved = await saveGroupCardSettings(db, {
         ...current,
         channelPresets: nextPresets,
+        channelPresetsEmpty: false,
         channel: {
           ...(current?.channel || {}),
           openConversationId,
