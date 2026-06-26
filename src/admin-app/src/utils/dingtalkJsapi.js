@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 
-const DINGTALK_JSAPI_SRC = 'https://g.alicdn.com/dingding/dingtalk-jsapi/2.15.4/dingtalk.open.js';
+const DINGTALK_JSAPI_SRC = 'https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.27/dingtalk.open.js';
 
 let dingtalkScriptPromise = null;
 

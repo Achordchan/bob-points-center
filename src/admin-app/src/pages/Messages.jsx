@@ -173,6 +173,14 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
+function toDebugJson(value) {
+  try {
+    return JSON.stringify(value, null, 2).slice(0, 4000);
+  } catch {
+    return String(value || '');
+  }
+}
+
 const variableDescriptions = {
   name: '接收消息的用户姓名',
   userid: '接收消息的钉钉 Userid',
@@ -395,37 +403,43 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
     }
     setSelectingGroup(true);
     try {
-      const { dd, cfg } = await initDingtalkJsapi(['biz.chat.pickConversation', 'biz.chat.chooseConversationByCorpId']);
-      if (!dd?.biz?.chat?.pickConversation && !dd?.biz?.chat?.chooseConversationByCorpId) {
-        throw new Error('当前钉钉版本不支持选择群聊，请升级钉钉客户端');
+      const { dd, cfg } = await initDingtalkJsapi(['chooseChat', 'biz.chat.chooseChat']);
+      const chooseChat = dd?.chooseChat
+        ? dd.chooseChat.bind(dd)
+        : (dd?.biz?.chat?.chooseChat ? dd.biz.chat.chooseChat.bind(dd.biz.chat) : null);
+      if (!chooseChat) {
+        throw new Error('当前钉钉版本不支持获取群会话 ID，请升级钉钉客户端后重试');
       }
       const selected = await withTimeout(new Promise((resolve, reject) => {
-        const options = {
+        const handleFail = (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊'));
+        chooseChat({
           corpId: cfg.corpId,
           isConfirm: false,
-          max: 1,
-          multiple: false,
-          onSuccess: (data) => resolve(data),
-          onFail: (err) => reject(new Error(err?.errorMessage || err?.message || '未选择群聊')),
-        };
-        if (dd?.biz?.chat?.pickConversation) {
-          dd.biz.chat.pickConversation({
-            ...options,
-            onlyGroup: true,
-            conversationTypes: ['group'],
-            onSuccess: (data) => resolve(data),
-          });
-          return;
-        }
-        dd.biz.chat.chooseConversationByCorpId({
-          ...options,
+          isAllowCreateGroup: false,
           onlyGroup: true,
           conversationTypes: ['group'],
+          max: 1,
+          multiple: false,
+          success: (data) => resolve(data),
+          fail: handleFail,
+          onSuccess: (data) => resolve(data),
+          onFail: handleFail,
         });
       }), 20000, '钉钉选择群聊超时，请重新选择');
       assertGroupConversation(selected);
       const conversation = extractDingtalkConversation(selected);
-      if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
+      if (!conversation.openConversationId) {
+        modal.error({
+          title: '钉钉没有返回群会话 ID',
+          width: 720,
+          okText: '知道了',
+          content: <Space direction="vertical" style={{ width: '100%' }}>
+            <Typography.Text>当前钉钉返回里没有 openConversationId，无法保存为群预设。请把下面内容发给开发排查。</Typography.Text>
+            <Input.TextArea rows={8} readOnly value={toDebugJson(selected)} />
+          </Space>,
+        });
+        return;
+      }
       const presetName = String(conversation.name || '').trim() || '钉钉群聊';
       const conversationMeta = getRawConversation(selected);
       const data = await api('/admin/settings/group-card/preset', {
