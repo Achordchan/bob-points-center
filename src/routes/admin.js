@@ -2946,8 +2946,10 @@ export function adminRouter() {
   router.post('/settings/group-card/preset', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
-    const incomingOpenConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
-    const chatId = req.body?.chatId ? String(req.body.chatId).trim() : '';
+    const rawOpenConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
+    const rawChatId = req.body?.chatId ? String(req.body.chatId).trim() : '';
+    const incomingOpenConversationId = rawOpenConversationId || (isStandardDingtalkGroupOpenConversationId(rawChatId) ? rawChatId : '');
+    const chatId = isStandardDingtalkGroupOpenConversationId(rawChatId) ? '' : rawChatId;
     const name = req.body?.name ? String(req.body.name).trim() : '';
     if (!incomingOpenConversationId && !chatId) return res.status(400).json({ error: '缺少钉钉群会话' });
     if (!name) return res.status(400).json({ error: 'missing preset name' });

@@ -97,11 +97,20 @@ export async function convertDingtalkChatIdToOpenConversationId(cfg, chatId) {
   const client = createImClient();
   const headers = new dingtalkim_1_0.ChatIdToOpenConversationIdHeaders({});
   headers.xAcsDingtalkAccessToken = token;
-  const resp = await client.chatIdToOpenConversationIdWithOptions(
-    encodeURIComponent(id),
-    headers,
-    new Util.RuntimeOptions({}),
-  );
+  let resp;
+  try {
+    resp = await client.chatIdToOpenConversationIdWithOptions(
+      encodeURIComponent(id),
+      headers,
+      new Util.RuntimeOptions({}),
+    );
+  } catch (err) {
+    const message = String(err?.message || err);
+    if (message.toLowerCase().includes('invalid') || message.toLowerCase().includes('invalidechatid')) {
+      throw new Error('钉钉返回的会话不是可转换的群聊，请重新选择群聊');
+    }
+    throw err;
+  }
   const openConversationId = String(resp?.body?.openConversationId || '').trim();
   if (!isStandardDingtalkGroupOpenConversationId(openConversationId)) {
     throw new Error('选择的不是可用钉钉群聊，请重新选择群聊');

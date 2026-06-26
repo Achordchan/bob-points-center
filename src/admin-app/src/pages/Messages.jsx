@@ -99,13 +99,11 @@ function getRawConversation(data) {
 
 function extractDingtalkConversation(data) {
   const source = getRawConversation(data);
-  const cid = String(source.cid || '').trim();
-  const openConversationId = String(
-    source.openConversationId || source.openCid || (isLikelyDingtalkGroupConversationId(cid) ? cid : ''),
-  ).trim();
-  const chatId = String(
-    source.chatId || (isLikelyDingtalkGroupConversationId(cid) ? '' : cid) || source.conversationId || source.id || '',
-  ).trim();
+  const candidates = [source.openConversationId, source.openCid, source.cid, source.chatId, source.conversationId, source.id]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  const openConversationId = candidates.find(isLikelyDingtalkGroupConversationId) || '';
+  const chatId = candidates.find((item) => item !== openConversationId && !isLikelyDingtalkGroupConversationId(item)) || '';
   const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
   return { openConversationId, chatId, name };
 }
