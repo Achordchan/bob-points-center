@@ -12,11 +12,12 @@ import {
   getV1AccessToken,
   getUserIdByAuthCode,
   getUserProfile,
-  isStandardDingtalkGroupOpenConversationId,
+  hasDingtalkGroupOpenConversationId,
   listSubDepartments,
   listUsersByDept,
   notableListRecords,
   queryDingtalkOpenGroupBaseInfo,
+  queryDingtalkGroupRobot,
 } from '../services/dingtalkService.js';
 import {
   buildClearSessionCookie,
@@ -106,6 +107,25 @@ function withTimeout(promise, ms, timeoutMessage) {
 
 function hasDingtalkApiCredential(cfg) {
   return Boolean(String(cfg?.dingtalk?.appKey || '').trim() && String(cfg?.dingtalk?.appSecret || '').trim());
+}
+
+function isDingtalkPermissionMissing(err) {
+  const text = String(err?.message || err || '');
+  return text.includes('AccessTokenPermissionDenied') || text.includes('AntDing.Read.Send') || text.includes('应用尚未开通所需的权限');
+}
+
+function buildDingtalkAdvisoryWarning(key, label, err, fallbackMessage) {
+  const errorText = String(err?.message || err || '').trim();
+  return {
+    key,
+    label,
+    ok: true,
+    status: 'warn',
+    statusText: '未校验',
+    message: isDingtalkPermissionMissing(err)
+      ? fallbackMessage
+      : `钉钉接口未能完成提前校验，不代表群消息不能发送；请以模板测试发送结果为准。钉钉返回：${errorText || '未知错误'}`,
+  };
 }
 
 async function resolveHostIp(host) {
@@ -2955,15 +2975,15 @@ export function adminRouter() {
     const hasGroupFlag = req.body?.isGroup !== undefined && req.body?.isGroup !== null;
     const isGroupFlag = req.body?.isGroup === true || req.body?.isGroup === 'true';
     const memberCount = Number(req.body?.memberCount || 0);
-    const isStandardGroupConversationId = isStandardDingtalkGroupOpenConversationId(incomingOpenConversationId);
-    const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(conversationType)
+    const hasConversationId = hasDingtalkGroupOpenConversationId(incomingOpenConversationId);
+    const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '0', '1'].includes(conversationType)
       || (hasGroupFlag && !isGroupFlag)
       || (memberCount > 0 && memberCount <= 2);
     const explicitGroup = ['group', 'enterprise_group', 'org_group', '2'].includes(conversationType)
       || isGroupFlag
       || memberCount > 2;
     if (explicitSingle) return res.status(400).json({ error: '不能选择单聊，请选择群聊' });
-    if (!incomingOpenConversationId || !isStandardGroupConversationId) {
+    if (!incomingOpenConversationId || !hasConversationId) {
       return res.status(400).json({ error: '钉钉没有返回可用群会话 ID，请重新选择群聊' });
     }
     try {
@@ -3010,8 +3030,8 @@ export function adminRouter() {
         {
           key: 'openConversationId',
           label: '群会话',
-          ok: isStandardDingtalkGroupOpenConversationId(channel.openConversationId),
-          message: channel.openConversationId ? '群会话 ID 格式不正确' : '未配置群会话',
+          ok: Boolean(String(channel.openConversationId || '').trim()),
+          message: channel.openConversationId ? '' : '未配置群会话',
         },
         { key: 'cardTemplateId', label: '卡片模板', ok: Boolean(String(channel.cardTemplateId || '').trim()) },
         { key: 'operatorUserid', label: '操作人 Userid', ok: Boolean(String(channel.operatorUserid || '').trim()) },
@@ -3024,7 +3044,7 @@ export function adminRouter() {
           items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: false, message: String(err?.message || err) });
         }
       }
-      if (isStandardDingtalkGroupOpenConversationId(channel.openConversationId) && hasDingtalkApiCredential(cfg)) {
+      if (channel.openConversationId && hasDingtalkApiCredential(cfg)) {
         try {
           const groupInfo = await withTimeout(
             queryDingtalkOpenGroupBaseInfo(cfg, channel.openConversationId),
@@ -3038,7 +3058,34 @@ export function adminRouter() {
             message: groupInfo?.title ? `群聊：${groupInfo.title}` : '',
           });
         } catch (err) {
-          items.push({ key: 'groupInfo', label: '钉钉群聊校验', ok: false, message: String(err?.message || err) });
+          items.push(buildDingtalkAdvisoryWarning(
+            'groupInfo',
+            '钉钉群聊校验',
+            err,
+            '缺少 AntDing.Read.Send 权限，无法提前校验群聊；这不代表群会话不可用，请以模板测试发送结果为准。',
+          ));
+        }
+      }
+      if (channel.openConversationId && dingtalk.robotCode && hasDingtalkApiCredential(cfg)) {
+        try {
+          const robotInfo = await withTimeout(
+            queryDingtalkGroupRobot(cfg, { openConversationId: channel.openConversationId, robotCode: dingtalk.robotCode }),
+            4000,
+            '群机器人校验超时',
+          );
+          items.push({
+            key: 'groupRobot',
+            label: '群机器人校验',
+            ok: Boolean(robotInfo?.userId || robotInfo?.unionId),
+            message: robotInfo?.userId || robotInfo?.unionId ? '机器人已在当前群内' : '未检测到该机器人，请先把机器人添加到群。',
+          });
+        } catch (err) {
+          items.push(buildDingtalkAdvisoryWarning(
+            'groupRobot',
+            '群机器人校验',
+            err,
+            '缺少 AntDing.Read.Send 权限，无法判断机器人是否在群内；如果测试发送收不到，请先把机器人添加到群。',
+          ));
         }
       }
       const ok = items.every((item) => item.ok === true);
@@ -3047,7 +3094,7 @@ export function adminRouter() {
         data: {
           ok,
           items,
-          note: '本检测会校验配置完整性、钉钉凭证和群聊有效性，不发送真实群消息。',
+          note: '本检测会校验配置完整性和钉钉凭证；群聊资料与机器人检测仅作辅助，真实可用性以模板测试发送结果为准。',
         },
       });
     } catch (err) {

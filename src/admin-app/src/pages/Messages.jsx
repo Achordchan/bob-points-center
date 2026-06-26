@@ -120,10 +120,9 @@ function extractDingtalkConversation(data) {
   const source = getRawConversation(data);
   const candidates = collectConversationCandidates(data);
   const openConversationId = (
-    candidates.find((item) => /open.*conversation/i.test(item.key) && isLikelyDingtalkGroupConversationId(item.value))
-    || candidates.find((item) => isLikelyDingtalkGroupConversationId(item.value))
+    candidates.find((item) => isOpenConversationIdKey(item.key) && hasUsableConversationId(item.value))
   )?.value || '';
-  const chatId = candidates.find((item) => /(^|\.)(chatId|cid|conversationId|id)$/i.test(item.key) && item.value !== openConversationId)?.value || '';
+  const chatId = candidates.find((item) => isChatIdKey(item.key) && item.value !== openConversationId)?.value || '';
   const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
   return { openConversationId, chatId, name };
 }
@@ -132,14 +131,30 @@ function getConversationTypeText(source) {
   return String(source.type ?? source.chatType ?? source.conversationType ?? source.bizType ?? '').toLowerCase();
 }
 
-function isLikelyDingtalkGroupConversationId(value) {
-  return /^cid[A-Za-z0-9+/=_-]{8,}$/.test(String(value || '').trim());
+function hasUsableConversationId(value) {
+  return Boolean(String(value || '').trim());
+}
+
+function normalizeConversationKey(key) {
+  return String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function isOpenConversationIdKey(key) {
+  const normalized = normalizeConversationKey(key);
+  return normalized === 'cid'
+    || (normalized.endsWith('cid') && !normalized.endsWith('corpid'))
+    || normalized.endsWith('openconversationid')
+    || normalized.endsWith('conversationid');
+}
+
+function isChatIdKey(key) {
+  return normalizeConversationKey(key).endsWith('chatid');
 }
 
 function isSingleConversation(data) {
   const source = getRawConversation(data);
   const typeText = getConversationTypeText(source);
-  if (['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(typeText)) return true;
+  if (['single', 'private', 'p2p', 'one2one', 'oto', '0', '1'].includes(typeText)) return true;
   if (source.isGroup === false || source.group === false) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
   return memberCount > 0 && memberCount <= 2;
@@ -158,9 +173,8 @@ function assertGroupConversation(data) {
   if (isSingleConversation(data)) throw new Error('不能选择单聊，请选择群聊');
   if (isLikelyGroupConversation(data)) return;
   const conversation = extractDingtalkConversation(data);
-  if (isLikelyDingtalkGroupConversationId(conversation.openConversationId)) return;
-  if (conversation.chatId) return;
-  throw new Error('当前选择不是标准钉钉群聊，请选择群会话');
+  if (hasUsableConversationId(conversation.openConversationId)) return;
+  throw new Error('当前选择没有可用群会话信息，请重新选择群聊');
 }
 
 function withTimeout(promise, ms, message) {
@@ -472,18 +486,22 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       const data = await api('/admin/settings/group-card/check');
       const result = data.data || {};
       const items = Array.isArray(result.items) ? result.items : [];
+      const hasWarn = items.some((item) => item.status === 'warn');
       modal.info({
-        title: result.ok ? '群卡配置可用' : '群卡配置需要补全',
+        title: result.ok ? (hasWarn ? '群卡配置基本可用，有提示' : '群卡配置可用') : '群卡配置需要补全',
         width: 640,
         okText: '知道了',
         content: <Space direction="vertical" style={{ width: '100%' }}>
           <Typography.Text type="secondary">{result.note || '检测不发送真实消息。'}</Typography.Text>
           <div className="group-channel-check-list">
-            {items.map((item) => <div key={item.key} className={`group-channel-check-item ${item.ok ? 'is-ok' : 'is-fail'}`}>
-              <span>{item.label}</span>
-              <b>{item.ok ? '正常' : '缺失或不可用'}</b>
-              {item.message ? <Typography.Text type="secondary">{item.message}</Typography.Text> : null}
-            </div>)}
+            {items.map((item) => {
+              const status = item.status || (item.ok ? 'ok' : 'fail');
+              return <div key={item.key} className={`group-channel-check-item is-${status}`}>
+                <span>{item.label}</span>
+                <b>{item.statusText || (item.ok ? '正常' : '缺失或不可用')}</b>
+                {item.message ? <Typography.Text type="secondary">{item.message}</Typography.Text> : null}
+              </div>;
+            })}
           </div>
         </Space>,
       });

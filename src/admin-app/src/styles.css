@@ -297,6 +297,10 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   color: #389e0d;
 }
 
+.group-channel-check-item.is-warn b {
+  color: #d48806;
+}
+
 .group-channel-check-item.is-fail b {
   color: #cf1322;
 }

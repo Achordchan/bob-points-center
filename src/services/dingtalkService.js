@@ -86,14 +86,14 @@ function createImClient() {
   return new dingtalkim_1_0.default(config);
 }
 
-export function isStandardDingtalkGroupOpenConversationId(value) {
-  return /^cid[A-Za-z0-9+/=_-]{8,}$/.test(String(value || '').trim());
+export function hasDingtalkGroupOpenConversationId(value) {
+  return Boolean(String(value || '').trim());
 }
 
 export async function queryDingtalkOpenGroupBaseInfo(cfg, openConversationId) {
   const id = String(openConversationId || '').trim();
-  if (!isStandardDingtalkGroupOpenConversationId(id)) {
-    throw new Error('钉钉群会话 ID 格式不正确');
+  if (!hasDingtalkGroupOpenConversationId(id)) {
+    throw new Error('缺少钉钉群会话');
   }
   const token = await getV1AccessToken(cfg);
   const client = createImClient();
@@ -108,6 +108,23 @@ export async function queryDingtalkOpenGroupBaseInfo(cfg, openConversationId) {
     throw new Error('选择的不是可用钉钉群聊，请重新选择群聊');
   }
   return result;
+}
+
+export async function queryDingtalkGroupRobot(cfg, { openConversationId, robotCode } = {}) {
+  const conversationId = String(openConversationId || '').trim();
+  const code = String(robotCode || '').trim();
+  if (!conversationId) throw new Error('缺少钉钉群会话');
+  if (!code) throw new Error('DINGTALK_ROBOT_CODE missing');
+  const token = await getV1AccessToken(cfg);
+  const client = createImClient();
+  const headers = new dingtalkim_1_0.QuerySceneGroupTemplateRobotHeaders({});
+  headers.xAcsDingtalkAccessToken = token;
+  const req = new dingtalkim_1_0.QuerySceneGroupTemplateRobotRequest({
+    openConversationId: conversationId,
+    robotCode: code,
+  });
+  const resp = await client.querySceneGroupTemplateRobotWithOptions(req, headers, new Util.RuntimeOptions({}));
+  return resp?.body?.result && typeof resp.body.result === 'object' ? resp.body.result : null;
 }
 
 export async function getRootDepartmentProfile(cfg, { language = 'zh_CN' } = {}) {
