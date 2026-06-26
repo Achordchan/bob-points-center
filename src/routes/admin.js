@@ -3075,12 +3075,21 @@ export function adminRouter() {
       if (tpl?.enabled === false) {
         return res.status(400).json({ error: 'group_card_template_disabled' });
       }
-      await notifyGroupInteractiveCardBySettings(db, cfg, {
-        event,
-        title: '【BOB币中心】测试群卡标题',
-        markdown: '这是一条测试群卡内容',
+      const runtimeCfg = mergeGroupCardChannelIntoCfg(cfg, settings);
+      const title = renderTemplateVars(tpl?.title, vars) || '【BOB币中心】测试群卡标题';
+      const markdown = renderTemplateVars(tpl?.content, vars) || '这是一条测试群卡内容';
+      const buttons = normalizeGroupCardButtons(
+        (Array.isArray(tpl?.buttons) ? tpl.buttons : []).map((button) => ({
+          ...button,
+          text: renderTemplateVars(button?.text, vars),
+          url: renderTemplateVars(button?.url, vars),
+        })),
+      );
+      await sendGroupInteractiveCard(runtimeCfg, {
+        title,
+        markdown,
         outTrackId: `group_test_${event}_${Date.now()}`,
-        vars,
+        buttons,
       });
       return res.json({ ok: true });
     } catch (err) {

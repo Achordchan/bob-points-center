@@ -179,77 +179,6 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   }
 }
 
-.group-card-manual-form .ant-form-item {
-  margin-bottom: 0;
-}
-
-.group-card-manual-grid,
-.group-card-button-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px 16px;
-}
-
-.group-card-span-2 {
-  grid-column: span 2;
-}
-
-.group-card-span-all {
-  grid-column: 1 / -1;
-}
-
-.group-card-button-section {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.group-card-button-header,
-.group-card-manual-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.group-card-button-header {
-  justify-content: space-between;
-}
-
-.group-card-button-card {
-  background: #f8fafc;
-}
-
-.group-card-button-actions {
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
-}
-
-.group-card-manual-actions {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid rgba(15, 23, 42, .08);
-}
-
-@media (max-width: 960px) {
-  .group-card-manual-grid,
-  .group-card-button-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .group-card-span-2,
-  .group-card-span-all {
-    grid-column: span 1;
-  }
-
-  .group-card-button-actions,
-  .group-card-manual-actions {
-    justify-content: stretch;
-  }
-}
-
 .image-optimization-settings-form {
   max-width: none;
 }
@@ -532,7 +461,6 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   }
 
   .feedback-reply-actions .ant-btn,
-  .group-card-manual-actions .ant-btn,
   .image-optimization-settings-actions .ant-btn,
   .mall-opening-settings-actions .ant-btn {
     width: 100%;

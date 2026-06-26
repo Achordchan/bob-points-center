@@ -631,86 +631,43 @@ function NotifyTestPanel({ disabled, canSearchUsers }) {
   </Card>;
 }
 
-function GroupCardActions({ canManual, canTest }) {
-  const { message } = App.useApp();
+function GroupCardActions({ canTest }) {
+  const { message, modal } = App.useApp();
   const [testForm] = Form.useForm();
-  const [manualForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
-  const confirmRun = (title, content, fn) => Modal.confirm({ title, content, okText: '确认发送', cancelText: '取消', onOk: fn });
-  const testSend = async (values) => confirmRun('确认发送群卡测试？', '这会向当前配置的测试群或群会话发送一条测试群卡。', async () => {
+
+  const testSend = async () => {
+    if (!canTest || loading) return;
+    const values = testForm.getFieldsValue(true);
+    const hide = message.loading('正在发送群卡测试…', 0);
     setLoading(true);
     try {
-      await api('/admin/settings/group-card/test', { method: 'POST', body: values });
-      message.success('群卡测试已发送');
+      await api('/admin/settings/group-card/test', { method: 'POST', body: { event: values.event || 'manual' } });
+      modal.success({
+        title: '群卡测试已提交',
+        okText: '知道了',
+        content: '已按当前群发送配置发送模板测试。',
+      });
     } catch (err) {
-      message.error(err.message || '群卡测试失败');
+      modal.error({
+        title: '群卡测试失败',
+        okText: '知道了',
+        content: err.message || '请检查群会话、机器人编码、卡片模板和操作人配置。',
+      });
     } finally {
+      hide?.();
       setLoading(false);
     }
-  });
-  const manualSend = async (values) => {
-    if (!String(values.title || '').trim() && !String(values.markdown || '').trim()) {
-      message.warning('标题和内容至少填写一项');
-      return;
-    }
-    const linkUrl = String(values.linkUrl || '').trim();
-    const buttons = Array.isArray(values.buttons)
-      ? values.buttons.map((item) => ({
-        ...item,
-        text: String(item?.text || '').trim(),
-        url: String(item?.url || '').trim(),
-      })).filter((item) => item.text && item.url)
-      : [];
-    const payload = {
-      ...values,
-      buttons: buttons.length ? buttons : linkUrl ? [{ text: '查看详情', url: linkUrl, color: 'blue' }] : undefined,
-    };
-    return confirmRun('确认发送手动群卡？', '这会向当前群卡配置对应的群发送手动群卡，请确认内容和群会话无误。', async () => {
-    setLoading(true);
-    try {
-      await api('/admin/notify/group-card', { method: 'POST', body: payload });
-      message.success('手动群卡已发送');
-      manualForm.resetFields();
-    } catch (err) {
-      message.error(err.message || '手动群卡发送失败');
-    } finally {
-      setLoading(false);
-    }
-  });
   };
-  return <Space direction="vertical" style={{ width: '100%', marginTop: 12 }} size={12}>
-    <Card size="small" title="群卡模板测试">
-      <Form form={testForm} layout="inline" onFinish={testSend}>
-        <Form.Item name="event" initialValue="manual"><Select style={{ width: 200 }} options={groupTemplates.map((item) => ({ value: item.key, label: item.label }))} /></Form.Item>
-        <Button type="primary" htmlType="submit" loading={loading} disabled={!canTest}>发送模板测试</Button>
-      </Form>
-    </Card>
-    <Card size="small" title="手动群卡推送">
-      <Form form={manualForm} layout="vertical" onFinish={manualSend} className="group-card-manual-form">
-        <div className="group-card-manual-grid">
-          <Form.Item label="标题" name="title" className="group-card-span-2"><Input readOnly={!canManual} /></Form.Item>
-          <Form.Item label="外部追踪 ID" name="outTrackId"><Input placeholder="可选，留空自动生成" readOnly={!canManual} /></Form.Item>
-          <Form.Item label="Markdown 内容" name="markdown" className="group-card-span-all"><Input.TextArea rows={4} readOnly={!canManual} /></Form.Item>
-          <Form.Item label="图片地址" name="imageUrl"><Input placeholder="可选" readOnly={!canManual} /></Form.Item>
-          <Form.Item label="快捷链接" name="linkUrl" className="group-card-span-2"><Input placeholder="可选；未配置按钮时自动生成“查看详情”按钮" readOnly={!canManual} /></Form.Item>
-        </div>
-        <Form.List name="buttons">
-          {(fields, { add, remove }) => <div className="group-card-button-section">
-            <div className="group-card-button-header"><Typography.Text strong>按钮</Typography.Text>{canManual && <Button onClick={() => add({ text: '', url: '', color: 'blue' })}>新增按钮</Button>}</div>
-            {fields.map((field) => <Card size="small" key={field.key} className="group-card-button-card">
-              <div className="group-card-button-grid">
-                <Form.Item label="按钮文字" name={[field.name, 'text']} rules={[{ required: true, message: '请输入按钮文字' }]}><Input readOnly={!canManual} /></Form.Item>
-                <Form.Item label="跳转链接" name={[field.name, 'url']} rules={[{ required: true, message: '请输入跳转链接' }]} className="group-card-span-2"><Input readOnly={!canManual} /></Form.Item>
-                <Form.Item label="颜色" name={[field.name, 'color']}><Select disabled={!canManual} options={colorOptions} /></Form.Item>
-                {canManual && <div className="group-card-button-actions"><Button danger onClick={() => remove(field.name)}>删除按钮</Button></div>}
-              </div>
-            </Card>)}
-          </div>}
-        </Form.List>
-        <div className="group-card-manual-actions"><Button type="primary" htmlType="submit" loading={loading} disabled={!canManual}>发送手动群卡</Button></div>
-      </Form>
-    </Card>
-  </Space>;
+
+  return <Card size="small" title="群卡模板测试" style={{ width: '100%', marginTop: 12 }}>
+    <Form form={testForm} layout="inline" initialValues={{ event: 'manual' }} className="group-card-test-form">
+      <Form.Item name="event">
+        <Select style={{ width: 200 }} options={groupTemplates.map((item) => ({ value: item.key, label: item.label }))} />
+      </Form.Item>
+      <Button type="primary" htmlType="button" onClick={testSend} loading={loading} disabled={!canTest}>发送模板测试</Button>
+    </Form>
+  </Card>;
 }
 
 export default function Messages({ me }) {
@@ -719,6 +676,6 @@ export default function Messages({ me }) {
   const canSearchUsers = hasPermission(me, 'users:view');
   return <Tabs items={[
     { key: 'notify', label: '私聊通知模板', children: <SettingsEditor title="私聊通知模板" loadPath="/admin/settings/notify" savePath="/admin/settings/notify" templates={notifyTemplates} canEdit={canEdit} topPanel={<NotifyTestPanel disabled={!canTest} canSearchUsers={canSearchUsers} />} /> },
-    { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons canEdit={canEdit} extraPanel={<GroupCardActions canManual={canEdit} canTest={canTest} />} /> },
+    { key: 'group', label: '群卡片模板', children: <SettingsEditor title="群卡片模板" loadPath="/admin/settings/group-card" savePath="/admin/settings/group-card" templates={groupTemplates} withChannel withButtons canEdit={canEdit} extraPanel={<GroupCardActions canTest={canTest} />} /> },
   ]} />;
 }
