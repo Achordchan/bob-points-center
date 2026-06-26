@@ -2947,15 +2947,10 @@ export function adminRouter() {
     const hasGroupFlag = req.body?.isGroup !== undefined && req.body?.isGroup !== null;
     const isGroupFlag = req.body?.isGroup === true || req.body?.isGroup === 'true';
     const memberCount = Number(req.body?.memberCount || 0);
-    const hasConversationMeta = Boolean(conversationType || hasGroupFlag || memberCount);
-    const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '1'].includes(conversationType)
+    const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(conversationType)
       || (hasGroupFlag && !isGroupFlag)
       || (memberCount > 0 && memberCount <= 2);
-    const explicitGroup = ['group', 'enterprise_group', 'org_group', '2'].includes(conversationType)
-      || isGroupFlag
-      || memberCount > 2;
     if (explicitSingle) return res.status(400).json({ error: '不能选择单聊，请选择群聊' });
-    if (hasConversationMeta && !explicitGroup) return res.status(400).json({ error: '钉钉返回内容无法确认是群聊，未保存' });
     try {
       res.setHeader('Cache-Control', 'no-store');
       const current = await getGroupCardSettings(db);

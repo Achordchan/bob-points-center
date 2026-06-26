@@ -109,7 +109,7 @@ function extractDingtalkConversation(data) {
 function isSingleConversation(data) {
   const source = getRawConversation(data);
   const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
-  if (['single', 'private', 'p2p', 'one2one', 'oto', '1'].includes(typeText)) return true;
+  if (['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(typeText)) return true;
   if (source.isGroup === false || source.group === false) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
   return memberCount > 0 && memberCount <= 2;
@@ -118,7 +118,7 @@ function isSingleConversation(data) {
 function isLikelyGroupConversation(data) {
   const source = getRawConversation(data);
   const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
-  if (['group', 'enterprise_group', 'org_group', '2'].includes(typeText)) return true;
+  if (['group', 'enterprise_group', 'org_group', '1', '2'].includes(typeText)) return true;
   if (source.isGroup === true || source.group === true) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
   return memberCount > 2;
@@ -126,8 +126,7 @@ function isLikelyGroupConversation(data) {
 
 function assertGroupConversation(data) {
   if (isSingleConversation(data)) throw new Error('不能选择单聊，请选择群聊');
-  if (isLikelyGroupConversation(data)) return;
-  throw new Error('钉钉返回内容无法确认是群聊，未保存');
+  isLikelyGroupConversation(data);
 }
 
 function withTimeout(promise, ms, message) {
@@ -369,7 +368,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       const selected = await withTimeout(new Promise((resolve, reject) => {
         const options = {
           corpId: cfg.corpId,
-          isConfirm: true,
+          isConfirm: false,
           max: 1,
           multiple: false,
           onSuccess: (data) => resolve(data),
