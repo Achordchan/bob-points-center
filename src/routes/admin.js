@@ -7,14 +7,17 @@ import { fileURLToPath } from 'node:url';
 
 import {
   buildJsapiConfig,
+  convertDingtalkChatIdToOpenConversationId,
   getAccessToken,
   getDingtalkOrganizationProfile,
   getV1AccessToken,
   getUserIdByAuthCode,
   getUserProfile,
+  isStandardDingtalkGroupOpenConversationId,
   listSubDepartments,
   listUsersByDept,
   notableListRecords,
+  queryDingtalkOpenGroupBaseInfo,
 } from '../services/dingtalkService.js';
 import {
   buildClearSessionCookie,
@@ -100,6 +103,10 @@ function withTimeout(promise, ms, timeoutMessage) {
       timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
     }),
   ]);
+}
+
+function hasDingtalkApiCredential(cfg) {
+  return Boolean(String(cfg?.dingtalk?.appKey || '').trim() && String(cfg?.dingtalk?.appSecret || '').trim());
 }
 
 async function resolveHostIp(host) {
@@ -2939,20 +2946,49 @@ export function adminRouter() {
   router.post('/settings/group-card/preset', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
-    const openConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
+    const incomingOpenConversationId = req.body?.openConversationId ? String(req.body.openConversationId).trim() : '';
+    const chatId = req.body?.chatId ? String(req.body.chatId).trim() : '';
     const name = req.body?.name ? String(req.body.name).trim() : '';
-    if (!openConversationId) return res.status(400).json({ error: 'missing openConversationId' });
+    if (!incomingOpenConversationId && !chatId) return res.status(400).json({ error: '缺少钉钉群会话' });
     if (!name) return res.status(400).json({ error: 'missing preset name' });
-    const conversationType = req.body?.conversationType ? String(req.body.conversationType).toLowerCase() : '';
+    const rawConversationType = req.body?.conversationType ?? '';
+    const conversationType = String(rawConversationType).toLowerCase();
     const hasGroupFlag = req.body?.isGroup !== undefined && req.body?.isGroup !== null;
     const isGroupFlag = req.body?.isGroup === true || req.body?.isGroup === 'true';
     const memberCount = Number(req.body?.memberCount || 0);
+    const isStandardGroupConversationId = isStandardDingtalkGroupOpenConversationId(incomingOpenConversationId);
     const explicitSingle = ['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(conversationType)
       || (hasGroupFlag && !isGroupFlag)
       || (memberCount > 0 && memberCount <= 2);
+    const explicitGroup = ['group', 'enterprise_group', 'org_group', '2'].includes(conversationType)
+      || isGroupFlag
+      || memberCount > 2;
     if (explicitSingle) return res.status(400).json({ error: '不能选择单聊，请选择群聊' });
+    if (incomingOpenConversationId && !isStandardGroupConversationId && !chatId) {
+      return res.status(400).json({ error: '钉钉群会话 ID 格式不正确，请重新选择群聊' });
+    }
     try {
       res.setHeader('Cache-Control', 'no-store');
+      let openConversationId = incomingOpenConversationId;
+      try {
+        if (!isStandardDingtalkGroupOpenConversationId(openConversationId)) {
+          openConversationId = await withTimeout(
+            convertDingtalkChatIdToOpenConversationId(cfg, chatId),
+            5000,
+            '钉钉群会话转换超时，请重新选择群聊',
+          );
+        } else if (hasDingtalkApiCredential(cfg)) {
+          await withTimeout(
+            queryDingtalkOpenGroupBaseInfo(cfg, openConversationId),
+            5000,
+            '钉钉群聊校验超时，请重新选择群聊',
+          );
+        } else if (!explicitGroup) {
+          return res.status(400).json({ error: '无法确认该会话是群聊，请在钉钉客户端重新选择群聊' });
+        }
+      } catch (err) {
+        return res.status(400).json({ error: String(err?.message || err) });
+      }
       const current = await getGroupCardSettings(db);
       const oldPresets = Array.isArray(current?.channelPresets) ? current.channelPresets : [];
       const nextPresets = [
@@ -2991,7 +3027,12 @@ export function adminRouter() {
         { key: 'appSecret', label: '钉钉应用 AppSecret', ok: Boolean(String(dingtalk.appSecret || '').trim()) },
         { key: 'agentId', label: '钉钉应用 AgentId', ok: Boolean(String(dingtalk.agentId || '').trim()) },
         { key: 'robotCode', label: '机器人编码', ok: Boolean(String(dingtalk.robotCode || '').trim()) },
-        { key: 'openConversationId', label: '群会话', ok: Boolean(String(channel.openConversationId || '').trim()) },
+        {
+          key: 'openConversationId',
+          label: '群会话',
+          ok: isStandardDingtalkGroupOpenConversationId(channel.openConversationId),
+          message: channel.openConversationId ? '群会话 ID 格式不正确' : '未配置群会话',
+        },
         { key: 'cardTemplateId', label: '卡片模板', ok: Boolean(String(channel.cardTemplateId || '').trim()) },
         { key: 'operatorUserid', label: '操作人 Userid', ok: Boolean(String(channel.operatorUserid || '').trim()) },
       ];
@@ -3003,13 +3044,30 @@ export function adminRouter() {
           items.push({ key: 'accessToken', label: '钉钉接口凭证', ok: false, message: String(err?.message || err) });
         }
       }
+      if (isStandardDingtalkGroupOpenConversationId(channel.openConversationId) && hasDingtalkApiCredential(cfg)) {
+        try {
+          const groupInfo = await withTimeout(
+            queryDingtalkOpenGroupBaseInfo(cfg, channel.openConversationId),
+            4000,
+            '钉钉群聊校验超时',
+          );
+          items.push({
+            key: 'groupInfo',
+            label: '钉钉群聊校验',
+            ok: true,
+            message: groupInfo?.title ? `群聊：${groupInfo.title}` : '',
+          });
+        } catch (err) {
+          items.push({ key: 'groupInfo', label: '钉钉群聊校验', ok: false, message: String(err?.message || err) });
+        }
+      }
       const ok = items.every((item) => item.ok === true);
       return res.json({
         ok: true,
         data: {
           ok,
           items,
-          note: '本检测只校验配置完整性和钉钉凭证，不发送真实群消息。',
+          note: '本检测会校验配置完整性、钉钉凭证和群聊有效性，不发送真实群消息。',
         },
       });
     } catch (err) {

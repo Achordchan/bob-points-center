@@ -1,4 +1,10 @@
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const Util = require('@alicloud/tea-util');
+const dingtalkim_1_0 = require('@alicloud/dingtalk/im_1_0');
+const OpenApi = require('@alicloud/openapi-client');
 
 let accessTokenCache = null;
 let jsapiTicketCache = null;
@@ -71,6 +77,56 @@ function firstText(...values) {
     if (text) return text;
   }
   return '';
+}
+
+function createImClient() {
+  const config = new OpenApi.Config({});
+  config.protocol = 'https';
+  config.regionId = 'central';
+  return new dingtalkim_1_0.default(config);
+}
+
+export function isStandardDingtalkGroupOpenConversationId(value) {
+  return /^cid[A-Za-z0-9+/]{22}==$/.test(String(value || '').trim());
+}
+
+export async function convertDingtalkChatIdToOpenConversationId(cfg, chatId) {
+  const id = String(chatId || '').trim();
+  if (!id) throw new Error('缺少钉钉群会话');
+  const token = await getV1AccessToken(cfg);
+  const client = createImClient();
+  const headers = new dingtalkim_1_0.ChatIdToOpenConversationIdHeaders({});
+  headers.xAcsDingtalkAccessToken = token;
+  const resp = await client.chatIdToOpenConversationIdWithOptions(
+    encodeURIComponent(id),
+    headers,
+    new Util.RuntimeOptions({}),
+  );
+  const openConversationId = String(resp?.body?.openConversationId || '').trim();
+  if (!isStandardDingtalkGroupOpenConversationId(openConversationId)) {
+    throw new Error('选择的不是可用钉钉群聊，请重新选择群聊');
+  }
+  return openConversationId;
+}
+
+export async function queryDingtalkOpenGroupBaseInfo(cfg, openConversationId) {
+  const id = String(openConversationId || '').trim();
+  if (!isStandardDingtalkGroupOpenConversationId(id)) {
+    throw new Error('钉钉群会话 ID 格式不正确');
+  }
+  const token = await getV1AccessToken(cfg);
+  const client = createImClient();
+  const headers = new dingtalkim_1_0.QueryOpenGroupBaseInfoHeaders({});
+  headers.xAcsDingtalkAccessToken = token;
+  const req = new dingtalkim_1_0.QueryOpenGroupBaseInfoRequest({
+    openConversationId: id,
+  });
+  const resp = await client.queryOpenGroupBaseInfoWithOptions(req, headers, new Util.RuntimeOptions({}));
+  const result = resp?.body?.result && typeof resp.body.result === 'object' ? resp.body.result : null;
+  if (!result?.openConversationId) {
+    throw new Error('选择的不是可用钉钉群聊，请重新选择群聊');
+  }
+  return result;
 }
 
 export async function getRootDepartmentProfile(cfg, { language = 'zh_CN' } = {}) {

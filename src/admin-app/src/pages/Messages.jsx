@@ -99,16 +99,28 @@ function getRawConversation(data) {
 
 function extractDingtalkConversation(data) {
   const source = getRawConversation(data);
+  const cid = String(source.cid || '').trim();
   const openConversationId = String(
-    source.openConversationId || source.openCid || source.cid || source.conversationId || source.chatId || source.id || '',
+    source.openConversationId || source.openCid || (isLikelyDingtalkGroupConversationId(cid) ? cid : ''),
+  ).trim();
+  const chatId = String(
+    source.chatId || (isLikelyDingtalkGroupConversationId(cid) ? '' : cid) || source.conversationId || source.id || '',
   ).trim();
   const name = String(source.title || source.name || source.conversationTitle || source.groupName || '钉钉群聊').trim();
-  return { openConversationId, name };
+  return { openConversationId, chatId, name };
+}
+
+function getConversationTypeText(source) {
+  return String(source.type ?? source.chatType ?? source.conversationType ?? source.bizType ?? '').toLowerCase();
+}
+
+function isLikelyDingtalkGroupConversationId(value) {
+  return /^cid[A-Za-z0-9+/]{22}==$/.test(String(value || '').trim());
 }
 
 function isSingleConversation(data) {
   const source = getRawConversation(data);
-  const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
+  const typeText = getConversationTypeText(source);
   if (['single', 'private', 'p2p', 'one2one', 'oto', '0'].includes(typeText)) return true;
   if (source.isGroup === false || source.group === false) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
@@ -117,8 +129,8 @@ function isSingleConversation(data) {
 
 function isLikelyGroupConversation(data) {
   const source = getRawConversation(data);
-  const typeText = String(source.type || source.chatType || source.conversationType || source.bizType || '').toLowerCase();
-  if (['group', 'enterprise_group', 'org_group', '1', '2'].includes(typeText)) return true;
+  const typeText = getConversationTypeText(source);
+  if (['group', 'enterprise_group', 'org_group', '2'].includes(typeText)) return true;
   if (source.isGroup === true || source.group === true) return true;
   const memberCount = Number(source.memberCount || source.membersCount || source.userCount || 0);
   return memberCount > 2;
@@ -126,7 +138,11 @@ function isLikelyGroupConversation(data) {
 
 function assertGroupConversation(data) {
   if (isSingleConversation(data)) throw new Error('不能选择单聊，请选择群聊');
-  isLikelyGroupConversation(data);
+  if (isLikelyGroupConversation(data)) return;
+  const conversation = extractDingtalkConversation(data);
+  if (isLikelyDingtalkGroupConversationId(conversation.openConversationId)) return;
+  if (conversation.chatId) return;
+  throw new Error('当前选择不是标准钉钉群聊，请选择群会话');
 }
 
 function withTimeout(promise, ms, message) {
@@ -391,7 +407,7 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
       }), 20000, '钉钉选择群聊超时，请重新选择');
       assertGroupConversation(selected);
       const conversation = extractDingtalkConversation(selected);
-      if (!conversation.openConversationId) throw new Error('钉钉没有返回群会话 ID');
+      if (!conversation.openConversationId && !conversation.chatId) throw new Error('钉钉没有返回群会话 ID');
       const presetName = String(conversation.name || '').trim() || '钉钉群聊';
       const conversationMeta = getRawConversation(selected);
       const data = await api('/admin/settings/group-card/preset', {
@@ -399,7 +415,8 @@ function SettingsEditor({ title, loadPath, savePath, templates, withChannel = fa
         body: {
           name: presetName,
           openConversationId: conversation.openConversationId,
-          conversationType: conversationMeta.type || conversationMeta.chatType || conversationMeta.conversationType || conversationMeta.bizType || '',
+          chatId: conversation.chatId,
+          conversationType: conversationMeta.type ?? conversationMeta.chatType ?? conversationMeta.conversationType ?? conversationMeta.bizType ?? '',
           isGroup: conversationMeta.isGroup ?? conversationMeta.group ?? null,
           memberCount: conversationMeta.memberCount || conversationMeta.membersCount || conversationMeta.userCount || null,
         },
