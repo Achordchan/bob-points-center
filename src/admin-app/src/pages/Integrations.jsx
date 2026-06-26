@@ -6,11 +6,11 @@ import { hasPermission } from '../permissions.js';
 import ResourceManager from '../components/ResourceManager.jsx';
 
 function Tokens({ canEdit }) {
-  const { message } = App.useApp(); const [rows, setRows] = useState([]);
+  const { message, modal } = App.useApp(); const [rows, setRows] = useState([]);
   const load = async () => setRows((await api('/bob-token/list?includeRevoked=true&limit=200')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const create = async () => { const data = await api('/bob-token/create', { method: 'POST' }); message.success('Token 已创建'); if (data.token) navigator.clipboard?.writeText(data.token); load(); };
-  const remove = (row) => Modal.confirm({
+  const remove = (row) => modal.confirm({
     title: '删除已吊销 Token',
     content: `确认删除 Token #${row.id}？删除后不会影响已有账本。`,
     okText: '确认删除',
@@ -79,7 +79,7 @@ function backupFilename(mode) {
 }
 
 function Backup({ canExport, canImport }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [exportDetail, setExportDetail] = useState(null);
   const [exportTablesOpen, setExportTablesOpen] = useState(false);
   const [lastBackup, setLastBackup] = useState(null);
@@ -149,7 +149,7 @@ function Backup({ canExport, canImport }) {
       }
     };
     if (importMode === 'overwrite') {
-      Modal.confirm({
+      modal.confirm({
         title: '确认覆盖导入？',
         content: '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。',
         okText: '确认覆盖导入',

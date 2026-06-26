@@ -41,7 +41,7 @@ function packetClaimUser(row) {
 }
 
 function RedPackets({ me }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const canEdit = hasPermission(me, 'activities:edit');
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
@@ -50,8 +50,8 @@ function RedPackets({ me }) {
   const load = async () => { const statusResp = await api('/admin/red-packet/status'); setStatus(statusResp.data ? { ...statusResp.data, claimed_count: statusResp.claimed_count, server_time: statusResp.server_time } : null); setHistory((await api('/admin/red-packet/history')).data || []); };
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const start = async (values) => { await api('/admin/red-packet/start', { method: 'POST', body: values }); message.success('红包活动已创建'); form.resetFields(); load(); };
-  const clear = () => Modal.confirm({ title: '危险区：清空红包历史', content: '清空后无法恢复。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/clear', { method: 'POST' }); message.success('已清空'); load(); } });
-  const remove = (row) => Modal.confirm({ title: '删除红包活动', content: `确认删除红包活动 #${row.id}？该活动及领取明细会被删除。`, okText: '确认删除', cancelText: '取消', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/delete', { method: 'POST', body: { activity_id: row.id } }); message.success('已删除'); if (detail?.id === row.id) setDetail(null); load(); } });
+  const clear = () => modal.confirm({ title: '危险区：清空红包历史', content: '清空后无法恢复。', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/clear', { method: 'POST' }); message.success('已清空'); load(); } });
+  const remove = (row) => modal.confirm({ title: '删除红包活动', content: `确认删除红包活动 #${row.id}？该活动及领取明细会被删除。`, okText: '确认删除', cancelText: '取消', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/red-packet/history/delete', { method: 'POST', body: { activity_id: row.id } }); message.success('已删除'); if (detail?.id === row.id) setDetail(null); load(); } });
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Card size="small" title="红包配置" extra={<Tag color={status?.status === 'active' ? 'green' : 'default'}>{isCurrentRedPacketStatus(status?.status) ? statusText(redPacketStatusText, status.status) : '未开始'}</Tag>}>
       <Form form={form} layout="inline" onFinish={start}><Form.Item name="total_amount" rules={[{ required: true }]}><InputNumber min={1} placeholder="总金额" disabled={!canEdit} /></Form.Item><Form.Item name="total_count" rules={[{ required: true }]}><InputNumber min={1} placeholder="人数" disabled={!canEdit} /></Form.Item><Form.Item name="countdown_seconds" rules={[{ required: true }]}><InputNumber min={0} placeholder="倒计时秒" disabled={!canEdit} /></Form.Item><Form.Item name="duration_minutes" rules={[{ required: true }]}><InputNumber min={1} placeholder="持续分钟" disabled={!canEdit} /></Form.Item><Form.Item name="sponsor"><Input placeholder="赞助人" readOnly={!canEdit} /></Form.Item>{canEdit && <Button type="primary" htmlType="submit">创建并开始</Button>}<Button onClick={load}>刷新</Button></Form>
@@ -109,7 +109,7 @@ function attendanceNote(row) {
 }
 
 function AttendanceRewards({ dingtalk, me }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const canEdit = hasPermission(me, 'activities:edit');
   const [form] = Form.useForm();
   const [departments, setDepartments] = useState([]);
@@ -169,7 +169,7 @@ function AttendanceRewards({ dingtalk, me }) {
   };
 
 
-  const resetSettings = () => Modal.confirm({
+  const resetSettings = () => modal.confirm({
     title: '恢复打卡奖励默认配置？',
     content: '会把打卡奖励配置恢复为系统默认值，历史记录不会删除。',
     okText: '确认恢复',
@@ -197,7 +197,7 @@ function AttendanceRewards({ dingtalk, me }) {
     setDetail({ date: data.work_date || date, rows: data.rows || [] });
   };
 
-  const reconcile = (date) => Modal.confirm({
+  const reconcile = (date) => modal.confirm({
     title: '确认执行打卡对账？',
     content: '系统会根据当天打卡记录补发缺失的 BOB 币奖励。本次不发送钉钉消息。',
     okText: '确认对账',

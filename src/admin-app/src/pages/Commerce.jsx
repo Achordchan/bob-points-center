@@ -53,7 +53,7 @@ function nextCloseText(row) {
 }
 
 function MallOpeningControl({ canEdit }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [form] = Form.useForm();
   const [row, setRow] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -86,7 +86,7 @@ function MallOpeningControl({ canEdit }) {
 
   const toggleNow = () => {
     if (!canEdit) return;
-    Modal.confirm({
+    modal.confirm({
       title: isOpen ? '确认立即关闭商城？' : '确认立即开启商城？',
       content: isOpen ? '关闭后，用户将不能继续下单。' : '开启后，用户可以立即下单。',
       okText: isOpen ? '确认关闭' : '确认开启',
@@ -175,7 +175,7 @@ function MallOpeningControl({ canEdit }) {
 }
 
 function Products({ me }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
@@ -254,7 +254,7 @@ function Products({ me }) {
       message.warning('该商品未启用限购');
       return;
     }
-    Modal.confirm({
+    modal.confirm({
       title: '开启新一轮限购',
       content: `${savedEditing.product_name || savedEditing.product_id}：历史订单保留，新一轮购买从 0/${Math.floor(savedLimit)} 重新统计。`,
       okText: '确认开启',
@@ -269,11 +269,11 @@ function Products({ me }) {
       },
     });
   };
-  const remove = (row) => Modal.confirm({ title: '危险区：删除商品', content: `确认删除 ${row.product_name}？`, okButtonProps: { danger: true }, onOk: async () => { await api('/admin/mall/self/products/delete', { method: 'POST', body: { product_id: row.product_id } }); message.success('已删除'); load(); } });
+  const remove = (row) => modal.confirm({ title: '危险区：删除商品', content: `确认删除 ${row.product_name}？`, okButtonProps: { danger: true }, onOk: async () => { await api('/admin/mall/self/products/delete', { method: 'POST', body: { product_id: row.product_id } }); message.success('已删除'); load(); } });
   const selectedRows = rows.filter((row) => selected.includes(row.product_id));
   const batchSetStatus = (status) => {
     if (!selectedRows.length) return;
-    Modal.confirm({
+    modal.confirm({
       title: status === 'on' ? '批量上架商品' : '批量下架商品',
       content: `将处理 ${selectedRows.length} 个商品。`,
       okText: '确认',
@@ -291,7 +291,7 @@ function Products({ me }) {
   };
   const batchRemove = () => {
     if (!selectedRows.length) return;
-    Modal.confirm({
+    modal.confirm({
       title: '危险区：批量删除商品',
       content: `确认删除 ${selectedRows.length} 个商品？此操作不可撤销。`,
       okText: '确认删除',
@@ -366,7 +366,7 @@ function Products({ me }) {
 }
 
 function Cdks({ me }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [rows, setRows] = useState([]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -411,7 +411,7 @@ function Cdks({ me }) {
     if (!generated?.codes?.length) return;
     downloadText(`cdk-${generated.batchId}.txt`, generated.codes.join('\n'));
   };
-  const remove = (row) => Modal.confirm({
+  const remove = (row) => modal.confirm({
     title: '危险区：删除 CDK',
     content: `确认删除 ${row.product_name || '-'} 的 CDK：${row.cdk_code || '-'}？仅未兑换 CDK 可删除。`,
     okText: '确认删除',

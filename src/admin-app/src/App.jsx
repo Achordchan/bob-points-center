@@ -47,7 +47,7 @@ class PageErrorBoundary extends Component {
 }
 
 export default function AdminApp() {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [activeKey, setActiveKey] = useState('dashboard');
   const [me, setMe] = useState(null);
   const [dingtalk, setDingtalk] = useState({ connected: false, data: null, error: '' });
@@ -88,7 +88,7 @@ export default function AdminApp() {
     const changed = ['corpId', 'appKey', 'agentId'].some((key) => String(values?.[key] || '') !== String(current?.[key] || '')) || Boolean(values?.appSecret);
     if (changed) {
       const ok = await new Promise((resolve) => {
-        Modal.confirm({
+        modal.confirm({
           title: '确认修改钉钉连接吗？',
           content: '这会影响通讯录同步、打卡奖励、钉钉消息和部门选择。AppSecret 留空时会沿用当前密钥。',
           okText: '确认修改',

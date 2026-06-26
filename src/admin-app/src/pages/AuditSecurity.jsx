@@ -55,7 +55,7 @@ function AuditLogs() {
 }
 
 function RoleManagement() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [roles, setRoles] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [editing, setEditing] = useState(null);
@@ -78,7 +78,7 @@ function RoleManagement() {
     setEditing(null);
     await load();
   };
-  const disable = (role) => Modal.confirm({
+  const disable = (role) => modal.confirm({
     title: '停用角色',
     content: `确认停用「${role.name}」？已有用户使用时请先调整用户角色。`,
     okText: '确认停用',

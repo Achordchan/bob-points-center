@@ -42,7 +42,7 @@ function payloadProductText(payload) {
 }
 
 function RedeemCenter({ onRedeemed }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [encoded, setEncoded] = useState('');
   const [redeeming, setRedeeming] = useState(false);
   const [lastResult, setLastResult] = useState(null);
@@ -75,7 +75,7 @@ function RedeemCenter({ onRedeemed }) {
       return false;
     }
     return await new Promise((resolve) => {
-      Modal.confirm({
+      modal.confirm({
         title: '确认核销该订单？',
         content: <Descriptions bordered size="small" column={1} items={[
           { key: 'userid', label: '用户', children: payload.userid || '-' },

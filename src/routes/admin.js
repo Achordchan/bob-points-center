@@ -564,6 +564,22 @@ function buildMallOpenCard(ts) {
   };
 }
 
+function buildGroupCardTestVars(scheduleRow) {
+  const now = Math.floor(Date.now() / 1000);
+  const configuredOpenAt = toOptionalInt(scheduleRow?.next_open_at);
+  const lastOpenAt = toOptionalInt(scheduleRow?.open_notify_for_open_at);
+  const openDurationMinutes = toOptionalInt(scheduleRow?.open_duration_minutes);
+  const openAt = configuredOpenAt || lastOpenAt || now;
+  const closeAt = openDurationMinutes ? openAt + openDurationMinutes * 60 : now + 1800;
+  return {
+    open_time: formatTs(openAt) || '-',
+    close_time: formatTs(closeAt) || '-',
+    product_name: '测试商品',
+    stock: '仅剩 1 件',
+    amount: '10 BOB 币',
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
@@ -3062,7 +3078,7 @@ export function adminRouter() {
             'groupInfo',
             '钉钉群聊校验',
             err,
-            '缺少 AntDing.Read.Send 权限，无法提前校验群聊；这不代表群会话不可用，请以模板测试发送结果为准。',
+            '钉钉返回接口权限不足，无法提前校验群聊；这不代表群会话不可用，请以模板测试发送结果为准。',
           ));
         }
       }
@@ -3084,7 +3100,7 @@ export function adminRouter() {
             'groupRobot',
             '群机器人校验',
             err,
-            '缺少 AntDing.Read.Send 权限，无法判断机器人是否在群内；如果测试发送收不到，请先把机器人添加到群。',
+            '钉钉返回接口权限不足，无法判断机器人是否在群内；如果测试发送收不到，请先把机器人添加到群。',
           ));
         }
       }
@@ -3106,14 +3122,9 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
     const event = req.body?.event ? String(req.body.event).trim() : 'manual';
-    const vars = {
-      open_time: formatTs(Math.floor(Date.now() / 1000)) || '-',
-      close_time: formatTs(Math.floor(Date.now() / 1000) + 1800) || '-',
-      product_name: '测试商品',
-      stock: '仅剩 1 件',
-      amount: '10 BOB 币',
-    };
     try {
+      const scheduleRow = await ensureMallOpeningRow(db);
+      const vars = buildGroupCardTestVars(scheduleRow);
       const settings = await getGroupCardSettings(db);
       if (settings?.enabled === false) {
         return res.status(400).json({ error: 'group_card_disabled' });

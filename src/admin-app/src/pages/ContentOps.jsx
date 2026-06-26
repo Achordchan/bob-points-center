@@ -38,7 +38,7 @@ function FeedbackMessageContent({ item }) {
 }
 
 function Faq({ canEdit, canDelete }) {
-  const { message } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
+  const { message, modal } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
   const load = async () => setRows((await api('/admin/content/faq?limit=200')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const open = (r = { is_enabled: 1, sort: 0 }) => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, is_enabled: Number(r.is_enabled ?? 1) === 1 }); };
@@ -56,19 +56,19 @@ function Faq({ canEdit, canDelete }) {
     [nextRows[index], nextRows[target]] = [nextRows[target], nextRows[index]];
     await saveOrder(nextRows);
   };
-  const del = (id) => Modal.confirm({ title: '删除 FAQ', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/faq/delete', { method: 'POST', body: { id } }); load(); } });
+  const del = (id) => modal.confirm({ title: '删除 FAQ', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/faq/delete', { method: 'POST', body: { id } }); load(); } });
   return <Card><DataToolbar onRefresh={load} onCreate={canEdit ? () => open() : null} createText="新增 FAQ" /><Table rowKey="id" dataSource={rows} columns={[{ title: '问题', dataIndex: 'question' }, { title: '顺序', dataIndex: 'sort', width: 110 }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }, { title: '操作', render: (_, r, index) => <Space>{canEdit && <Button disabled={index === 0} onClick={() => move(index, -1)}>上移</Button>}{canEdit && <Button disabled={index === rows.length - 1} onClick={() => move(index, 1)}>下移</Button>}{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => del(r.id)}>删除</Button>}</Space> }]} />
     <Drawer title={editing?.id ? "编辑 FAQ" : "新增 FAQ"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={canEdit ? <Button type="primary" onClick={() => form.submit()}>保存</Button> : null}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="question" label="问题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="answer" label="答案" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item><Form.Item name="sort" label="顺序"><Input /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
   </Card>;
 }
 
 function Announcements({ canEdit, canDelete }) {
-  const { message } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
+  const { message, modal } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
   const load = async () => setRows((await api('/admin/content/announcements?limit=120')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
   const open = (r = { level: 'info', is_enabled: 1, sort: 0 }) => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, publish_at: toDateTimeLocal(r.publish_at), is_enabled: Number(r.is_enabled ?? 1) === 1 }); };
   const save = async (v) => { await api('/admin/content/announcements/save', { method: 'POST', body: { ...v, id: editing?.id || null, is_enabled: v.is_enabled ? 1 : 0, publish_at: toUnix(v.publish_at) } }); message.success('公告已保存'); setEditing(null); form.resetFields(); load(); };
-  const del = (id) => Modal.confirm({ title: '删除公告', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/announcements/delete', { method: 'POST', body: { id } }); load(); } });
+  const del = (id) => modal.confirm({ title: '删除公告', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/announcements/delete', { method: 'POST', body: { id } }); load(); } });
   return <Card><DataToolbar onRefresh={load} onCreate={canEdit ? () => open() : null} createText="新增公告" /><Table rowKey="id" dataSource={rows} columns={[{ title: '标题', dataIndex: 'title' }, { title: '级别', dataIndex: 'level', render: (v) => <Tag color={announcementLevelColor[v] || 'default'}>{announcementLevelText[v] || v || '-'}</Tag> }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }, { title: '发布时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => del(r.id)}>删除</Button>}</Space> }]} />
     <Drawer title={editing?.id ? "编辑公告" : "新增公告"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={canEdit ? <Button type="primary" onClick={() => form.submit()}>保存</Button> : null}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item><Form.Item name="level" label="级别"><Select options={[{ value: 'info', label: '普通' }, { value: 'success', label: '成功' }, { value: 'warning', label: '提醒' }, { value: 'danger', label: '重要' }]} /></Form.Item><Form.Item name="publish_at" label="发布时间"><Input type="datetime-local" /></Form.Item><Form.Item name="sort" label="排序"><Input /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
   </Card>;

@@ -63,7 +63,7 @@ function dingtalkItems(profile) {
 }
 
 export default function Users({ me }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -180,7 +180,7 @@ export default function Users({ me }) {
       message.success(successText);
       return;
     }
-    Modal.warning({
+    modal.warning({
       title: '部分用户处理失败',
       content: <Space direction="vertical" style={{ width: '100%' }}>
         <div>成功 {okCount} 人，失败 {failed.length} 人。</div>
@@ -235,7 +235,7 @@ export default function Users({ me }) {
     const roleName = role?.name || '无后台角色';
     const targets = roleTargets.filter((user) => !Number(user.is_fixed_admin));
     if (!targets.length) return message.warning('没有可修改角色的用户');
-    Modal.confirm({
+    modal.confirm({
       title: '确认修改后台角色？',
       content: `将把 ${targets.length} 个用户的后台角色改为「${roleName}」，权限会立即生效。`,
       okText: '确认修改',
