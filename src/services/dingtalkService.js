@@ -100,7 +100,7 @@ export async function convertDingtalkChatIdToOpenConversationId(cfg, chatId) {
   let resp;
   try {
     resp = await client.chatIdToOpenConversationIdWithOptions(
-      encodeURIComponent(id),
+      id,
       headers,
       new Util.RuntimeOptions({}),
     );
