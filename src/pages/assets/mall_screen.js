@@ -253,7 +253,7 @@
     const img = document.getElementById('screenQrImg');
     if (!img) return;
     const target = `${window.location.origin}/mall?tab=balance`;
-    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(target)}`;
+    img.src = `/qr/render?size=240&data=${encodeURIComponent(target)}`;
   }
 
   function setStageActive() {

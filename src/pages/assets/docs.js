@@ -496,7 +496,7 @@
     if (resp.status >= 200 && resp.status < 300 && ep.path === '/exchange/qr' && encoded) {
       const s = String(encoded);
       const url = (data && typeof data === 'object' && data.qr_image_url) ? String(data.qr_image_url) : '';
-      qrImg.src = url || `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(s)}`;
+      qrImg.src = url || `/qr/render?size=220&data=${encodeURIComponent(s)}`;
       qrWrap.style.display = 'block';
     }
   }

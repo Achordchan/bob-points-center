@@ -14,6 +14,7 @@ import { publishMallRealtimeEvent, registerMallRealtimeClient } from '../service
 import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
+import { createQrRenderPath } from '../services/qrImageService.js';
 
 const mallEasterTokens = new Map();
 function normalizeLimitRound(value) {
@@ -366,7 +367,7 @@ async function buyMallProduct({ db, cfg, userid, name, productId, exchangeId, se
 function buildQrForRedeem({ exchange_id, userid, product_id, product_name, bob_amount }, secret) {
   const data = buildExchangeData({ exchange_id, userid, product_id, product_name, bob_amount }, secret);
   const encoded = encodeData(data);
-  const qr_image_url = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(encoded)}`;
+  const qr_image_url = createQrRenderPath(encoded, { size: 240 });
   return { encoded, qr_image_url };
 }
 

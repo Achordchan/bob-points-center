@@ -10,6 +10,7 @@ import { mallRouter } from './routes/mall.js';
 import { adminRouter } from './routes/admin.js';
 import { bobTokenRouter } from './routes/bobToken.js';
 import { usersRouter } from './routes/users.js';
+import { qrImageRouter } from './routes/qrImage.js';
 import { startMallOpeningScheduler } from './services/mallOpeningScheduler.js';
 import { startDingtalkStream } from './services/dingtalkStreamService.js';
 import { handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './services/attendanceRewardService.js';
@@ -66,6 +67,7 @@ export function createApp({ db, cfg } = {}) {
   app.use('/admin', adminRouter());
   app.use('/bob-token', bobTokenRouter());
   app.use('/users', usersRouter());
+  app.use('/qr', qrImageRouter());
   app.use(docsRouter());
 
   startMallOpeningScheduler({ db, cfg });

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { requireBobToken } from '../middleware/requireBobToken.js';
+import { createQrDataUrl } from '../services/qrImageService.js';
 
 function genExchangeId() {
   return `BOB_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
@@ -11,7 +12,7 @@ function genExchangeId() {
 export function exchangeRouter() {
   const router = Router();
 
-  router.post('/qr', requireBobToken(), (req, res) => {
+  router.post('/qr', requireBobToken(), async (req, res) => {
     const secret = req.app?.locals?.cfg?.qrSignSecret;
     const body = req.body || {};
 
@@ -28,7 +29,7 @@ export function exchangeRouter() {
     try {
       const data = buildExchangeData(body, secret);
       const encoded = encodeData(data);
-      const qr_image_url = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(encoded)}`;
+      const qr_image_url = await createQrDataUrl(encoded, { size: 220 });
       return res.json({ encoded, data, qr_image_url });
     } catch (err) {
       const message = String(err?.message || err);
