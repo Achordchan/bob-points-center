@@ -2807,6 +2807,68 @@ body.modalOpenFixed {
   line-height: 1.8;
   word-break: break-word;
 }
+
+.moreFeedbackItem {
+  padding: 0;
+  overflow: hidden;
+}
+
+.moreFeedbackSummary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.moreFeedbackSummary::-webkit-details-marker {
+  display: none;
+}
+
+.moreFeedbackSummary::after {
+  content: "展开";
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(59,130,246,0.12);
+  color: rgba(30,58,138,0.92);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.moreFeedbackItem[open] .moreFeedbackSummary::after {
+  content: "收起";
+}
+
+.moreFeedbackSummaryMain {
+  min-width: 0;
+}
+
+.moreFeedbackPreview {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(15, 23, 42, 0.58);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.moreFeedbackSummaryMeta {
+  grid-column: 1 / 2;
+  font-size: 11px;
+  color: rgba(15, 23, 42, 0.48);
+}
+
+.moreFeedbackBody {
+  padding: 0 12px 12px;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+
 .moreFeedbackThread {
   display: grid;
   gap: 8px;

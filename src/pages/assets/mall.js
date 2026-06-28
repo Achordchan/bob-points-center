@@ -2554,6 +2554,9 @@
         const content = x?.content ? String(x.content) : '';
         const reply = x?.reply ? String(x.reply) : '';
         const timeText = fmtTs(x?.created_at);
+        const idText = x?.id ? `#${String(x.id)}` : '';
+        const previewText = content.trim().replace(/\s+/g, ' ');
+        const preview = previewText.slice(0, 56) || '暂无内容';
         const messages = Array.isArray(x?.messages) && x.messages.length
           ? x.messages
           : [
@@ -2564,15 +2567,22 @@
           <div class="moreFeedbackMsgMeta">${m?.sender_type === 'admin' ? '管理员' : '我'} · ${escapeHtml(fmtTs(m?.created_at) || '')}</div>
           <div class="moreFeedbackMsgText">${escapeHtml(m?.content ? String(m.content) : '-')}</div>
         </div>`).join('');
-        return `<div class="moreItem">
-          <div class="moreItemTitle">${escapeHtml(category)} · ${escapeHtml(status)}</div>
-          <div class="moreFeedbackThread">${thread}</div>
-          <div class="moreItemMeta">${escapeHtml(timeText || '')}</div>
-          <div class="moreFeedbackReply">
-            <textarea data-feedback-reply-text="${escapeHtml(String(x?.id || ''))}" maxlength="2000" placeholder="继续补充这条反馈"></textarea>
-            <button class="secondary" type="button" data-feedback-reply-submit="${escapeHtml(String(x?.id || ''))}">追加回复</button>
+        return `<details class="moreItem moreFeedbackItem">
+          <summary class="moreFeedbackSummary">
+            <div class="moreFeedbackSummaryMain">
+              <div class="moreItemTitle">工单 ${escapeHtml(idText)} · ${escapeHtml(category)} · ${escapeHtml(status)}</div>
+              <div class="moreFeedbackPreview">${escapeHtml(preview)}${previewText.length > 56 ? '…' : ''}</div>
+            </div>
+            <div class="moreFeedbackSummaryMeta">${escapeHtml(timeText || '')}</div>
+          </summary>
+          <div class="moreFeedbackBody">
+            <div class="moreFeedbackThread">${thread}</div>
+            <div class="moreFeedbackReply">
+              <textarea data-feedback-reply-text="${escapeHtml(String(x?.id || ''))}" maxlength="2000" placeholder="继续补充这条反馈"></textarea>
+              <button class="secondary" type="button" data-feedback-reply-submit="${escapeHtml(String(x?.id || ''))}">追加回复</button>
+            </div>
           </div>
-        </div>`;
+        </details>`;
       })
       .join('');
   }

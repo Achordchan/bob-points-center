@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CameraOutlined, CheckOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
-import { App, Button, Card, Input, Space, Typography, Upload } from 'antd';
+import { App, Button, Card, Grid, Input, Space, Typography, Upload } from 'antd';
 import { translateErrorMessage } from '../api.js';
 import { initDingtalkJsapi, isDingtalkClient } from '../utils/dingtalkJsapi.js';
 
+const { useBreakpoint } = Grid;
 let barcodeDetector = null;
 
 function normalizeEncoded(raw) {
@@ -33,20 +34,81 @@ function formatBrowserPermissionError(error, actionText) {
 }
 
 async function tryDingtalkScan() {
-  if (!isDingtalkClient()) return '';
+  if (!isDingtalkClient()) return { attempted: false, value: '' };
   try {
     const { dd } = await initDingtalkJsapi(['biz.util.scan']);
-    if (!dd?.biz?.util?.scan) return '';
-    return new Promise((resolve) => {
+    if (!dd?.biz?.util?.scan) return { attempted: false, value: '' };
+    const value = await new Promise((resolve) => {
+      let settled = false;
+      let hasLeftPage = false;
+      let timer = 0;
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        window.removeEventListener('blur', markLeftPage);
+        window.removeEventListener('focus', finishAfterReturn);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+      const finish = (next = '') => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(normalizeEncoded(next));
+      };
+      const markLeftPage = () => {
+        hasLeftPage = true;
+      };
+      const finishAfterReturn = () => {
+        if (!hasLeftPage) return;
+        window.setTimeout(() => finish(''), 250);
+      };
+      const handleVisibilityChange = () => {
+        if (document.hidden) {
+          markLeftPage();
+          return;
+        }
+        finishAfterReturn();
+      };
+
+      timer = window.setTimeout(() => finish(''), 30000);
+      window.addEventListener('blur', markLeftPage);
+      window.addEventListener('focus', finishAfterReturn);
+      document.addEventListener('visibilitychange', handleVisibilityChange);
       dd.biz.util.scan({
         type: 'qrCode',
-        onSuccess: (data) => resolve(normalizeEncoded(data?.text || data?.resultStr || '')),
-        onFail: () => resolve(''),
+        onSuccess: (data) => finish(data?.text || data?.resultStr || ''),
+        onFail: () => finish(''),
+        onCancel: () => finish(''),
       });
     });
+    return { attempted: true, value };
   } catch {
-    return '';
+    return { attempted: false, value: '' };
   }
+}
+
+async function getCameraStreamWithTimeout(constraints, timeoutMs = 30000) {
+  let timedOut = false;
+  const request = navigator.mediaDevices.getUserMedia(constraints)
+    .then((stream) => {
+      if (timedOut) {
+        stream.getTracks().forEach((track) => track.stop());
+        return null;
+      }
+      return stream;
+    })
+    .catch((err) => {
+      if (timedOut) return null;
+      throw err;
+    });
+  const timeout = new Promise((resolve) => {
+    window.setTimeout(() => {
+      timedOut = true;
+      resolve(null);
+    }, timeoutMs);
+  });
+  const stream = await Promise.race([request, timeout]);
+  if (!stream) throw new Error('摄像头授权超时，请重新点击扫码');
+  return stream;
 }
 
 async function createDetector() {
@@ -90,6 +152,8 @@ async function detectFromFile(file) {
 
 export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, redeeming }) {
   const { message } = App.useApp();
+  const screens = useBreakpoint();
+  const isMobile = screens.md === false;
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const scanActiveRef = useRef(false);
@@ -145,9 +209,13 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
   const startCameraScan = async () => {
     setDetecting(true);
     try {
-      const nativeValue = await tryDingtalkScan();
-      if (nativeValue) {
-        applyDetected(nativeValue, '已通过钉钉扫码识别');
+      const nativeScan = await tryDingtalkScan();
+      if (nativeScan.value) {
+        applyDetected(nativeScan.value, '已通过钉钉扫码识别');
+        return;
+      }
+      if (nativeScan.attempted) {
+        message.info('已取消扫码');
         return;
       }
 
@@ -160,7 +228,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
         return;
       }
       stopCamera();
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      const stream = await getCameraStreamWithTimeout({ video: { facingMode: { ideal: 'environment' } }, audio: false });
       streamRef.current = stream;
       scanActiveRef.current = true;
       setScanning(true);
@@ -247,18 +315,18 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
       </Upload>
       <Button icon={<CopyOutlined />} onClick={readClipboard}>读取剪贴板</Button>
     </Space>
-    <div className="redeem-scanner-grid">
+    {(!isMobile || scanning) && <div className="redeem-scanner-grid">
       <div className={`redeem-scanner-camera${scanning ? ' is-scanning' : ''}`}>
         <video ref={videoRef} className={scanning ? 'redeem-scanner-video' : 'redeem-scanner-video is-hidden'} muted playsInline />
-        {!scanning && <div className="redeem-scanner-placeholder">
+        {!scanning && !isMobile && <div className="redeem-scanner-placeholder">
           <Typography.Text strong>手机端优先扫码</Typography.Text>
           <Typography.Text type="secondary">电脑端可上传或粘贴二维码图片。</Typography.Text>
         </div>}
       </div>
-      <div className="redeem-scanner-panel">
+      {!isMobile && <div className="redeem-scanner-panel">
         <div className="redeem-scanner-paste" tabIndex={0} onPaste={handlePaste}>点击后粘贴二维码图片或 encoded 文本</div>
         <Input.TextArea value={encoded} onChange={(event) => onEncodedChange(event.target.value)} placeholder="二维码 encoded 内容" rows={3} />
-      </div>
-    </div>
+      </div>}
+    </div>}
   </Card>;
 }
