@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CameraOutlined, CheckOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { App, Button, Card, Grid, Input, Space, Typography, Upload } from 'antd';
+import jsQR from 'jsqr';
 import { translateErrorMessage } from '../api.js';
 import { initDingtalkJsapi, isDingtalkClient } from '../utils/dingtalkJsapi.js';
 
@@ -117,13 +118,41 @@ async function createDetector() {
   return barcodeDetector;
 }
 
-async function detectFromImageSource(source) {
-  const detector = await createDetector();
-  if (!detector) throw new Error('当前浏览器不支持二维码识别，请粘贴 encoded 内容核销。');
-  const codes = await detector.detect(source);
-  const raw = codes?.[0]?.rawValue || '';
+function getSourceSize(source) {
+  if (source?.videoWidth && source?.videoHeight) return { width: source.videoWidth, height: source.videoHeight };
+  if (source?.naturalWidth && source?.naturalHeight) return { width: source.naturalWidth, height: source.naturalHeight };
+  if (source?.width && source?.height) return { width: source.width, height: source.height };
+  return { width: 0, height: 0 };
+}
+
+function detectWithCanvas(source) {
+  const { width, height } = getSourceSize(source);
+  if (!width || !height) throw new Error('二维码图片读取失败');
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('当前浏览器无法读取二维码图片');
+  ctx.drawImage(source, 0, 0, width, height);
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const code = jsQR(imageData.data, width, height, { inversionAttempts: 'attemptBoth' });
+  const raw = code?.data || '';
   if (!raw) throw new Error('未识别到二维码');
   return normalizeEncoded(raw);
+}
+
+async function detectFromImageSource(source) {
+  const detector = await createDetector();
+  if (detector) {
+    try {
+      const codes = await detector.detect(source);
+      const raw = codes?.[0]?.rawValue || '';
+      if (raw) return normalizeEncoded(raw);
+    } catch {
+      // 继续使用 canvas + jsQR 兜底，兼容钉钉内置浏览器。
+    }
+  }
+  return detectWithCanvas(source);
 }
 
 async function detectFromFile(file) {
@@ -221,10 +250,6 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
 
       if (!navigator.mediaDevices?.getUserMedia) {
         message.warning('当前浏览器不支持摄像头，请上传图片或粘贴 encoded 内容。');
-        return;
-      }
-      if (!(await createDetector())) {
-        message.warning('当前浏览器不支持二维码识别，请上传支持识别的浏览器处理，或粘贴 encoded 内容。');
         return;
       }
       stopCamera();

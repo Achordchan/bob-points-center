@@ -2884,8 +2884,13 @@ body.modalOpenFixed {
 }
 
 .moreFeedbackMsg.isAdmin {
-  justify-self: end;
+  justify-self: start;
   background: rgba(239,246,255,0.95);
+}
+
+.moreFeedbackMsg.isUser {
+  justify-self: end;
+  background: rgba(236,253,245,0.95);
 }
 
 .moreFeedbackMsgMeta {
