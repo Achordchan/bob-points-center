@@ -14,7 +14,7 @@ import {
   ShoppingOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { Button, Drawer, Dropdown, Grid, Layout, Menu, Space, Typography } from 'antd';
+import { Button, Drawer, Dropdown, Grid, Layout, Menu, Typography } from 'antd';
 import { canAccessNav } from '../permissions.js';
 
 const { Header, Sider, Content } = Layout;
@@ -70,7 +70,7 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, canEditD
             {isMobile && <Button icon={<MenuOutlined />} onClick={() => setMobileMenuOpen(true)} aria-label="打开导航" />}
             <Typography.Title level={4} className="page-title">{activeKey === 'myOperations' ? (user?.isSuperAdmin ? '管理员操作记录' : '我的操作记录') : selected?.label || '首页概览'}</Typography.Title>
           </div>
-          <Space wrap className="topbar-actions">
+          <div className="topbar-actions">
             <Button className="dingtalk-pill" type={connected ? 'primary' : 'default'} ghost={connected} disabled={!canEditDingtalk} onClick={onOpenDingtalk}>
               钉钉：{connected ? org : '未连接'}
             </Button>
@@ -78,7 +78,7 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, canEditD
             <Dropdown menu={{ items: [{ key: 'my-operations', label: user?.isSuperAdmin ? '管理员操作记录' : '我的操作记录', onClick: () => onChange('myOperations') }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
               <Button icon={<SettingOutlined />}>{user?.name || '管理员'}</Button>
             </Dropdown>
-          </Space>
+          </div>
         </Header>
         <Content className="content-wrap">{children}</Content>
       </Layout>
