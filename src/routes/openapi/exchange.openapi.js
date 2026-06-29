@@ -1,0 +1,5 @@
+/**
+ * @openapi
+ * {"paths":{"/exchange/qr":{"post":{"tags":["兑换"],"summary":"生成签名核销二维码数据（bob_token）","requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"properties":{"bob_token":{"type":"string"},"exchange_id":{"type":"string"},"userid":{"type":"string"},"product_id":{"type":"string"},"product_name":{"type":"string"},"bob_amount":{"type":"integer","minimum":1}},"required":["bob_token","userid","product_id","bob_amount"]},"examples":{"example":{"value":{"bob_token":"<BOB_TOKEN>","userid":"u001","product_id":"P01","product_name":"咖啡券","bob_amount":10}}}}}},"responses":{"200":{"description":"成功","content":{"application/json":{"schema":{"$ref":"#/components/schemas/GenericObject"}}}},"400":{"description":"参数错误","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorResponse"}}}},"401":{"description":"未授权（缺少或无效 bob_token）","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorResponse"}}}},"500":{"description":"服务端错误","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorResponse"}}}}}}}}}
+ */
+export {};
