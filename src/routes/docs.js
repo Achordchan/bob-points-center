@@ -31,7 +31,7 @@ function requireDocsAdminSession() {
 
     if (!payload) {
       if (isDocsPageRequest(req)) {
-        return res.redirect(302, '/admin/login');
+        return res.redirect(302, '/admin/login?redirect=%2Fdocs%2F');
       }
       return res.status(401).json({ error: 'unauthorized' });
     }

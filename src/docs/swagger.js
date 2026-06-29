@@ -69,8 +69,38 @@ export function buildOpenApiSpec({ baseUrl }) {
   });
 }
 
+const docsAuthRedirectScript = `
+(function () {
+  var originalFetch = window.fetch;
+  if (typeof originalFetch !== 'function') return;
+
+  function isSameOrigin(input) {
+    try {
+      var raw = typeof input === 'string' ? input : (input && input.url) || '';
+      if (!raw) return true;
+      return new URL(raw, window.location.origin).origin === window.location.origin;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function redirectToLogin() {
+    var target = window.location.pathname + window.location.search + window.location.hash;
+    window.location.replace('/admin/login?redirect=' + encodeURIComponent(target || '/docs/'));
+  }
+
+  window.fetch = function () {
+    var input = arguments[0];
+    return originalFetch.apply(this, arguments).then(function (response) {
+      if (response && response.status === 401 && isSameOrigin(input)) redirectToLogin();
+      return response;
+    });
+  };
+})();`;
+
 export const swaggerUiOptions = {
   customSiteTitle: 'BOB币 API 文档',
+  customRobots: 'noindex,nofollow',
   swaggerOptions: {
     docExpansion: 'none',
     filter: true,
@@ -80,4 +110,5 @@ export const swaggerUiOptions = {
     tryItOutEnabled: true,
   },
   customCss: '',
+  customJsStr: docsAuthRedirectScript,
 };

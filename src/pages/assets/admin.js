@@ -1,8 +1,25 @@
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
 
-  const fetchJson = window.BOB.fetchJson;
+  const rawFetchJson = window.BOB.fetchJson;
   const escapeHtml = window.BOB.escapeHtml;
+
+  function getAdminLoginUrl() {
+    const target = `${window.location.pathname}${window.location.search}${window.location.hash}` || '/admin/legacy';
+    return `/admin/login?redirect=${encodeURIComponent(target)}`;
+  }
+
+  function redirectToAdminLogin() {
+    if (window.__bobAdminRedirecting) return;
+    window.__bobAdminRedirecting = true;
+    window.location.replace(getAdminLoginUrl());
+  }
+
+  async function fetchJson(url, opts) {
+    const result = await rawFetchJson(url, opts);
+    if (result?.status === 401) redirectToAdminLogin();
+    return result;
+  }
 
   let redeemModalSuccessPending = false;
   let redeemModalBusy = false;

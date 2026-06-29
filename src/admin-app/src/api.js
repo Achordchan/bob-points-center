@@ -36,6 +36,17 @@ const errorTextMap = {
   'payload mismatch': '核销内容不匹配',
 };
 
+function getAdminLoginUrl() {
+  const target = `${window.location.pathname}${window.location.search}${window.location.hash}` || '/admin/home';
+  return `/admin/login?redirect=${encodeURIComponent(target)}`;
+}
+
+function redirectToAdminLogin() {
+  if (window.__bobAdminRedirecting) return;
+  window.__bobAdminRedirecting = true;
+  window.location.replace(getAdminLoginUrl());
+}
+
 export function translateErrorMessage(error) {
   const raw = String(error || '').trim();
   if (!raw) return '操作失败';
@@ -66,6 +77,10 @@ export async function api(path, options = {}) {
     data = await res.json();
   } catch {
     data = null;
+  }
+  if (res.status === 401) {
+    redirectToAdminLogin();
+    throw new Error(translateErrorMessage(data?.error || 'unauthorized'));
   }
   if (!res.ok || data?.ok === false || data?.error) {
     throw new Error(translateErrorMessage(data?.error || `HTTP ${res.status}`));

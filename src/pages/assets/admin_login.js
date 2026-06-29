@@ -4,8 +4,17 @@
   const fetchJson = window.BOB.fetchJson;
   const postJson = window.BOB.postJson;
 
+  function getLoginRedirectTarget() {
+    const fallback = '/admin/home';
+    const target = new URLSearchParams(window.location.search).get('redirect') || '';
+    if (!target.startsWith('/')) return fallback;
+    if (target.startsWith('//')) return fallback;
+    if (target.startsWith('/admin/') || target === '/docs' || target.startsWith('/docs/')) return target;
+    return fallback;
+  }
+
   function goHome() {
-    window.location.replace('/admin/home');
+    window.location.replace(getLoginRedirectTarget());
   }
 
   function getFallbackLoginErrorText(error) {
