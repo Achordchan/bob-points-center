@@ -598,9 +598,10 @@ export async function handleCheckinEvent(db, cfg, { data } = {}) {
   }
   if (!parsed || typeof parsed !== 'object') return;
   const records = Array.isArray(parsed?.dataList) && parsed.dataList.length > 0 ? parsed.dataList : [parsed];
+  const notifyOnReward = shouldNotifyAttendanceReward();
   for (const record of records) {
     // eslint-disable-next-line no-await-in-loop
-    await handleAttendanceRecord(db, cfg, settings, record, { eventSource: 'stream', notifyOnReward: false });
+    await handleAttendanceRecord(db, cfg, settings, record, { eventSource: 'stream', notifyOnReward });
   }
 }
 
@@ -649,6 +650,11 @@ function getCurrentCstInfo() {
     date: now.toISOString().slice(0, 10),
     minutes: now.getUTCHours() * 60 + now.getUTCMinutes(),
   };
+}
+
+export function shouldNotifyAttendanceReward(now = getCurrentCstInfo()) {
+  const minutes = Number(now?.minutes);
+  return Number.isFinite(minutes) && minutes >= 8 * 60 && minutes < 9 * 60;
 }
 
 export async function reconcileAttendanceRewards(db, cfg, { date, userids, notifyOnReward = false } = {}) {
@@ -822,7 +828,7 @@ export function startAttendanceRewardReconcileScheduler({ db, cfg } = {}) {
 
     inFlight = true;
     try {
-      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: false });
+      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: inMorningWindow });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[AttendanceReward] reconcile failed:', err?.message || err);

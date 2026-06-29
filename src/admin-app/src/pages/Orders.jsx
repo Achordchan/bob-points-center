@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Input, Modal, Space, Table, Tabs } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Drawer, Input, Modal, Space, Spin, Table, Tabs, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import { amountText, formatTs, localTablePagination, orderAmount } from '../utils.js';
 import RedeemScanner from '../components/RedeemScanner.jsx';
@@ -42,19 +42,68 @@ function payloadProductText(payload) {
 }
 
 function RedeemCenter({ onRedeemed }) {
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const [encoded, setEncoded] = useState('');
   const [redeeming, setRedeeming] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [previewError, setPreviewError] = useState('');
   const [lastResult, setLastResult] = useState(null);
   const payload = useMemo(() => parseEncodedPayload(encoded), [encoded]);
+  const trimmedEncoded = encoded.trim();
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreview(null);
+    setPreviewError('');
+    setPreviewing(false);
+    if (!trimmedEncoded) return undefined;
+    if (!payload?.exchange_id) {
+      setPreviewError('二维码内容无效，请重新扫码');
+      return undefined;
+    }
+
+    setPreviewing(true);
+    api(`/admin/orders/${encodeURIComponent(payload.exchange_id)}`)
+      .then((result) => {
+        if (!cancelled) setPreview(result.data || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setPreviewError(err.message || '订单信息读取失败，请重新扫码');
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewing(false);
+      });
+    return () => { cancelled = true; };
+  }, [payload?.exchange_id, trimmedEncoded]);
+
+  const resetScan = () => {
+    setEncoded('');
+    setPreview(null);
+    setPreviewError('');
+    setPreviewing(false);
+  };
 
   const doRedeem = async () => {
+    if (!trimmedEncoded) {
+      message.warning('请先扫码识别订单');
+      return false;
+    }
+    if (!payload) {
+      message.error('二维码内容无效，请重新扫码');
+      return false;
+    }
+    if (preview?.order?.fulfilled_at) {
+      message.warning('该订单已核销，不能重复操作');
+      return false;
+    }
+
     setRedeeming(true);
     try {
-      const result = await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: encoded.trim() } });
+      const result = await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: trimmedEncoded } });
       message.success('核销完成');
-      setLastResult({ ...result, payload });
-      setEncoded('');
+      setLastResult({ ...result, payload, order: preview?.order || null });
+      resetScan();
       onRedeemed?.();
       return true;
     } catch (err) {
@@ -65,40 +114,37 @@ function RedeemCenter({ onRedeemed }) {
     }
   };
 
-  const confirmRedeem = async () => {
-    if (!encoded.trim()) {
-      message.warning('请输入二维码 encoded 内容');
-      return false;
-    }
-    if (!payload) {
-      message.error('二维码内容无效：无法解析订单信息');
-      return false;
-    }
-    return await new Promise((resolve) => {
-      modal.confirm({
-        title: '确认核销该订单？',
-        content: <Descriptions bordered size="small" column={1} items={[
-          { key: 'userid', label: '用户', children: payload.userid || '-' },
-          { key: 'exchange', label: '兑换单号', children: payload.exchange_id || '-' },
-          { key: 'product', label: '商品', children: payloadProductText(payload) },
-          { key: 'amount', label: '金额', children: amountText(payload.bob_amount) },
-        ]} />,
-        okText: '确认核销',
-        cancelText: '取消',
-        onOk: async () => resolve(await doRedeem()),
-        onCancel: () => resolve(false),
-      });
-    });
-  };
+  const order = preview?.order || null;
+  const confirmDisabled = !payload || !order || Boolean(order.fulfilled_at) || previewing || Boolean(previewError);
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} onRedeem={confirmRedeem} redeeming={redeeming} />
+    <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} />
+    {trimmedEncoded && <Card size="small" className="redeem-confirm-card" title="待核销订单">
+      {previewing ? <div className="redeem-confirm-loading"><Spin />正在读取订单信息…</div> : previewError ? <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Alert type="error" showIcon message={previewError} />
+        <Button onClick={resetScan}>重新扫码</Button>
+      </Space> : order ? <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        {order.fulfilled_at && <Alert type="warning" showIcon message="该订单已核销" description={`核销时间：${formatTs(order.fulfilled_at)}`} />}
+        <Descriptions bordered size="small" column={{ xs: 1, md: 2 }} items={[
+          { key: 'status', label: '订单状态', children: order.fulfilled_at ? '已核销' : '待核销' },
+          { key: 'exchange', label: '兑换单号', children: order.exchange_id || payload.exchange_id || '-' },
+          { key: 'user', label: '用户', children: order.name ? `${order.name} (${order.userid})` : (order.userid || payload.userid || '-') },
+          { key: 'product', label: '商品', children: payloadProductText(order) },
+          { key: 'amount', label: '金额', children: amountText(orderAmount(order)) },
+          { key: 'created', label: '下单时间', children: formatTs(order.created_at) },
+        ]} />
+        <Space className="redeem-confirm-actions" wrap>
+          <Button onClick={resetScan}>重新扫码</Button>
+          <Button type="primary" loading={redeeming} disabled={confirmDisabled} onClick={doRedeem}>确认核销</Button>
+        </Space>
+      </Space> : <Typography.Text type="secondary">识别成功后将在这里显示订单信息。</Typography.Text>}
+    </Card>}
     {lastResult && <Card size="small" title="最近核销结果">
       <Descriptions bordered size="small" column={{ xs: 1, md: 2 }} items={[
-        { key: 'exchange', label: '兑换单号', children: lastResult.exchange_id || lastResult.payload?.exchange_id || '-' },
-        { key: 'userid', label: '用户', children: lastResult.userid || lastResult.payload?.userid || '-' },
-        { key: 'product', label: '商品', children: payloadProductText(lastResult.payload) },
-        { key: 'amount', label: '金额', children: amountText(lastResult.payload?.bob_amount) },
+        { key: 'exchange', label: '兑换单号', children: lastResult.exchange_id || lastResult.order?.exchange_id || lastResult.payload?.exchange_id || '-' },
+        { key: 'userid', label: '用户', children: lastResult.order?.name ? `${lastResult.order.name} (${lastResult.userid || lastResult.order.userid})` : (lastResult.userid || lastResult.payload?.userid || '-') },
+        { key: 'product', label: '商品', children: payloadProductText(lastResult.order || lastResult.payload) },
+        { key: 'amount', label: '金额', children: amountText(orderAmount(lastResult.order || lastResult.payload)) },
         { key: 'balance', label: '剩余余额', children: amountText(lastResult.balance) },
       ]} />
     </Card>}

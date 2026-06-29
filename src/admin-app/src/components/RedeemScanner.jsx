@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CameraOutlined, CheckOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
+import { CameraOutlined, CopyOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { App, Button, Card, Grid, Input, Space, Typography, Upload } from 'antd';
 import jsQR from 'jsqr';
 import { translateErrorMessage } from '../api.js';
@@ -26,7 +26,7 @@ function formatBrowserPermissionError(error, actionText) {
     return `${actionText}权限未开启，请在浏览器地址栏允许后重试。`;
   }
   if (lower.includes('notfounderror') || lower.includes('no camera') || lower.includes('not found')) {
-    return '没有检测到可用摄像头，请上传二维码图片或粘贴 encoded 内容。';
+    return '没有检测到可用摄像头，请检查设备后重试。';
   }
   if (lower.includes('notreadableerror') || lower.includes('could not start')) {
     return '摄像头被其他应用占用，请关闭占用程序后重试。';
@@ -179,7 +179,7 @@ async function detectFromFile(file) {
   }
 }
 
-export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, redeeming }) {
+export default function RedeemScanner({ encoded, onEncodedChange }) {
   const { message } = App.useApp();
   const screens = useBreakpoint();
   const isMobile = screens.md === false;
@@ -206,7 +206,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
 
   useEffect(() => stopCamera, [stopCamera]);
 
-  const applyDetected = useCallback((value, successText = '已识别二维码，请确认核销') => {
+  const applyDetected = useCallback((value, successText = '已识别二维码，正在读取订单信息') => {
     const next = normalizeEncoded(value);
     if (!next) return false;
     onEncodedChange(next);
@@ -236,6 +236,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
   }, [applyDetected, message, stopCamera]);
 
   const startCameraScan = async () => {
+    if (encoded.trim()) onEncodedChange('');
     setDetecting(true);
     try {
       const nativeScan = await tryDingtalkScan();
@@ -249,7 +250,7 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
       }
 
       if (!navigator.mediaDevices?.getUserMedia) {
-        message.warning('当前浏览器不支持摄像头，请上传图片或粘贴 encoded 内容。');
+        message.warning('当前浏览器不支持摄像头，请换用支持扫码的浏览器。');
         return;
       }
       stopCamera();
@@ -325,20 +326,18 @@ export default function RedeemScanner({ encoded, onEncodedChange, onRedeem, rede
     }
   };
 
-  const confirmRedeem = async () => {
-    const ok = await onRedeem();
-    if (ok) stopCamera();
-  };
+  const hasEncoded = Boolean(encoded.trim());
 
   return <Card className="redeem-scanner-card" size="small" title="扫码核销">
     <Space className="redeem-scanner-actions" wrap>
-      <Button type={encoded.trim() ? 'default' : 'primary'} size="large" icon={<CameraOutlined />} loading={detecting} onClick={startCameraScan}>打开摄像头扫码</Button>
-      <Button type="primary" size="large" icon={<CheckOutlined />} loading={redeeming} disabled={!encoded.trim()} onClick={confirmRedeem}>确认核销</Button>
+      <Button type={hasEncoded ? 'default' : 'primary'} size="large" icon={<CameraOutlined />} loading={detecting} onClick={startCameraScan}>
+        {hasEncoded ? '重新扫码' : '打开摄像头扫码'}
+      </Button>
       {scanning && <Button icon={<StopOutlined />} onClick={stopCamera}>停止扫码</Button>}
-      <Upload accept="image/*" showUploadList={false} beforeUpload={handleFile}>
+      {!isMobile && <Upload accept="image/*" showUploadList={false} beforeUpload={handleFile}>
         <Button icon={<UploadOutlined />} loading={detecting}>上传二维码图片</Button>
-      </Upload>
-      <Button icon={<CopyOutlined />} onClick={readClipboard}>读取剪贴板</Button>
+      </Upload>}
+      {!isMobile && <Button icon={<CopyOutlined />} onClick={readClipboard}>读取剪贴板</Button>}
     </Space>
     {(!isMobile || scanning) && <div className="redeem-scanner-grid">
       <div className={`redeem-scanner-camera${scanning ? ' is-scanning' : ''}`}>
