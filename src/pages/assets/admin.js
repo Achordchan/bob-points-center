@@ -1738,7 +1738,7 @@
     if (enabled) enabled.checked = data.enabled !== false;
     fillGroupCardChannel(data.channel || getDefaultGroupCardChannel());
     groupCardState.templates = data.templates || {};
-    const defaults = ['manual', 'mall_open', 'mall_open_remind', 'mall_close_remind', 'stock_low', 'stock_soldout', 'new_product'];
+    const defaults = ['manual', 'mall_open', 'mall_open_remind', 'mall_close_remind', 'mall_close', 'stock_low', 'stock_soldout', 'new_product'];
     for (const key of defaults) {
       if (!groupCardState.templates[key]) {
         groupCardState.templates[key] = { enabled: true, title: '{{title}}', content: '{{content}}' };

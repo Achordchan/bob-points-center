@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS mall_opening_schedule (
   remind_for_open_at BIGINT,
   open_notify_for_open_at BIGINT,
   close_remind_for_close_at BIGINT,
+  close_notify_for_close_at BIGINT,
   updated_at BIGINT NOT NULL DEFAULT (${nowExpr})
 );
 
@@ -630,6 +631,7 @@ export async function initDb(input) {
   await db.exec(schemaSql);
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS cdk_enabled INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
+  await db.exec("ALTER TABLE mall_opening_schedule ADD COLUMN IF NOT EXISTS close_notify_for_close_at BIGINT");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_by TEXT");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_name TEXT");

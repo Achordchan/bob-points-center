@@ -2024,7 +2024,7 @@
         const peerNameRaw = x?.peer_name ? String(x.peer_name) : '';
 
         const productName = getProductNameByExchangeId(refId);
-        const reason = reasonToHuman(reasonRaw, { delta, refId, productName, peerName: peerNameRaw });
+        const reason = x?.display_reason ? String(x.display_reason) : reasonToHuman(reasonRaw, { delta, refId, productName, peerName: peerNameRaw });
 
         const pill = delta < 0 ? '<span class="pill pillBad">支出</span>' : '<span class="pill pillOk">收入</span>';
         const title = reason ? escapeHtml(reason) : '-';

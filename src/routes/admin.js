@@ -27,7 +27,7 @@ import {
   parseCookies,
   verifySessionToken,
 } from '../services/adminSession.js';
-import { ensureAccount } from '../services/ledgerService.js';
+import { ensureAccount, listLedgerRecords } from '../services/ledgerService.js';
 import { deleteRedeemCdks, generateRedeemCdks, listCdkEnabledProducts, listRedeemCdks } from '../services/cdkService.js';
 import {
   listAdminCharityContributions,
@@ -555,12 +555,23 @@ async function ensureMallOpeningRow(db) {
   return await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
 }
 
-function buildMallOpenCard(ts) {
+function buildMallOpenCard(ts, closeAt = null) {
   const openText = ts ? formatTs(ts) : '-';
+  const closeText = closeAt ? formatTs(closeAt) : '';
+  const closeLine = closeText ? `\n- 关闭时间：${closeText}` : '';
   return {
     title: '【BOB币中心】商城已开启',
-    markdown: `## 商城已开启\n\n- 开启时间：${openText}\n\n现在可以下单啦！`,
-    outTrackId: `mall_open_now_${ts || Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    markdown: `## 商城已开启\n\n- 开启时间：${openText}${closeLine}\n\n现在可以下单啦！`,
+    outTrackId: `mall_open_now_${ts || Date.now()}`,
+  };
+}
+
+function buildMallCloseCard(ts) {
+  const closeText = ts ? formatTs(ts) : '-';
+  return {
+    title: '【BOB币中心】商城已关闭',
+    markdown: `## 商城已关闭\n\n- 关闭时间：${closeText}\n\n本轮下单已结束。`,
+    outTrackId: `mall_close_now_${ts || Date.now()}`,
   };
 }
 
@@ -1141,19 +1152,24 @@ export function adminRouter() {
         updates.remind_for_open_at = null;
         updates.open_notify_for_open_at = null;
         updates.close_remind_for_close_at = null;
+        updates.close_notify_for_close_at = null;
       }
 
-      if (row?.next_open_at !== nextOpenAt) {
+      if (toOptionalInt(row?.next_open_at) !== nextOpenAt) {
         updates.remind_for_open_at = null;
         updates.open_notify_for_open_at = null;
-      }
-      if (row?.open_duration_minutes !== openDurationMinutes) {
         updates.close_remind_for_close_at = null;
+        updates.close_notify_for_close_at = null;
+      }
+      if (toOptionalInt(row?.open_duration_minutes) !== openDurationMinutes) {
+        updates.close_remind_for_close_at = null;
+        updates.close_notify_for_close_at = null;
       }
 
       if (autoEnabled && Number(row?.is_open) === 1 && !row?.open_notify_for_open_at) {
         updates.open_notify_for_open_at = Math.floor(Date.now() / 1000);
         updates.close_remind_for_close_at = null;
+        updates.close_notify_for_close_at = null;
       }
 
       const fields = Object.entries(updates).filter(([, v]) => v !== undefined);
@@ -1180,17 +1196,22 @@ export function adminRouter() {
       await ensureMallOpeningRow(db);
       const now = Math.floor(Date.now() / 1000);
       await db.run(
-        'UPDATE mall_opening_schedule SET is_open = 1, open_notify_for_open_at = ?, updated_at = unixepoch() WHERE id = 1',
+        'UPDATE mall_opening_schedule SET is_open = 1, open_notify_for_open_at = ?, close_remind_for_close_at = NULL, close_notify_for_close_at = NULL, updated_at = unixepoch() WHERE id = 1',
         [now],
       );
 
+      const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
+      const openDurationMinutes = toOptionalInt(row?.open_duration_minutes);
+      const closeAt = openDurationMinutes ? now + openDurationMinutes * 60 : null;
       const cfg = req.app?.locals?.cfg;
       await notifyGroupInteractiveCardBySettings(db, cfg, {
-        ...buildMallOpenCard(now),
+        ...buildMallOpenCard(now, closeAt),
         event: 'mall_open',
-        vars: { open_time: formatTs(now) || '-' },
+        vars: {
+          open_time: formatTs(now) || '-',
+          close_time: formatTs(closeAt) || '-',
+        },
       });
-      const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
       publishMallRealtimeEvent('opening_changed', {
         reason: 'open_now',
         is_open: Number(row?.is_open ?? 0),
@@ -1206,9 +1227,23 @@ export function adminRouter() {
     const db = req.app?.locals?.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      await ensureMallOpeningRow(db);
-      await db.run('UPDATE mall_opening_schedule SET is_open = 0, updated_at = unixepoch() WHERE id = 1');
+      const before = await ensureMallOpeningRow(db);
+      const wasOpen = Number(before?.is_open) === 1;
+      const now = Math.floor(Date.now() / 1000);
+      if (wasOpen) {
+        await db.run('UPDATE mall_opening_schedule SET is_open = 0, close_notify_for_close_at = ?, updated_at = unixepoch() WHERE id = 1', [now]);
+      } else {
+        await db.run('UPDATE mall_opening_schedule SET is_open = 0, updated_at = unixepoch() WHERE id = 1');
+      }
       const row = await db.get('SELECT * FROM mall_opening_schedule WHERE id = 1');
+      if (wasOpen) {
+        const cfg = req.app?.locals?.cfg;
+        await notifyGroupInteractiveCardBySettings(db, cfg, {
+          ...buildMallCloseCard(now),
+          event: 'mall_close',
+          vars: { close_time: formatTs(now) || '-' },
+        });
+      }
       publishMallRealtimeEvent('opening_changed', {
         reason: 'close_now',
         is_open: Number(row?.is_open ?? 0),
@@ -1711,10 +1746,8 @@ export function adminRouter() {
         [userid],
       );
       if (!user) return res.status(404).json({ error: 'user not found' });
-      const ledger = await db.all(
-        'SELECT id, userid, delta, reason, ref_id, created_at FROM ledger WHERE userid = ? ORDER BY created_at DESC, id DESC LIMIT 120',
-        [userid],
-      );
+      const ledgerResult = await listLedgerRecords(db, { userid, page: 1, pageSize: 120 });
+      const ledger = ledgerResult.data || [];
       const redeems = await db.all(
         `SELECT r.exchange_id, r.userid, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
                 CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
@@ -3861,18 +3894,18 @@ export function adminRouter() {
     }
 
     // mall_opening_schedule：直接 upsert id=1
-    // remind_for_open_at / open_notify_for_open_at / close_remind_for_close_at 是调度器运行时状态，恢复时置 null 避免触发错误通知
+    // remind_for_open_at / open_notify_for_open_at / close_remind_for_close_at / close_notify_for_close_at 是调度器运行时状态，恢复时置 null 避免触发错误通知
     if (Array.isArray(backupData.mall_opening_schedule) && backupData.mall_opening_schedule.length > 0) {
       const row = backupData.mall_opening_schedule[0];
       try {
         await db.exec(
-          `INSERT INTO mall_opening_schedule(id, is_open, auto_enabled, next_open_at, interval_minutes, open_duration_minutes, remind_before_seconds, close_remind_seconds, remind_for_open_at, open_notify_for_open_at, close_remind_for_close_at, updated_at)
-           VALUES(1,$1,$2,$3,$4,$5,$6,$7,NULL,NULL,NULL,$8)
+          `INSERT INTO mall_opening_schedule(id, is_open, auto_enabled, next_open_at, interval_minutes, open_duration_minutes, remind_before_seconds, close_remind_seconds, remind_for_open_at, open_notify_for_open_at, close_remind_for_close_at, close_notify_for_close_at, updated_at)
+           VALUES(1,$1,$2,$3,$4,$5,$6,$7,NULL,NULL,NULL,NULL,$8)
            ON CONFLICT(id) DO UPDATE SET
              is_open=excluded.is_open, auto_enabled=excluded.auto_enabled, next_open_at=excluded.next_open_at,
              interval_minutes=excluded.interval_minutes, open_duration_minutes=excluded.open_duration_minutes,
              remind_before_seconds=excluded.remind_before_seconds, close_remind_seconds=excluded.close_remind_seconds,
-             remind_for_open_at=NULL, open_notify_for_open_at=NULL, close_remind_for_close_at=NULL,
+             remind_for_open_at=NULL, open_notify_for_open_at=NULL, close_remind_for_close_at=NULL, close_notify_for_close_at=NULL,
              updated_at=excluded.updated_at`,
           [row.is_open ?? 1, row.auto_enabled ?? 0, row.next_open_at ?? null, row.interval_minutes ?? null,
             row.open_duration_minutes ?? null, row.remind_before_seconds ?? null, row.close_remind_seconds ?? null,

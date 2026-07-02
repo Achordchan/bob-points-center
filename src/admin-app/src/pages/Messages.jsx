@@ -17,9 +17,10 @@ const notifyTemplates = [
 
 const groupTemplates = [
   { key: 'manual', label: '手动群通知', vars: '{{title}} {{content}}' },
-  { key: 'mall_open', label: '商城开启', vars: '{{open_time}}' },
-  { key: 'mall_open_remind', label: '商城开启提醒', vars: '{{open_time}}' },
+  { key: 'mall_open', label: '商城开启', vars: '{{open_time}} {{close_time}}' },
+  { key: 'mall_open_remind', label: '商城开启提醒', vars: '{{open_time}} {{close_time}}' },
   { key: 'mall_close_remind', label: '商城关闭提醒', vars: '{{close_time}}' },
+  { key: 'mall_close', label: '商城关闭', vars: '{{close_time}}' },
   { key: 'stock_low', label: '库存告急', vars: '{{product_name}} {{stock}}' },
   { key: 'stock_soldout', label: '售罄通知', vars: '{{product_name}}' },
   { key: 'new_product', label: '新品上架', vars: '{{product_name}} {{amount}} {{stock}}' },

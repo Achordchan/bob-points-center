@@ -95,6 +95,14 @@ const DEFAULT_GROUP_CARD_SETTINGS = {
         { text: '抢购！', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
       ],
     },
+    mall_close: {
+      enabled: true,
+      title: '【BOB币中心】商城已关闭',
+      content: '## 商城已关闭\n\n- 关闭时间：{{close_time}}\n\n本轮下单已结束。',
+      buttons: [
+        { text: '查看订单', url: 'https://bob.baymaxgroup.com/mall?tab=orders', color: 'gray' },
+      ],
+    },
     stock_low: {
       enabled: true,
       title: '【BOB币中心】库存告急：{{product_name}}',

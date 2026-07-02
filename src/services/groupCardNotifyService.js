@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 
 import { getV1AccessToken } from './dingtalkService.js';
 import { getGroupCardSettings } from './systemSettings.js';
+import { safeAppendAuditLog } from './auditLogService.js';
 
 const require = createRequire(import.meta.url);
 
@@ -24,11 +25,14 @@ function sleep(ms) {
 
 let notifyQueue = Promise.resolve();
 
-function enqueueNotify(fn) {
+function enqueueNotify(fn, { onError } = {}) {
   notifyQueue = notifyQueue
     .then(fn)
-    // eslint-disable-next-line no-console
-    .catch((err) => console.error(err));
+    .catch(async (err) => {
+      if (typeof onError === 'function') {
+        await onError(err);
+      }
+    });
   return notifyQueue;
 }
 
@@ -335,6 +339,8 @@ export async function sendGroupInteractiveCard(cfg, {
 }
 
 export function notifyGroupInteractiveCard(cfg, {
+  db,
+  event,
   title,
   markdown,
   outTrackId,
@@ -358,6 +364,20 @@ export function notifyGroupInteractiveCard(cfg, {
       }),
     );
     await sleep(200);
+  }, {
+    onError: async (err) => {
+      await safeAppendAuditLog(db, {
+        eventType: 'group_card_send_failed',
+        actorType: 'system',
+        statusCode: 500,
+        message: String(err?.message || err),
+        payload: {
+          event: event || '',
+          outTrackId: outTrackId || '',
+          title: t || 'BOB币中心',
+        },
+      });
+    },
   });
 }
 
@@ -396,6 +416,8 @@ export async function notifyGroupInteractiveCardBySettings(db, cfg, payload = {}
   const runtimeCfg = mergeGroupCardChannelIntoCfg(cfg, settings);
 
   notifyGroupInteractiveCard(runtimeCfg, {
+    db,
+    event,
     outTrackId: payload?.outTrackId,
     imageUrl: payload?.imageUrl,
     title,

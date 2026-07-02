@@ -6,6 +6,47 @@ function toInt(value) {
   return n;
 }
 
+
+function firstText(...values) {
+  for (const value of values) {
+    const s = value === null || value === undefined ? '' : String(value).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+export function formatLedgerReason(row = {}) {
+  const reason = firstText(row.reason);
+  const delta = Number(row.delta || 0);
+  const peer = firstText(row.peer_name, row.peer_userid, row.ref_id);
+  const product = firstText(row.product_name);
+
+  if (!reason) return delta < 0 ? '支出' : '收入';
+  if (reason === 'mall_buy') return product ? `商城下单：${product}` : '商城下单';
+  if (reason === 'transfer_in') return peer ? `转入：${peer}` : '转账转入';
+  if (reason === 'transfer_out') return peer ? `转出：${peer}` : '转账转出';
+  if (reason === 'red_packet') return '红包收入';
+  if (reason === 'grant') return '系统发币';
+  if (reason === 'grant_batch') return '批量发币';
+  if (reason === 'admin_grant_batch') return '后台批量发币';
+  if (reason === 'deduct') return '扣币';
+  if (reason === 'deduct_batch') return '批量扣币';
+  if (reason === 'admin_deduct') return '管理员扣币';
+  if (reason === 'api_deduct') return '接口扣币';
+  if (reason === 'redeem') return product ? `核销扣币：${product}` : '核销扣币';
+  if (reason === 'charity' || reason.startsWith('公益助力')) return reason.startsWith('公益助力') ? reason : '公益助力';
+  if (reason === '打卡奖励') return '打卡奖励';
+  return reason;
+}
+
+function withDisplayReason(row = {}) {
+  return {
+    ...row,
+    peer_userid: firstText(row.peer_userid, row.ref_id),
+    display_reason: formatLedgerReason(row),
+  };
+}
+
 export async function ensureAccount(db, { userid, name }) {
   const uid = userid === null || userid === undefined ? '' : String(userid).trim();
   if (!uid) {
@@ -143,9 +184,13 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
   await ensureAccount(db, { userid, name });
 
   const rows = await db.all(
-    `SELECT l.id, l.userid, l.delta, l.reason, l.ref_id, l.created_at, COALESCE(u.name, '') AS peer_name
+    `SELECT l.id, l.userid, l.delta, l.reason, l.ref_id, l.created_at,
+            COALESCE(peer.userid, '') AS peer_userid,
+            COALESCE(peer.name, '') AS peer_name,
+            COALESCE(r.product_name, '') AS product_name
      FROM ledger l
-     LEFT JOIN users u ON u.userid = l.ref_id
+     LEFT JOIN users peer ON peer.userid = l.ref_id
+     LEFT JOIN redeems r ON r.exchange_id = l.ref_id
      WHERE l.userid = ?
      ORDER BY l.created_at DESC, l.id DESC
      LIMIT ? OFFSET ?`,
@@ -156,7 +201,7 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
     userid: String(userid),
     page: p,
     pageSize: ps,
-    data: rows || [],
+    data: (rows || []).map(withDisplayReason),
   };
 }
 
