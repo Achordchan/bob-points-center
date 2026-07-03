@@ -24,7 +24,7 @@ function Tokens({ canEdit }) {
 }
 
 const settingsTables = ['system_settings', 'mall_products', 'charity_projects', 'mall_opening_schedule', 'content_faq', 'content_announcements', 'system_versions', 'admin_roles'];
-const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'admin_roles', 'admin_user_roles', 'system_settings'];
+const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'mall_order_listings', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'admin_roles', 'admin_user_roles', 'system_settings'];
 function tableRowsFromMap(map = {}) {
   return Object.entries(map).map(([table, count]) => ({ table, count }));
 }

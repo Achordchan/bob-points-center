@@ -47,6 +47,33 @@ CREATE TABLE IF NOT EXISTS redeems (
 CREATE INDEX IF NOT EXISTS idx_redeems_userid_created_at ON redeems(userid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_redeems_fulfilled_created_at ON redeems(fulfilled_at, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS mall_order_listings (
+  id BIGSERIAL PRIMARY KEY,
+  listing_id TEXT NOT NULL UNIQUE,
+  exchange_id TEXT NOT NULL,
+  seller_userid TEXT NOT NULL,
+  seller_name_snapshot TEXT,
+  buyer_userid TEXT,
+  buyer_name_snapshot TEXT,
+  price BIGINT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  sold_at BIGINT,
+  cancelled_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_mall_order_listings_status_created
+  ON mall_order_listings(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mall_order_listings_seller_status
+  ON mall_order_listings(seller_userid, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mall_order_listings_buyer_status
+  ON mall_order_listings(buyer_userid, status, sold_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mall_order_listings_exchange_id
+  ON mall_order_listings(exchange_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mall_order_listings_active_exchange
+  ON mall_order_listings(exchange_id)
+  WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS bob_tokens (
   id BIGSERIAL PRIMARY KEY,
   token TEXT,
@@ -632,6 +659,11 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS cdk_enabled INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE mall_opening_schedule ADD COLUMN IF NOT EXISTS close_notify_for_close_at BIGINT");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_mall_order_listings_status_created ON mall_order_listings(status, created_at DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_mall_order_listings_seller_status ON mall_order_listings(seller_userid, status, created_at DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_mall_order_listings_buyer_status ON mall_order_listings(buyer_userid, status, sold_at DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_mall_order_listings_exchange_id ON mall_order_listings(exchange_id)");
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mall_order_listings_active_exchange ON mall_order_listings(exchange_id) WHERE status = 'active'");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_by TEXT");
   await db.exec("ALTER TABLE redeems ADD COLUMN IF NOT EXISTS fulfilled_name TEXT");

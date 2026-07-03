@@ -155,7 +155,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/redeem/history/clear')) return 'super';
   if (p.startsWith('/redeem') || p.startsWith('/orders')) return 'orders:view';
   if (p.startsWith('/mall/self/products/delete')) return 'super';
-  if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
+  if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening') || p.startsWith('/site-visibility')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
   if (p.startsWith('/cdks')) return m === 'GET' ? 'commerce:view' : 'commerce:cdk';
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
   if (p.startsWith('/settings/dingtalk/status')) return 'dashboard:view';

@@ -124,7 +124,7 @@ button,
 .navLarge {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -437,6 +437,113 @@ button.secondary.pseudoDisabled {
 .sectionTitle { font-weight: 900; font-size: 16px; letter-spacing: 0.2px; }
 
 .help { margin-top: 4px; font-size: 12px; color: rgba(15, 23, 42, 0.62); }
+
+.siteDisabled .wrap {
+  display: none;
+}
+
+.siteGate {
+  min-height: 100vh;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.siteGate.hidden {
+  display: none;
+}
+
+.siteGateCard {
+  width: min(420px, 100%);
+  border: 1px solid var(--mx-line);
+  border-radius: 20px;
+  background: rgba(255,255,255,0.88);
+  box-shadow: var(--mx-shadow);
+  padding: 24px;
+  text-align: center;
+}
+
+.siteGateTitle {
+  font-size: 20px;
+  font-weight: 900;
+  color: rgba(15, 23, 42, 0.92);
+}
+
+.siteGateMessage {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+  font-size: 14px;
+  color: rgba(15, 23, 42, 0.68);
+}
+
+#tabMarket .marketStatusWrap {
+  margin-top: 6px;
+}
+
+#tabMarket .marketList {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+#tabMarket .marketSectionTitle {
+  margin-top: 4px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  color: rgba(15, 23, 42, 0.86);
+}
+
+#tabMarket .marketItem {
+  border: 1px solid var(--mx-line);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.82);
+  padding: 10px;
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#tabMarket .marketItemMeta { min-width: 0; }
+
+#tabMarket .marketName {
+  font-weight: 900;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+#tabMarket .marketSub,
+#tabMarket .marketMeta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(15, 23, 42, 0.62);
+  word-break: break-all;
+}
+
+#tabMarket .marketMeta {
+  color: rgba(15, 23, 42, 0.72);
+}
+
+#tabMarket .marketPrimary {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+#tabMarket .marketLoading,
+#tabMarket .marketEmpty {
+  border: 1px dashed rgba(15, 23, 42, 0.2);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.72);
+  padding: 16px 12px;
+  text-align: center;
+  color: rgba(15, 23, 42, 0.58);
+  font-weight: 700;
+}
 
 .moreCard {
   margin-top: 10px;
@@ -2665,7 +2772,7 @@ body.modalOpenFixed {
 @media (max-width: 640px) {
   .navLarge {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
     overflow: visible;
   }

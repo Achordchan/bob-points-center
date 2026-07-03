@@ -52,6 +52,13 @@ export function redeemRouter() {
         userid: String(payload.userid || ''),
         reason: 'redeem_confirm',
       });
+      if (result?.market_listing_cancelled) {
+        publishMallRealtimeEvent('market_changed', {
+          listing_id: String(result.market_listing_id || ''),
+          exchange_id: String(payload.exchange_id || ''),
+          reason: 'redeem_confirm',
+        });
+      }
 
       if (awaitNotify) {
         return res.json(result);

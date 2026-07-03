@@ -44,6 +44,44 @@ const DEFAULT_NOTIFY_SETTINGS = {
   },
 };
 
+const DEFAULT_SITE_VISIBILITY_SETTINGS = {
+  enabled: true,
+  message: '系统维护中，请稍后再试。',
+};
+
+function cleanSiteMessage(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim();
+  return text.slice(0, 500);
+}
+
+export function normalizeSiteVisibilitySettings(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const enabled = toBool(src.enabled, DEFAULT_SITE_VISIBILITY_SETTINGS.enabled);
+  const message = cleanSiteMessage(src.message) || DEFAULT_SITE_VISIBILITY_SETTINGS.message;
+  return { enabled, message };
+}
+
+export async function getSiteVisibilitySettings(db) {
+  if (!db) return DEFAULT_SITE_VISIBILITY_SETTINGS;
+  const row = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', ['site_visibility_settings']);
+  if (!row?.value) return DEFAULT_SITE_VISIBILITY_SETTINGS;
+  try {
+    return normalizeSiteVisibilitySettings(JSON.parse(String(row.value)));
+  } catch {
+    return DEFAULT_SITE_VISIBILITY_SETTINGS;
+  }
+}
+
+export async function saveSiteVisibilitySettings(db, input) {
+  if (!db) return DEFAULT_SITE_VISIBILITY_SETTINGS;
+  const normalized = normalizeSiteVisibilitySettings(input);
+  await db.exec(
+    'INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()',
+    ['site_visibility_settings', JSON.stringify(normalized)],
+  );
+  return normalized;
+}
+
 const DEFAULT_GROUP_CARD_SETTINGS = {
   enabled: true,
   channelPresets: [

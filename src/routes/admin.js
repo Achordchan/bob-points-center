@@ -54,8 +54,10 @@ import {
   getDingtalkConnectionSettings,
   getGroupCardSettings,
   getNotifySettings,
+  getSiteVisibilitySettings,
   saveAttendanceRewardSettings,
   saveDingtalkConnectionSettings,
+  saveSiteVisibilitySettings,
   toPublicDingtalkConnectionSettings,
   saveGroupCardSettings,
   saveNotifySettings,
@@ -1098,6 +1100,31 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const row = await ensureMallOpeningRow(db);
       return res.json({ ok: true, data: row || {} });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/site-visibility', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await getSiteVisibilitySettings(db);
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/site-visibility', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await saveSiteVisibilitySettings(db, {
+        enabled: toBool(req.body?.enabled),
+        message: req.body?.message,
+      });
+      return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -3513,6 +3540,13 @@ export function adminRouter() {
         userid: String(payload.userid || ''),
         reason: 'admin_redeem_confirm',
       });
+      if (result?.market_listing_cancelled) {
+        publishMallRealtimeEvent('market_changed', {
+          listing_id: String(result.market_listing_id || ''),
+          exchange_id: String(payload.exchange_id || ''),
+          reason: 'admin_redeem_confirm',
+        });
+      }
 
       return res.json({ ok: true, userid: result.userid, balance: result.balance, exchange_id: result.exchange_id });
     } catch (err) {
@@ -3553,6 +3587,7 @@ export function adminRouter() {
     'bob_tokens',
     'ledger',
     'redeems',
+    'mall_order_listings',
     'redeem_cdks',
     'mall_products',
     'charity_projects',
@@ -3998,6 +4033,7 @@ export function adminRouter() {
           try { await db.exec('DELETE FROM audit_logs', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM attendance_reward_records', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM ledger', []); } catch { /* skip */ }
+          try { await db.exec('DELETE FROM mall_order_listings', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM redeem_cdks', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM redeems', []); } catch { /* skip */ }
           try { await db.exec('DELETE FROM charity_contributions', []); } catch { /* skip */ }
@@ -4127,6 +4163,39 @@ export function adminRouter() {
         }
         try { await db.exec(`SELECT setval(pg_get_serial_sequence('redeems', 'id'), (SELECT MAX(id) FROM redeems))`, []); } catch { /* skip */ }
         report.redeems = count;
+      }
+
+      if (Array.isArray(backupData.mall_order_listings)) {
+        let count = 0;
+        for (const row of backupData.mall_order_listings) {
+          if (!row?.listing_id || !row?.exchange_id || !row?.seller_userid) continue;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await db.exec(
+              `INSERT INTO mall_order_listings(id, listing_id, exchange_id, seller_userid, seller_name_snapshot, buyer_userid, buyer_name_snapshot, price, status, created_at, updated_at, sold_at, cancelled_at)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               ON CONFLICT(listing_id) DO NOTHING`,
+              [
+                row.id ?? null,
+                row.listing_id,
+                row.exchange_id,
+                row.seller_userid,
+                row.seller_name_snapshot ?? null,
+                row.buyer_userid ?? null,
+                row.buyer_name_snapshot ?? null,
+                row.price ?? 0,
+                row.status ?? 'active',
+                row.created_at ?? Math.floor(Date.now() / 1000),
+                row.updated_at ?? Math.floor(Date.now() / 1000),
+                row.sold_at ?? null,
+                row.cancelled_at ?? null,
+              ],
+            );
+            count++;
+          } catch { /* skip */ }
+        }
+        try { await db.exec(`SELECT setval(pg_get_serial_sequence('mall_order_listings', 'id'), (SELECT MAX(id) FROM mall_order_listings))`, []); } catch { /* skip */ }
+        report.mall_order_listings = count;
       }
 
       if (Array.isArray(backupData.redeem_cdks)) {

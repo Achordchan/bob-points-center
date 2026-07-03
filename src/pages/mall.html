@@ -8,6 +8,12 @@
     <link rel="stylesheet" href="/assets/mall.css" />
   </head>
   <body>
+    <section class="siteGate hidden" id="siteGate" aria-live="polite">
+      <div class="siteGateCard">
+        <div class="siteGateTitle">BOB币中心暂未开放</div>
+        <div class="siteGateMessage" id="siteGateMessage">系统维护中，请稍后再试。</div>
+      </div>
+    </section>
     <div class="wrap">
       <header class="topbar">
         <div class="topSlotLeft" aria-hidden="true"></div>
@@ -23,6 +29,7 @@
         <button class="navBtn active" type="button" data-tab="balance"><span>余额</span></button>
         <button class="navBtn" type="button" data-tab="rich"><span>排行</span></button>
         <button class="navBtn" type="button" data-tab="shop"><span>商城</span></button>
+        <button class="navBtn" type="button" data-tab="market"><span>市场</span></button>
         <button class="navBtn" type="button" data-tab="orders"><span>订单</span></button>
         <button class="navBtn" type="button" data-tab="more"><span>更多</span></button>
       </nav>
@@ -199,6 +206,35 @@
             <div class="gridProducts" id="products"></div>
             <div class="error" id="productsErr"></div>
           </div>
+        </section>
+
+        <section class="tab hidden" id="tabMarket">
+          <div class="card glass marketCard">
+            <div class="sectionTitle">交易市场</div>
+            <div class="marketStatusWrap">
+              <div class="help" id="marketOpenStatus">正在同步市场状态…</div>
+            </div>
+          </div>
+
+          <div class="card glass marketCard">
+            <div class="sectionTitle">市场列表</div>
+            <div class="help">浏览可购买订单，支持直接购买。</div>
+            <div class="marketList" id="marketListings"></div>
+          </div>
+
+          <div class="card glass marketCard">
+            <div class="sectionTitle">我的可上架订单</div>
+            <div class="help">仅展示可上架的未核销订单。</div>
+            <div class="marketList" id="marketSellableOrders"></div>
+          </div>
+
+          <div class="card glass marketCard">
+            <div class="sectionTitle">我的挂单</div>
+            <div class="help">仅展示你的上架记录，可随时取消未成交挂单。</div>
+            <div class="marketList" id="marketMyListings"></div>
+          </div>
+
+          <div class="error" id="marketErr"></div>
         </section>
 
         <section class="tab hidden" id="tabRich">

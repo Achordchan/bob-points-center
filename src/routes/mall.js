@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { requireBobToken } from '../middleware/requireBobToken.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { createRedeemOrderInTx } from '../services/redeemService.js';
-import { listLedgerRecords } from '../services/ledgerService.js';
+import { ensureAccount, listLedgerRecords, transferBob } from '../services/ledgerService.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
 import { notifyGroupInteractiveCardBySettings } from '../services/groupCardNotifyService.js';
 import { getRedeemCdkInfo, previewRedeemCdk, redeemCdk } from '../services/cdkService.js';
@@ -15,6 +15,7 @@ import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../s
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
 import { createQrRenderPath } from '../services/qrImageService.js';
+import { getSiteVisibilitySettings } from '../services/systemSettings.js';
 
 const mallEasterTokens = new Map();
 function normalizeLimitRound(value) {
@@ -126,6 +127,53 @@ function resolveDisplayName(name, userid) {
   return (name ? String(name) : '').trim() || (userid ? String(userid) : '').trim() || '用户';
 }
 
+function escapeHtmlText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch] || ch));
+}
+
+function buildSiteDisabledHtml(message) {
+  const text = escapeHtmlText(message || '系统维护中，请稍后再试。');
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+    <title>BOB币中心暂未开放</title>
+    <style>
+      body{margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8fafc;color:#0f172a;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+      .card{width:min(420px,100%);border:1px solid rgba(15,23,42,.1);border-radius:20px;background:rgba(255,255,255,.9);box-shadow:0 18px 45px rgba(15,23,42,.08);padding:24px;text-align:center;box-sizing:border-box}
+      .title{font-size:20px;font-weight:900}
+      .message{margin-top:12px;white-space:pre-wrap;word-break:break-word;line-height:1.7;font-size:14px;color:rgba(15,23,42,.68)}
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="title">BOB币中心暂未开放</div>
+      <div class="message">${text}</div>
+    </main>
+  </body>
+</html>`;
+}
+
+async function sendMallHtmlOrSiteGate(req, res, { pagesRoot, fileName }) {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const site = await getSiteVisibilitySettings(req.app?.locals?.db);
+    if (site?.enabled === false) {
+      return res.type('html').send(buildSiteDisabledHtml(site.message));
+    }
+  } catch {
+    // 设置读取失败时保持前台可访问，避免误伤生产入口。
+  }
+  return res.type('html').sendFile(fileName, { root: pagesRoot });
+}
+
 function normalizeFeedbackCategory(value) {
   const v = value ? String(value).trim() : '';
   if (v === 'bug' || v === 'question' || v === 'rule' || v === 'other') return v;
@@ -162,6 +210,66 @@ async function ensureMallOpeningRow(db) {
 
 function genExchangeId() {
   return `MALL_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function genListingId() {
+  return `MARKET_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function isMarketOrderExchangeId(value) {
+  const id = value ? String(value) : '';
+  return id.startsWith('MALL_') || id.startsWith('CDK_');
+}
+
+function buildPriceRange(amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n < 0) {
+    return { price_min: 0, price_max: 0 };
+  }
+  return {
+    price_min: Math.floor(n * 0.8),
+    price_max: Math.ceil(n * 1.5),
+  };
+}
+
+function withPriceRange(row = {}) {
+  const original = Number(row.original_amount ?? row.bob_amount ?? 0);
+  return {
+    ...row,
+    original_amount: Number.isFinite(original) ? original : 0,
+    ...buildPriceRange(original),
+  };
+}
+
+function isMallOpenRow(row) {
+  return Number(row?.is_open) === 1;
+}
+
+function normalizeMarketListing(row = {}, currentUserid = '') {
+  const sellerUserid = row?.seller_userid ? String(row.seller_userid) : '';
+  const buyerName = resolveDisplayName(row?.buyer_name_snapshot, row?.buyer_userid);
+  return withPriceRange({
+    listing_id: String(row?.listing_id || ''),
+    exchange_id: String(row?.exchange_id || ''),
+    product_id: String(row?.product_id || ''),
+    product_name: String(row?.product_name || ''),
+    original_amount: Number(row?.bob_amount ?? 0),
+    price: Number(row?.price ?? 0),
+    seller_userid: sellerUserid,
+    seller_display_name: resolveDisplayName(row?.seller_name_snapshot || row?.seller_name, sellerUserid),
+    buyer_userid: row?.buyer_userid ? String(row.buyer_userid) : '',
+    buyer_display_name: row?.buyer_userid ? buyerName : '',
+    status: String(row?.status || ''),
+    created_at: row?.created_at ?? null,
+    sold_at: row?.sold_at ?? null,
+    cancelled_at: row?.cancelled_at ?? null,
+    can_buy: String(currentUserid || '') !== sellerUserid && String(row?.status || '') === 'active',
+  });
+}
+
+async function getMarketOpen(db) {
+  const opening = await ensureMallOpeningRow(db);
+  return !isMallOpenRow(opening);
 }
 
 async function buildRedPacketScreenPayload(db, now, limit = 12) {
@@ -375,12 +483,12 @@ export function mallRouter() {
   const router = Router();
   const pagesRoot = fileURLToPath(new URL('../pages/', import.meta.url));
 
-  router.get('/', (_req, res) => {
-    res.type('html').sendFile('mall.html', { root: pagesRoot });
+  router.get('/', async (req, res) => {
+    return sendMallHtmlOrSiteGate(req, res, { pagesRoot, fileName: 'mall.html' });
   });
 
-  router.get('/screen', (_req, res) => {
-    res.type('html').sendFile('mall_screen.html', { root: pagesRoot });
+  router.get('/screen', async (req, res) => {
+    return sendMallHtmlOrSiteGate(req, res, { pagesRoot, fileName: 'mall_screen.html' });
   });
 
   router.get('/events', async (req, res) => {
@@ -986,6 +1094,329 @@ export function mallRouter() {
         'insufficient balance',
       ].includes(message) ? 400 : 500;
       return res.status(status).json({ error: message });
+    }
+  });
+
+  router.get('/market/listings', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const marketOpen = await getMarketOpen(db);
+      if (!marketOpen) {
+        return res.json({ ok: true, market_open: false, data: [] });
+      }
+      const rows = await db.all(
+        `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot, l.price, l.status, l.created_at,
+                r.product_id, r.product_name, r.bob_amount,
+                COALESCE(u.name, '') AS seller_name
+           FROM mall_order_listings l
+          JOIN redeems r ON r.exchange_id = l.exchange_id
+           LEFT JOIN users u ON u.userid = l.seller_userid
+          WHERE l.status = 'active'
+            AND r.fulfilled_at IS NULL
+            AND r.userid = l.seller_userid
+          ORDER BY l.created_at DESC, l.id DESC
+          LIMIT 100`,
+        [],
+      );
+      const data = (rows || []).map((row) => normalizeMarketListing(row, userid));
+      return res.json({ ok: true, market_open: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/market/mine', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const marketOpen = await getMarketOpen(db);
+      const sellableRows = await db.all(
+        `SELECT r.exchange_id, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at, r.userid
+           FROM redeems r
+           LEFT JOIN mall_order_listings active_l
+             ON active_l.exchange_id = r.exchange_id
+            AND active_l.status = 'active'
+          WHERE r.userid = ?
+            AND r.fulfilled_at IS NULL
+            AND (r.exchange_id LIKE 'MALL_%' OR r.exchange_id LIKE 'CDK_%')
+            AND active_l.id IS NULL
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT 100`,
+        [userid],
+      );
+      const listingRows = await db.all(
+        `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot,
+                l.buyer_userid, l.buyer_name_snapshot, l.price, l.status, l.created_at, l.sold_at, l.cancelled_at,
+                r.product_id, r.product_name, r.bob_amount
+           FROM mall_order_listings l
+           LEFT JOIN redeems r ON r.exchange_id = l.exchange_id
+          WHERE l.seller_userid = ?
+          ORDER BY l.created_at DESC, l.id DESC
+          LIMIT 100`,
+        [userid],
+      );
+      return res.json({
+        ok: true,
+        market_open: marketOpen,
+        sellable_orders: (sellableRows || []).map((row) => withPriceRange({
+          exchange_id: String(row?.exchange_id || ''),
+          product_id: String(row?.product_id || ''),
+          product_name: String(row?.product_name || ''),
+          original_amount: Number(row?.bob_amount ?? 0),
+          status: 'pending',
+          created_at: row?.created_at ?? null,
+        })),
+        my_listings: (listingRows || []).map((row) => normalizeMarketListing(row, userid)),
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/market/list', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const name = req.webSession?.name ? String(req.webSession.name).trim() : '';
+    const exchangeId = req.body?.exchange_id ? String(req.body.exchange_id).trim() : '';
+    const price = toInt(req.body?.price);
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    if (!exchangeId || !isMarketOrderExchangeId(exchangeId)) {
+      return res.status(400).json({ error: 'invalid exchange_id' });
+    }
+    if (price === null || price <= 0) {
+      return res.status(400).json({ error: 'invalid price' });
+    }
+    if (!Number.isSafeInteger(price)) {
+      return res.status(400).json({ error: 'invalid price' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      if (!await getMarketOpen(db)) {
+        return res.status(403).json({ error: 'mall_open' });
+      }
+      const listingId = genListingId();
+      const row = await db.transaction(async (tx) => {
+        const opening = await tx.get('SELECT * FROM mall_opening_schedule WHERE id = 1 FOR UPDATE');
+        if (isMallOpenRow(opening)) {
+          throw new Error('mall_open');
+        }
+        const order = await tx.get(
+          `SELECT exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at
+             FROM redeems
+            WHERE exchange_id = ?
+            LIMIT 1
+            FOR UPDATE`,
+          [exchangeId],
+        );
+        if (!order) throw new Error('order not found');
+        if (String(order.userid || '') !== userid) throw new Error('order not found');
+        if (order.fulfilled_at !== null && order.fulfilled_at !== undefined) throw new Error('order fulfilled');
+        const active = await tx.get(
+          "SELECT listing_id FROM mall_order_listings WHERE exchange_id = ? AND status = 'active' LIMIT 1",
+          [exchangeId],
+        );
+        if (active) throw new Error('already listed');
+        await tx.run(
+          `INSERT INTO mall_order_listings(listing_id, exchange_id, seller_userid, seller_name_snapshot, price, status)
+           VALUES(?, ?, ?, ?, ?, 'active')`,
+          [listingId, exchangeId, userid, name || null, price],
+        );
+        return await tx.get(
+          `SELECT l.*, r.product_id, r.product_name, r.bob_amount
+             FROM mall_order_listings l
+             JOIN redeems r ON r.exchange_id = l.exchange_id
+            WHERE l.listing_id = ?
+            LIMIT 1`,
+          [listingId],
+        );
+      });
+      publishMallRealtimeEvent('market_changed', { listing_id: listingId, exchange_id: exchangeId });
+      return res.json({ ok: true, data: normalizeMarketListing(row, userid) });
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (message === 'mall_open') return res.status(403).json({ error: 'mall_open' });
+      if (message === 'order not found') return res.status(404).json({ error: message });
+      if (message === 'already listed') return res.status(409).json({ error: message });
+      if (message === 'order fulfilled') return res.status(400).json({ error: message });
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  router.post('/market/cancel', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const listingId = req.body?.listing_id ? String(req.body.listing_id).trim() : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    if (!listingId) {
+      return res.status(400).json({ error: 'missing listing_id' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      if (!await getMarketOpen(db)) {
+        return res.status(403).json({ error: 'mall_open' });
+      }
+      const result = await db.transaction(async (tx) => {
+        const opening = await tx.get('SELECT * FROM mall_opening_schedule WHERE id = 1 FOR UPDATE');
+        if (isMallOpenRow(opening)) throw new Error('mall_open');
+        const row = await tx.get(
+          'SELECT * FROM mall_order_listings WHERE listing_id = ? FOR UPDATE',
+          [listingId],
+        );
+        if (!row) throw new Error('listing not found');
+        if (String(row.seller_userid || '') !== userid) throw new Error('listing not found');
+        if (String(row.status || '') !== 'active') throw new Error('listing not active');
+        await tx.run(
+          "UPDATE mall_order_listings SET status = 'cancelled', cancelled_at = unixepoch(), updated_at = unixepoch() WHERE listing_id = ?",
+          [listingId],
+        );
+        return row;
+      });
+      publishMallRealtimeEvent('market_changed', { listing_id: listingId, exchange_id: result?.exchange_id || '' });
+      return res.json({ ok: true, listing_id: listingId });
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (message === 'mall_open') return res.status(403).json({ error: 'mall_open' });
+      if (message === 'listing not found') return res.status(404).json({ error: message });
+      if (message === 'listing not active') return res.status(409).json({ error: message });
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  router.post('/market/buy', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const buyerUserid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const buyerName = req.webSession?.name ? String(req.webSession.name).trim() : '';
+    const listingId = req.body?.listing_id ? String(req.body.listing_id).trim() : '';
+    if (!buyerUserid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    if (!listingId) {
+      return res.status(400).json({ error: 'missing listing_id' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      if (!await getMarketOpen(db)) {
+        return res.status(403).json({ error: 'mall_open' });
+      }
+      const result = await db.transaction(async (tx) => {
+        const opening = await tx.get('SELECT * FROM mall_opening_schedule WHERE id = 1 FOR UPDATE');
+        if (isMallOpenRow(opening)) throw new Error('mall_open');
+        const listingRef = await tx.get(
+          'SELECT listing_id, exchange_id FROM mall_order_listings WHERE listing_id = ? LIMIT 1',
+          [listingId],
+        );
+        if (!listingRef) throw new Error('listing not found');
+        const order = await tx.get(
+          `SELECT exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at
+             FROM redeems
+            WHERE exchange_id = ?
+            LIMIT 1
+            FOR UPDATE`,
+          [listingRef.exchange_id],
+        );
+        if (!order) throw new Error('order not found');
+        const listing = await tx.get(
+          'SELECT * FROM mall_order_listings WHERE listing_id = ? FOR UPDATE',
+          [listingId],
+        );
+        if (!listing) throw new Error('listing not found');
+        if (String(listing.exchange_id || '') !== String(order.exchange_id || '')) throw new Error('listing not active');
+        if (String(listing.status || '') !== 'active') throw new Error('listing not active');
+        const sellerUserid = String(listing.seller_userid || '');
+        if (!sellerUserid) throw new Error('listing not found');
+        if (sellerUserid === buyerUserid) throw new Error('cannot trade own listing');
+        if (String(order.userid || '') !== sellerUserid) throw new Error('listing not active');
+        if (order.fulfilled_at !== null && order.fulfilled_at !== undefined) throw new Error('order fulfilled');
+        const price = toInt(listing.price);
+        if (price === null || price <= 0 || !Number.isSafeInteger(price)) throw new Error('invalid price');
+        const sellerName = String(listing.seller_name_snapshot || '') || await getUserName(tx, sellerUserid);
+        await ensureAccount(tx, { userid: buyerUserid, name: buyerName });
+        await ensureAccount(tx, { userid: sellerUserid, name: sellerName });
+        await tx.all(
+          'SELECT userid FROM accounts WHERE userid = ANY(?) ORDER BY userid FOR UPDATE',
+          [[buyerUserid, sellerUserid].sort()],
+        );
+        const transfer = await transferBob(tx, {
+          fromUserid: buyerUserid,
+          toUserid: sellerUserid,
+          amount: price,
+          refId: listingId,
+          fromName: buyerName,
+          toName: sellerName,
+        });
+        await tx.run(
+          'UPDATE redeems SET userid = ? WHERE exchange_id = ?',
+          [buyerUserid, listing.exchange_id],
+        );
+        await tx.run(
+          `UPDATE redeem_cdks
+              SET redeemed_by = ?, redeemed_name = ?
+            WHERE redeem_exchange_id = ?`,
+          [buyerUserid, buyerName || null, listing.exchange_id],
+        );
+        await tx.run(
+          `UPDATE mall_order_listings
+              SET status = 'sold', buyer_userid = ?, buyer_name_snapshot = ?, sold_at = unixepoch(), updated_at = unixepoch()
+            WHERE listing_id = ?`,
+          [buyerUserid, buyerName || null, listingId],
+        );
+        return {
+          listing_id: listingId,
+          exchange_id: String(listing.exchange_id || ''),
+          seller_userid: sellerUserid,
+          buyer_userid: buyerUserid,
+          price,
+          transfer,
+          order,
+        };
+      });
+      publishMallRealtimeEvent('balance_changed', { userid: result.buyer_userid, reason: 'market_buy' });
+      publishMallRealtimeEvent('balance_changed', { userid: result.seller_userid, reason: 'market_sell' });
+      publishMallRealtimeEvent('order_updated', {
+        userids: [result.buyer_userid, result.seller_userid],
+        exchange_id: result.exchange_id,
+        status: 'transferred',
+        source: 'market_buy',
+      });
+      publishMallRealtimeEvent('market_changed', {
+        listing_id: result.listing_id,
+        exchange_id: result.exchange_id,
+      });
+      return res.json({
+        ok: true,
+        listing_id: result.listing_id,
+        exchange_id: result.exchange_id,
+        price: result.price,
+        from_balance: result.transfer?.fromBalance,
+        to_balance: result.transfer?.toBalance,
+      });
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (message === 'mall_open') return res.status(403).json({ error: 'mall_open' });
+      if (message === 'listing not found' || message === 'order not found') return res.status(404).json({ error: message });
+      if (message === 'listing not active') return res.status(409).json({ error: message });
+      if (['cannot trade own listing', 'invalid price', 'order fulfilled', 'insufficient balance'].includes(message)) {
+        return res.status(400).json({ error: message });
+      }
+      return res.status(500).json({ error: message });
     }
   });
 

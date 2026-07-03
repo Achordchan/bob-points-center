@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { buildJsapiConfig, getUserIdByAuthCode, getUserProfile } from '../services/dingtalkService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
+import { getSiteVisibilitySettings } from '../services/systemSettings.js';
 
 export function webRouter() {
   const router = Router();
@@ -20,6 +21,16 @@ export function webRouter() {
     try {
       const result = await buildJsapiConfig(cfg, url);
       return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/site-status', async (req, res) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await getSiteVisibilitySettings(req.app?.locals?.db);
+      return res.json({ ok: true, data });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
