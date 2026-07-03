@@ -155,7 +155,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/redeem/history/clear')) return 'super';
   if (p.startsWith('/redeem') || p.startsWith('/orders')) return 'orders:view';
   if (p.startsWith('/mall/self/products/delete')) return 'super';
-  if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening') || p.startsWith('/site-visibility')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
+  if (p.startsWith('/mall/self/products') || p.startsWith('/mall/opening')) return m === 'GET' ? 'commerce:view' : 'commerce:edit';
   if (p.startsWith('/cdks')) return m === 'GET' ? 'commerce:view' : 'commerce:cdk';
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
   if (p.startsWith('/settings/dingtalk/status')) return 'dashboard:view';
@@ -170,7 +170,7 @@ function matchPathPermission(method, path) {
   }
   if (p.startsWith('/image-optimization/upload')) return ['integrations:edit', 'commerce:edit', 'activities:edit', 'content:edit'];
   if (p.startsWith('/resources')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
-  if (p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
+  if (p.startsWith('/site-visibility') || p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
   if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export';
   if (p.startsWith('/backup/import')) return 'super';

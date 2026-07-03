@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { App, Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload } from 'antd';
+import { App, Alert, Button, Card, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload } from 'antd';
 import { api } from '../api.js';
 import { formatTs } from '../utils.js';
 import { hasPermission } from '../permissions.js';
@@ -254,6 +254,81 @@ function Backup({ canExport, canImport }) {
   </Space>;
 }
 
+function SiteVisibilityControl({ canEdit }) {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [row, setRow] = useState({ enabled: true, message: '' });
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const enabled = row?.enabled !== false;
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await api('/admin/site-visibility');
+      const next = data.data || { enabled: true, message: '' };
+      setRow(next);
+      form.setFieldsValue({
+        enabled: next.enabled !== false,
+        message: next.message || '',
+      });
+    } catch (err) {
+      message.error(err.message || '前台访问设置加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async (values) => {
+    setSaving(true);
+    try {
+      const data = await api('/admin/site-visibility', {
+        method: 'POST',
+        body: {
+          enabled: values.enabled !== false,
+          message: values.message || '',
+        },
+      });
+      setRow(data.data || {});
+      form.setFieldsValue({
+        enabled: data.data?.enabled !== false,
+        message: data.data?.message || '',
+      });
+      message.success('前台访问设置已保存');
+    } catch (err) {
+      message.error(err.message || '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <Card title="前台网站访问控制" loading={loading} extra={<Tag color={enabled ? 'green' : 'red'}>{enabled ? '已开启' : '已关闭'}</Tag>}>
+    <Form form={form} layout="vertical" onFinish={save} initialValues={{ enabled: true, message: '' }}>
+      <Form.Item name="enabled" label="前台网站是否开启" valuePropName="checked">
+        <Switch disabled={!canEdit} checkedChildren="开启" unCheckedChildren="关闭" />
+      </Form.Item>
+      <Form.Item
+        name="message"
+        label="关闭时展示给访客的信息"
+        extra="关闭后，访客打开前台页面会先看到这段文字，不需要钉钉登录。"
+      >
+        <Input.TextArea
+          disabled={!canEdit}
+          rows={3}
+          maxLength={500}
+          showCount
+          placeholder="例如：系统维护中，请稍后再试。"
+        />
+      </Form.Item>
+      <Space>
+        <Button onClick={load} loading={loading}>刷新</Button>
+        {canEdit && <Button type="primary" htmlType="submit" loading={saving}>保存设置</Button>}
+      </Space>
+    </Form>
+  </Card>;
+}
 
 function ImageOptimization({ canEdit }) {
   const { message } = App.useApp();
@@ -356,6 +431,7 @@ export default function Integrations({ me }) {
   const canExport = hasPermission(me, 'integrations:export');
   const canImport = me?.isSuperAdmin === true;
   return <Tabs items={[
+    { key: 'settings', label: '系统设置', children: <SiteVisibilityControl canEdit={canEdit} /> },
     { key: 'token', label: 'BOB Token', children: <Tokens canEdit={canEdit} /> },
     { key: 'backup', label: '备份', children: <Backup canExport={canExport} canImport={canImport} /> },
     { key: 'images', label: '图片优化', children: <ImageOptimization canEdit={canEdit} /> },
