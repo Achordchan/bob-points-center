@@ -665,6 +665,7 @@
           amountText: '',
           balanceText: '',
           cdkInfoAvailable: true,
+          marketListAvailable: true,
           refundAvailable: false,
         });
       }
@@ -1514,7 +1515,7 @@
     updateModalScrollLock();
   }
 
-  function showQrModal({ exchangeId, encoded, qrImageUrl, hint, productTitle, amountText, balanceText, cdkInfoAvailable = false, refundAvailable = true }) {
+  function showQrModal({ exchangeId, encoded, qrImageUrl, hint, productTitle, amountText, balanceText, cdkInfoAvailable = false, marketListAvailable = false, refundAvailable = true }) {
     const img = document.getElementById('qrImg');
     const exchangeBox = document.getElementById('qrExchangeId');
     const encodedBox = document.getElementById('qrEncoded');
@@ -1542,6 +1543,7 @@
     const safeAmountText = amountText ? String(amountText) : '';
     const safeBalanceText = balanceText ? String(balanceText) : '';
     const cdkAvailable = cdkInfoAvailable === true || Number(cdkInfoAvailable || 0) === 1;
+    const marketListVisible = marketListAvailable === true || Number(marketListAvailable || 0) === 1;
     const refundVisible = refundAvailable === true || Number(refundAvailable || 0) === 1;
 
     state.qrModalExchangeId = safeExchangeId || null;
@@ -1554,9 +1556,11 @@
       amountText: safeAmountText,
       balanceText: safeBalanceText,
       cdkInfoAvailable: cdkAvailable,
+      marketListAvailable: marketListVisible,
       refundAvailable: refundVisible,
     };
     setHidden('btnQrCdkInfo', !cdkAvailable);
+    setHidden('btnQrListMarket', !marketListVisible);
     setHidden('btnQrRefund', !refundVisible);
     setQrModalVisible(true);
   }
@@ -1566,6 +1570,7 @@
     state.qrModalExchangeId = null;
     if (!keepPayload) state.qrModalPayload = null;
     setHidden('btnQrCdkInfo', true);
+    setHidden('btnQrListMarket', true);
     setHidden('btnQrRefund', false);
     setQrModalVisible(false);
   }
@@ -2375,20 +2380,26 @@
         const seller = x?.seller_display_name ? String(x.seller_display_name) : '匿名用户';
         const price = Number(x?.price);
         const amountText = Number.isFinite(price) ? `${price} BOB 币` : '-';
+        const originalAmount = Number(x?.original_amount);
+        const originalText = Number.isFinite(originalAmount) ? `${originalAmount} BOB 币` : '-';
         const refText = fmtPriceRange(x?.price_min, x?.price_max);
         const refRangeText = refText === '-' ? '无参考区间' : `参考价 ${refText} BOB 币`;
-        const exchangeId = x?.exchange_id ? String(x.exchange_id) : '-';
+        const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
         const canBuy = x?.can_buy === true || x?.can_buy === 1;
         const disabled = !marketOpen || !canBuy;
+        const actionText = !marketOpen ? '暂停中' : (canBuy ? '立即购买' : '我的挂单');
         return (`
-          <div class="marketItem" data-market-listing="${escapeHtml(listingId)}">` +
+          <article class="marketItem marketListingItem" data-market-listing="${escapeHtml(listingId)}">` +
           `  <div class="marketItemMeta">` +
-          `    <div class="marketName">${escapeHtml(productName || exchangeId)}</div>` +
-          `    <div class="marketSub">卖家：${escapeHtml(seller)}</div>` +
-          `    <div class="marketSub">售价：${escapeHtml(amountText)} · ${escapeHtml(refRangeText)}</div>` +
+          `    <div class="marketItemTop">` +
+          `      <div class="marketName">${escapeHtml(productName || exchangeId || '订单')}</div>` +
+          `      <div class="marketPrice"><span>售价</span><strong>${escapeHtml(amountText)}</strong></div>` +
+          `    </div>` +
+          `    <div class="marketInfoRow"><span>卖家</span><b>${escapeHtml(seller)}</b></div>` +
+          `    <div class="marketInfoRow"><span>订单原价</span><b>${escapeHtml(originalText)}</b><em>${escapeHtml(refRangeText)}</em></div>` +
           `  </div>` +
-          `  <button class="marketPrimary secondary" type="button" data-market-buy="${escapeHtml(listingId)}" ${disabled ? 'disabled' : ''}>${canBuy ? '立即购买' : '不可购买'}</button>` +
-          `</div>`
+          `  <button class="marketPrimary secondary" type="button" data-market-buy="${escapeHtml(listingId)}" ${disabled ? 'disabled' : ''}>${actionText}</button>` +
+          `</article>`
         );
       })
       .join('');
@@ -2413,14 +2424,17 @@
           const refText = fmtPriceRange(x?.price_min, x?.price_max);
           const refLabel = refText === '-' ? '未配置参考价' : `参考价：${refText} BOB 币`;
           const disabled = !marketOpen;
+          const actionText = marketOpen ? '上架' : '暂停中';
           return (
-            `<div class="marketItem" data-market-sellable-order="${escapeHtml(exchangeId)}">` +
+            `<article class="marketItem marketSellableItem" data-market-sellable-order="${escapeHtml(exchangeId)}">` +
             `  <div class="marketItemMeta">` +
-            `    <div class="marketName">${escapeHtml(name)}（${escapeHtml(exchangeId)}）</div>` +
-            `    <div class="marketSub">${escapeHtml(amountText)} · ${escapeHtml(createdAt)} · ${escapeHtml(refLabel)}</div>` +
+            `    <div class="marketName">${escapeHtml(name)}</div>` +
+            `    <div class="marketInfoRow"><span>订单金额</span><b>${escapeHtml(amountText)}</b></div>` +
+            `    <div class="marketInfoRow"><span>参考价格</span><em>${escapeHtml(refLabel)}</em></div>` +
+            `    <div class="marketTime">创建于 ${escapeHtml(createdAt)}</div>` +
             `  </div>` +
-            `  <button class="marketPrimary secondary" type="button" data-market-list="${escapeHtml(exchangeId)}" ${disabled ? 'disabled' : ''}>上架</button>` +
-            `</div>`
+            `  <button class="marketPrimary secondary" type="button" data-market-list="${escapeHtml(exchangeId)}" ${disabled ? 'disabled' : ''}>${actionText}</button>` +
+            `</article>`
           );
         }).join('')
       : '<div class="marketEmpty">暂无可上架订单</div>';
@@ -2428,7 +2442,7 @@
     const myListingsNode = document.getElementById('marketMyListings');
     if (!myListingsNode) return;
 
-    list.innerHTML = `<div class="marketSectionTitle">可上架订单</div>${sellableList}`;
+    list.innerHTML = sellableList;
 
     const listingCards = listingRows
       .map((x) => {
@@ -2457,24 +2471,27 @@
             ? (canceledAt ? `取消时间：${escapeHtml(canceledAt)}` : '取消时间：-')
             : `创建时间：${escapeHtml(createdAt)}`);
         const canCancel = status === 'active';
+        const cancelDisabled = !marketOpen;
         return (
-          `<div class="marketItem" data-market-my-listing="${escapeHtml(listingId)}">` +
+          `<article class="marketItem marketMineItem" data-market-my-listing="${escapeHtml(listingId)}">` +
           `  <div class="marketItemMeta">` +
-          `    <div class="marketName">${escapeHtml(productName)}（${escapeHtml(listingId)}）</div>` +
-          `    <div class="marketSub">参考价：${escapeHtml(rangeDisplay)} · 订单金额：${escapeHtml(amountText)}</div>` +
-          `    <div class="marketMeta">${escapeHtml(statusText)}${buyerText ? ` · ${escapeHtml(buyerText)}` : ''}</div>` +
-          `    <div class="marketMeta">${escapeHtml(timeText)}</div>` +
+          `    <div class="marketItemTop">` +
+          `      <div class="marketName">${escapeHtml(productName)}</div>` +
+          `      <span class="marketState marketState-${escapeHtml(status)}">${escapeHtml(statusText)}</span>` +
+          `    </div>` +
+          `    <div class="marketInfoRow"><span>订单金额</span><b>${escapeHtml(amountText)}</b><em>参考价 ${escapeHtml(rangeDisplay)}</em></div>` +
+          `    <div class="marketMeta">${buyerText ? escapeHtml(buyerText) : escapeHtml(timeText)}</div>` +
+          (buyerText ? `    <div class="marketTime">${escapeHtml(timeText)}</div>` : '') +
           `  </div>` +
           (canCancel
-            ? `  <button class="marketPrimary secondary" type="button" data-market-cancel="${escapeHtml(listingId)}">取消</button>`
+            ? `  <button class="marketPrimary secondary" type="button" data-market-cancel="${escapeHtml(listingId)}" ${cancelDisabled ? 'disabled' : ''}>${cancelDisabled ? '暂停中' : '取消'}</button>`
             : '') +
-          `</div>`
+          `</article>`
         );
       })
       .join('');
 
-    myListingsNode.innerHTML = `<div class="marketSectionTitle">我的挂单</div>` +
-      (listingCards || '<div class="marketEmpty">暂无挂单</div>');
+    myListingsNode.innerHTML = listingCards || '<div class="marketEmpty">暂无挂单</div>';
   }
 
   function renderOrders(rows) {
@@ -2495,9 +2512,6 @@
         const isPending = status !== 'fulfilled';
         const pill = isPending ? '<span class="pill pillOk">待核销</span>' : '<span class="pill pillBad">已核销</span>';
         const title = name || pid || '-';
-        const listBtn = isPending
-          ? ` <button class="secondary" type="button" data-order-list-market="${escapeHtml(exchangeId)}">上架</button>`
-          : '';
 
         const clickableClass = isPending ? ' orderClickable' : '';
         const dataAttr = isPending ? ` data-show-qr="${escapeHtml(exchangeId)}"` : ` data-order-detail="${escapeHtml(exchangeId)}"`;
@@ -2508,7 +2522,6 @@
           `<div class="orderTitle">${pill} <span style="margin-left:8px;">${escapeHtml(title)}</span></div>` +
           `<div class="orderMeta mono">${escapeHtml(ts)}</div>` +
           `</div>` +
-          `${listBtn}` +
           `</div>` +
           `</div>`
         );
@@ -2956,7 +2969,13 @@
         market_open: mineData?.market_open ?? listResp.data?.market_open ?? false,
       };
 
-      setText('marketOpenStatus', marketIsOpen(state.marketMine) ? '交易市场已开启，可进行挂单与购买。' : '交易市场已暂停，暂不支持交易。');
+      const isOpen = marketIsOpen(state.marketMine);
+      setText('marketOpenStatus', isOpen ? '交易中' : '市场暂停');
+      const statusBox = document.getElementById('marketOpenStatus');
+      if (statusBox) {
+        statusBox.classList.toggle('marketStatusOpen', isOpen);
+        statusBox.classList.toggle('marketStatusClosed', !isOpen);
+      }
       setText('marketErr', '');
       renderMarketListings(state.marketListings);
       renderMarketMine(state.marketMine);
@@ -3483,6 +3502,9 @@
     }
 
     showNotice('已成功上架到交易市场', 'success');
+    if (state.qrModalExchangeId === String(exchangeId)) {
+      closeQrModal();
+    }
     await Promise.all([
       loadMarketData(),
       loadOrders(),
@@ -3568,6 +3590,7 @@
           productTitle: '',
           amountText: '',
           balanceText: '',
+          marketListAvailable: true,
         });
       } else {
         showNotice('下单成功，请到订单页查看并核销', 'success');
@@ -3842,6 +3865,13 @@
                 : null;
               closeQrModal({ keepPayload: true });
               openCdkInfoModal(exchangeId, { source: 'qr', returnQrPayload });
+            });
+          }
+          const btnQrListMarket = document.getElementById('btnQrListMarket');
+          if (btnQrListMarket) {
+            btnQrListMarket.addEventListener('click', () => {
+              const exchangeId = state.qrModalExchangeId ? String(state.qrModalExchangeId) : '';
+              if (exchangeId) listMarketOrder(exchangeId);
             });
           }
           const btnQrToOrders = document.getElementById('btnQrToOrders');
@@ -4182,15 +4212,6 @@
           document.getElementById('orders').addEventListener('click', (ev) => {
             const target = ev?.target;
 
-            const listBtn = target?.closest ? target.closest('[data-order-list-market]') : null;
-            const listExchangeId = listBtn?.getAttribute ? listBtn.getAttribute('data-order-list-market') : '';
-            if (listExchangeId) {
-              ev.preventDefault();
-              ev.stopPropagation();
-              listMarketOrder(listExchangeId);
-              return;
-            }
-            
             // 处理QR码点击（未核销订单）
             const qrItem = target?.closest ? target.closest('[data-show-qr]') : null;
             const exchangeId = qrItem?.getAttribute ? qrItem.getAttribute('data-show-qr') : '';
@@ -4210,6 +4231,7 @@
                 amountText: row?.redeem_source === 'cdk' ? '' : (row?.bob_amount !== null && row?.bob_amount !== undefined ? `${row.bob_amount} BOB 币` : ''),
                 balanceText: '',
                 cdkInfoAvailable: row?.cdk_info_available === true || Number(row?.cdk_info_available || 0) === 1,
+                marketListAvailable: true,
                 refundAvailable: row?.redeem_source !== 'cdk',
               });
               return;

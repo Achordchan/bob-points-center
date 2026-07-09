@@ -209,31 +209,45 @@
         </section>
 
         <section class="tab hidden" id="tabMarket">
-          <div class="card glass marketCard">
-            <div class="sectionTitle">交易市场</div>
-            <div class="marketStatusWrap">
-              <div class="help" id="marketOpenStatus">正在同步市场状态…</div>
+          <div class="marketHero card glass">
+            <div>
+              <div class="sectionTitle">交易市场</div>
+              <div class="marketIntro">商城关闭期间，可自由交易未核销订单。</div>
             </div>
+            <div class="marketStatus" id="marketOpenStatus">正在同步市场状态…</div>
           </div>
 
-          <div class="card glass marketCard">
-            <div class="sectionTitle">市场列表</div>
-            <div class="help">浏览可购买订单，支持直接购买。</div>
-            <div class="marketList" id="marketListings"></div>
-          </div>
+          <div class="marketGrid">
+            <section class="marketPanel card glass marketPanelWide">
+              <div class="marketPanelHead">
+                <div>
+                  <div class="sectionTitle">市场列表</div>
+                  <div class="help">浏览当前可购买的订单。</div>
+                </div>
+              </div>
+              <div class="marketList" id="marketListings"></div>
+            </section>
 
-          <div class="card glass marketCard">
-            <div class="sectionTitle">我的可上架订单</div>
-            <div class="help">仅展示可上架的未核销订单。</div>
-            <div class="marketList" id="marketSellableOrders"></div>
-          </div>
+            <section class="marketPanel card glass">
+              <div class="marketPanelHead">
+                <div>
+                  <div class="sectionTitle">可上架订单</div>
+                  <div class="help">仅展示属于你的未核销订单。</div>
+                </div>
+              </div>
+              <div class="marketList" id="marketSellableOrders"></div>
+            </section>
 
-          <div class="card glass marketCard">
-            <div class="sectionTitle">我的挂单</div>
-            <div class="help">仅展示你的上架记录，可随时取消未成交挂单。</div>
-            <div class="marketList" id="marketMyListings"></div>
+            <section class="marketPanel card glass">
+              <div class="marketPanelHead">
+                <div>
+                  <div class="sectionTitle">我的挂单</div>
+                  <div class="help">可查看成交记录或取消未成交挂单。</div>
+                </div>
+              </div>
+              <div class="marketList" id="marketMyListings"></div>
+            </section>
           </div>
-
           <div class="error" id="marketErr"></div>
         </section>
 
@@ -382,6 +396,7 @@
         </div>
         <div class="row qrActions" style="justify-content:flex-end; margin-top: 12px;">
           <button class="secondary hidden" id="btnQrCdkInfo" type="button">兑换信息</button>
+          <button class="secondary hidden" id="btnQrListMarket" type="button">上架到市场</button>
           <button class="refundBtn" id="btnQrRefund" type="button">申请退款</button>
           <button class="secondary" id="btnQrToOrders" type="button">去订单</button>
         </div>
