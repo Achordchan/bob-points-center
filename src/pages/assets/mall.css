@@ -649,6 +649,35 @@ button.secondary.pseudoDisabled {
   font-weight: 700;
 }
 
+#tabMarket .marketDisclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px dashed rgba(15, 23, 42, 0.2);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.72);
+  padding: 14px;
+}
+
+#tabMarket .marketDisclosureTitle {
+  font-size: 13px;
+  font-weight: 800;
+  color: rgba(15, 23, 42, 0.8);
+}
+
+#tabMarket .marketDisclosureHint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(15, 23, 42, 0.56);
+}
+
+#tabMarket .marketDisclosureMore {
+  width: 100%;
+  min-height: 40px;
+}
+
 .moreCard {
   margin-top: 10px;
 }
@@ -2895,6 +2924,7 @@ body.modalOpenFixed {
   }
 
   #tabMarket .marketHero {
+    flex-direction: column;
     align-items: stretch;
   }
 
@@ -2909,11 +2939,18 @@ body.modalOpenFixed {
 
   #tabMarket .marketItem {
     padding: 12px;
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
 
   #tabMarket .marketPrimary {
+    width: 100%;
     min-width: 64px;
+  }
+
+  #tabMarket .marketDisclosure {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

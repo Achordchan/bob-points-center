@@ -13,6 +13,7 @@
     marketListings: [],
     marketMine: null,
     marketLoading: false,
+    marketSellableVisibleCount: 0,
     products: [],
     charityProjects: [],
     charityProjectDetail: null,
@@ -2413,8 +2414,25 @@
     const listingRows = Array.isArray(mine.my_listings) ? mine.my_listings : [];
     const marketOpen = marketIsOpen(state.marketMine);
 
-    const sellableList = sellableRows.length
-      ? sellableRows
+    const totalSellable = sellableRows.length;
+    const visibleCount = Math.min(
+      totalSellable,
+      Math.max(0, Number(state.marketSellableVisibleCount) || 0),
+    );
+    const visibleSellableRows = sellableRows.slice(0, visibleCount);
+    const sellableList = !totalSellable
+      ? '<div class="marketEmpty">暂无可上架订单</div>'
+      : !visibleCount
+        ? (
+          `<div class="marketDisclosure">` +
+          `  <div>` +
+          `    <div class="marketDisclosureTitle">有 ${totalSellable} 个未核销订单可上架</div>` +
+          `    <div class="marketDisclosureHint">订单页打开核销码后，也可以直接选择上架。</div>` +
+          `  </div>` +
+          `  <button class="secondary" type="button" data-market-show-sellable>查看订单</button>` +
+          `</div>`
+        )
+        : visibleSellableRows
         .map((x) => {
           const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
           const name = x?.product_name ? String(x.product_name) : '-';
@@ -2436,8 +2454,10 @@
             `  <button class="marketPrimary secondary" type="button" data-market-list="${escapeHtml(exchangeId)}" ${disabled ? 'disabled' : ''}>${actionText}</button>` +
             `</article>`
           );
-        }).join('')
-      : '<div class="marketEmpty">暂无可上架订单</div>';
+        }).join('') +
+          (visibleCount < totalSellable
+            ? `<button class="marketDisclosureMore secondary" type="button" data-market-show-sellable>再显示 ${Math.min(3, totalSellable - visibleCount)} 个订单</button>`
+            : `<button class="marketDisclosureMore secondary" type="button" data-market-hide-sellable>收起可上架订单</button>`);
 
     const myListingsNode = document.getElementById('marketMyListings');
     if (!myListingsNode) return;
@@ -4190,7 +4210,27 @@
             marketSellableOrders.addEventListener('click', (ev) => {
               const btn = ev?.target?.closest ? ev.target.closest('[data-market-list]') : null;
               const exchangeId = btn?.getAttribute ? btn.getAttribute('data-market-list') : '';
-              if (!exchangeId) return;
+              if (!exchangeId) {
+                const showMore = ev?.target?.closest ? ev.target.closest('[data-market-show-sellable]') : null;
+                if (showMore) {
+                  const total = Array.isArray(state.marketMine?.sellable_orders)
+                    ? state.marketMine.sellable_orders.length
+                    : 0;
+                  const current = Math.max(0, Number(state.marketSellableVisibleCount) || 0);
+                  state.marketSellableVisibleCount = Math.min(
+                    total,
+                    current ? current + 3 : 3,
+                  );
+                  renderMarketMine(state.marketMine);
+                  return;
+                }
+                const hideAll = ev?.target?.closest ? ev.target.closest('[data-market-hide-sellable]') : null;
+                if (hideAll) {
+                  state.marketSellableVisibleCount = 0;
+                  renderMarketMine(state.marketMine);
+                }
+                return;
+              }
               ev.preventDefault();
               ev.stopPropagation();
               listMarketOrder(exchangeId);
