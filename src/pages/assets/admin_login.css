@@ -206,41 +206,11 @@ body {
   font-weight: 850;
 }
 
-.login-form {
-  display: grid;
-  gap: 16px;
-}
-
-.field label {
-  margin: 0 0 8px;
-  color: #334155;
-  font-size: 13px;
-  font-weight: 780;
-}
-
-.field input {
-  height: 48px;
-  border-radius: 12px;
-  border-color: rgba(15, 23, 42, 0.12);
-  background: #fbfdff;
-  font-size: 15px;
-}
-
-.field input:hover {
-  border-color: rgba(22, 119, 255, 0.36);
-}
-
-.field input:focus {
-  border-color: rgba(22, 119, 255, 0.75);
-  box-shadow: 0 0 0 4px rgba(22, 119, 255, 0.10);
-}
-
 .ding-actions {
   display: flex;
   gap: 10px;
 }
 
-.login-submit,
 button#btnDingLogin {
   width: 100%;
   height: 48px;

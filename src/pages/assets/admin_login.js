@@ -1,14 +1,11 @@
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
-
   const fetchJson = window.BOB.fetchJson;
-  const postJson = window.BOB.postJson;
 
   function getLoginRedirectTarget() {
     const fallback = '/admin/home';
     const target = new URLSearchParams(window.location.search).get('redirect') || '';
-    if (!target.startsWith('/')) return fallback;
-    if (target.startsWith('//')) return fallback;
+    if (!target.startsWith('/') || target.startsWith('//')) return fallback;
     if (target.startsWith('/admin/') || target === '/docs' || target.startsWith('/docs/')) return target;
     return fallback;
   }
@@ -17,30 +14,46 @@
     window.location.replace(getLoginRedirectTarget());
   }
 
-  function getFallbackLoginErrorText(error) {
-    const code = error === null || error === undefined ? '' : String(error).trim();
-    if (!code) return '登录失败，请稍后再试';
-    if (code === 'missing username or password') return '请输入账号和密码';
-    if (code === 'unauthorized') return '账号或密码错误，请重新输入';
-    return code;
+  function showError(message) {
+    document.getElementById('dingErr').textContent = message || '';
+  }
+
+  function getOAuthErrorText() {
+    const code = new URLSearchParams(window.location.search).get('oauth_error') || '';
+    if (code === 'forbidden') return '当前钉钉账号没有后台权限';
+    if (code === 'expired') return '授权状态已失效，请重新登录';
+    if (code === 'config') return '钉钉登录配置不完整，请联系系统管理员';
+    if (code === 'failed') return '钉钉授权登录失败，请重试';
+    return '';
+  }
+
+  function isInDingtalk() {
+    return /DingTalk/i.test(window.navigator.userAgent || '')
+      && typeof window.dd !== 'undefined'
+      && Boolean(window.dd?.runtime?.permission?.requestAuthCode);
+  }
+
+  function startWebOAuth() {
+    const params = new URLSearchParams({ redirect: getLoginRedirectTarget() });
+    window.location.replace(`/admin/oauth/start?${params.toString()}`);
   }
 
   async function dingLogin() {
-    document.getElementById('dingErr').textContent = '';
+    showError('');
+    const button = document.getElementById('btnDingLogin');
+    button.disabled = true;
+    button.textContent = '正在唤起钉钉授权…';
 
     const cfgResp = await fetchJson(`/admin/config?url=${encodeURIComponent(currentUrl)}`);
     if (cfgResp.data?.error) {
-      document.getElementById('dingErr').textContent = '配置获取失败：' + cfgResp.data.error;
+      showError('配置获取失败：' + cfgResp.data.error);
+      button.disabled = false;
+      button.textContent = '重新登录';
       return;
     }
 
     const cfg = cfgResp.data;
-    if (typeof dd === 'undefined') {
-      document.getElementById('dingErr').textContent = '当前环境不是钉钉';
-      return;
-    }
-
-    dd.config({
+    window.dd.config({
       agentId: cfg.agentId,
       corpId: cfg.corpId,
       timeStamp: cfg.timeStamp,
@@ -49,58 +62,46 @@
       jsApiList: ['runtime.permission.requestAuthCode'],
     });
 
-    dd.ready(() => {
-      dd.runtime.permission.requestAuthCode({
+    window.dd.ready(() => {
+      window.dd.runtime.permission.requestAuthCode({
         corpId: cfg.corpId,
         onSuccess: async (info) => {
           const auth = await fetchJson(`/admin/auth?code=${encodeURIComponent(info.code)}`);
           if (auth.status === 403) {
-            const uid = auth.data?.userid || '';
-            const nm = auth.data?.name || '';
-            const hint = uid ? `无权限：你不是管理员。你的 userid 是：${uid}（把它加入 .env 的 ADMIN_USERIDS）` : '无权限：你不是管理员';
-            document.getElementById('dingErr').textContent = hint;
-            document.getElementById('hint').textContent = nm ? `你好，${nm}` : '未授权';
+            showError('当前钉钉账号没有后台权限');
+            button.disabled = false;
+            button.textContent = '重新登录';
             return;
           }
           if (auth.data?.ok) {
             goHome();
             return;
           }
-          document.getElementById('dingErr').textContent = auth.data?.error || '钉钉登录失败';
+          showError(auth.data?.error || '钉钉登录失败');
+          button.disabled = false;
+          button.textContent = '重新登录';
         },
-        onFail: (err) => {
-          document.getElementById('dingErr').textContent = JSON.stringify(err);
+        onFail: () => {
+          showError('未完成钉钉授权，请重试');
+          button.disabled = false;
+          button.textContent = '重新登录';
         },
       });
     });
 
-    dd.error((err) => {
-      const raw = JSON.stringify(err);
-      if (raw === '{}' || raw === 'null' || raw === 'undefined') {
-        const card = document.getElementById('cardDingtalk');
-        if (card) card.classList.add('hidden');
-        document.getElementById('hint').textContent = '登录';
-        document.getElementById('dingErr').textContent = '';
-        return;
-      }
-      document.getElementById('dingErr').textContent = 'dd.config 失败：' + raw;
+    window.dd.error(() => {
+      showError('钉钉免登初始化失败，请重试');
+      button.disabled = false;
+      button.textContent = '重新登录';
     });
   }
 
   async function bootstrap() {
-    document.getElementById('btnReload').addEventListener('click', () => window.location.reload());
-    document.getElementById('btnDingLogin').addEventListener('click', dingLogin);
-
-    document.getElementById('fbLogin').addEventListener('click', async () => {
-      document.getElementById('fbErr').textContent = '';
-      const username = document.getElementById('fbUser').value.trim();
-      const password = document.getElementById('fbPass').value;
-      const r = await postJson('/admin/login', { username, password });
-      if (r.data?.ok) {
-        goHome();
-        return;
-      }
-      document.getElementById('fbErr').textContent = getFallbackLoginErrorText(r.data?.error);
+    const button = document.getElementById('btnDingLogin');
+    const oauthError = getOAuthErrorText();
+    button.addEventListener('click', () => {
+      if (isInDingtalk()) dingLogin();
+      else startWebOAuth();
     });
 
     const me = await fetchJson('/admin/me');
@@ -109,14 +110,19 @@
       return;
     }
 
-    document.getElementById('hint').textContent = '登录';
-    document.getElementById('btnDingLogin').disabled = false;
-
-    if (typeof dd !== 'undefined') {
-      const card = document.getElementById('cardDingtalk');
-      if (card) card.classList.remove('hidden');
-      dingLogin();
+    document.getElementById('hint').textContent = '使用企业钉钉账号完成身份验证';
+    button.disabled = false;
+    button.textContent = '使用钉钉登录';
+    if (oauthError) {
+      showError(oauthError);
+      return;
     }
+
+    if (isInDingtalk()) {
+      dingLogin();
+      return;
+    }
+    startWebOAuth();
   }
 
   bootstrap();

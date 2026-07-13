@@ -359,6 +359,58 @@ export async function getUserIdByAuthCode(cfg, code) {
   return String(userid);
 }
 
+export function buildDingtalkOAuthAuthorizeUrl(cfg, { redirectUri, state } = {}) {
+  const clientId = cfg?.dingtalk?.appKey ? String(cfg.dingtalk.appKey).trim() : '';
+  if (!clientId) throw new Error('DINGTALK_APP_KEY missing');
+  if (!redirectUri) throw new Error('missing redirectUri');
+  if (!state) throw new Error('missing state');
+
+  const params = new URLSearchParams({
+    redirect_uri: String(redirectUri),
+    response_type: 'code',
+    client_id: clientId,
+    scope: 'openid',
+    state: String(state),
+    prompt: 'consent',
+  });
+  return `https://login.dingtalk.com/oauth2/auth?${params.toString()}`;
+}
+
+export async function getUserIdByOAuthCode(cfg, code) {
+  if (!code) throw new Error('missing code');
+  const clientId = cfg?.dingtalk?.appKey ? String(cfg.dingtalk.appKey).trim() : '';
+  const clientSecret = cfg?.dingtalk?.appSecret ? String(cfg.dingtalk.appSecret).trim() : '';
+  if (!clientId || !clientSecret) {
+    throw new Error('DINGTALK_APP_KEY or DINGTALK_APP_SECRET missing');
+  }
+
+  const tokenData = await httpJson('POST', 'https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
+    clientId,
+    clientSecret,
+    code: String(code),
+    grantType: 'authorization_code',
+  });
+  const userAccessToken = tokenData?.accessToken ? String(tokenData.accessToken) : '';
+  if (!userAccessToken) throw new Error('dingtalk user accessToken missing');
+
+  const me = await httpJsonWithHeaders('GET', 'https://api.dingtalk.com/v1.0/contact/users/me', {
+    headers: { 'x-acs-dingtalk-access-token': userAccessToken },
+  });
+  const unionId = me?.unionId ? String(me.unionId) : '';
+  if (!unionId) throw new Error('dingtalk unionId missing');
+
+  const appAccessToken = await getAccessToken(cfg);
+  const data = await httpJson(
+    'POST',
+    `https://oapi.dingtalk.com/topapi/user/getbyunionid?access_token=${encodeURIComponent(appAccessToken)}`,
+    { unionid: unionId },
+  );
+  assertDingtalkOk(data, 'user.getbyunionid');
+  const userid = data?.result?.userid;
+  if (!userid) throw new Error('dingtalk userid missing');
+  return String(userid);
+}
+
 export async function getUserProfile(cfg, userid) {
   if (!userid) {
     throw new Error('missing userid');

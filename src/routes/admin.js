@@ -6,11 +6,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  buildDingtalkOAuthAuthorizeUrl,
   buildJsapiConfig,
   getAccessToken,
   getDingtalkOrganizationProfile,
   getV1AccessToken,
   getUserIdByAuthCode,
+  getUserIdByOAuthCode,
   getUserProfile,
   hasDingtalkGroupOpenConversationId,
   listSubDepartments,
@@ -19,6 +21,12 @@ import {
   queryDingtalkOpenGroupBaseInfo,
   queryDingtalkGroupRobot,
 } from '../services/dingtalkService.js';
+import {
+  buildClearDingtalkOAuthStateCookie,
+  buildDingtalkOAuthStateCookie,
+  createDingtalkOAuthState,
+  verifyDingtalkOAuthState,
+} from '../services/dingtalkOAuthState.js';
 import {
   buildClearSessionCookie,
   buildClearLegacyAdminPathCookie,
@@ -109,6 +117,33 @@ function withTimeout(promise, ms, timeoutMessage) {
 
 function hasDingtalkApiCredential(cfg) {
   return Boolean(String(cfg?.dingtalk?.appKey || '').trim() && String(cfg?.dingtalk?.appSecret || '').trim());
+}
+
+const ADMIN_OAUTH_COOKIE = 'bob_admin_oauth_state';
+
+function getAdminOAuthSecret(cfg) {
+  return `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}:dingtalk-oauth`;
+}
+
+function normalizeAdminReturnTo(value) {
+  const target = value ? String(value).trim() : '';
+  if (!target.startsWith('/') || target.startsWith('//')) return '/admin/home';
+  if (target.startsWith('/admin/') || target === '/docs' || target.startsWith('/docs/')) return target;
+  return '/admin/home';
+}
+
+function getAdminOAuthCallbackUrl(cfg) {
+  const baseUrl = cfg?.serverBaseUrl ? String(cfg.serverBaseUrl).trim() : '';
+  if (!baseUrl) throw new Error('SERVER_BASE_URL missing');
+  return new URL('/admin/oauth/callback', baseUrl).toString();
+}
+
+function buildAdminLoginErrorUrl(error, returnTo) {
+  const params = new URLSearchParams({
+    oauth_error: String(error || 'failed'),
+    redirect: normalizeAdminReturnTo(returnTo),
+  });
+  return `/admin/login?${params.toString()}`;
 }
 
 function isDingtalkPermissionMissing(err) {
@@ -1659,6 +1694,89 @@ export function adminRouter() {
     res.type('html').sendFile('admin_login.html', { root: pagesRoot });
   });
 
+  router.get('/oauth/start', (req, res) => {
+    try {
+      const cfg = req.app?.locals?.cfg;
+      const returnTo = normalizeAdminReturnTo(req.query.redirect);
+      const { state, nonce } = createDingtalkOAuthState(getAdminOAuthSecret(cfg), {
+        purpose: 'admin',
+        returnTo,
+      });
+      const authorizeUrl = buildDingtalkOAuthAuthorizeUrl(cfg, {
+        redirectUri: getAdminOAuthCallbackUrl(cfg),
+        state,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE, nonce));
+      return res.redirect(302, authorizeUrl);
+    } catch (err) {
+      return res.redirect(302, buildAdminLoginErrorUrl('config', req.query.redirect));
+    }
+  });
+
+  router.get('/oauth/callback', async (req, res) => {
+    const cfg = req.app?.locals?.cfg;
+    const cookies = parseCookies(req.header('cookie'));
+    const state = req.query.state ? String(req.query.state) : '';
+    const code = req.query.authCode || req.query.code ? String(req.query.authCode || req.query.code) : '';
+    const payload = verifyDingtalkOAuthState(getAdminOAuthSecret(cfg), state, {
+      purpose: 'admin',
+      nonce: cookies[ADMIN_OAUTH_COOKIE],
+    });
+    const returnTo = normalizeAdminReturnTo(payload?.returnTo);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE));
+    if (!payload || !code) {
+      return res.redirect(302, buildAdminLoginErrorUrl('expired', returnTo));
+    }
+
+    try {
+      const db = req.app.locals.db;
+      const userid = await getUserIdByOAuthCode(cfg, code);
+      const cached = await db.get('SELECT name FROM users WHERE userid = ?', [userid]);
+      const cachedName = cached?.name ? String(cached.name) : '';
+      const profile = cachedName ? { userid, name: cachedName } : await getUserProfile(cfg, userid);
+      await ensureAccount(db, { userid: profile.userid, name: profile.name });
+
+      if (!(await isAdmin(db, cfg, profile.userid))) {
+        safeAppendAuditLog(db, {
+          eventType: 'admin_login_failed',
+          actorType: 'admin',
+          actorId: profile.userid,
+          actorName: profile.name,
+          ip: getClientIp(req),
+          method: req.method,
+          path: req.originalUrl || req.url,
+          statusCode: 403,
+          message: '管理员钉钉授权登录失败：无后台权限',
+        });
+        return res.redirect(302, buildAdminLoginErrorUrl('forbidden', returnTo));
+      }
+
+      const secret = `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
+      const token = createSessionToken(secret, { userid: profile.userid, name: profile.name, mode: 'dingtalk' }, 8 * 3600);
+      res.setHeader('Set-Cookie', [
+        buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE),
+        buildClearLegacyAdminPathCookie(),
+        buildSessionCookie(token),
+      ]);
+      safeAppendAuditLog(db, {
+        eventType: 'admin_login_success',
+        actorType: 'admin',
+        actorId: profile.userid,
+        actorName: profile.name,
+        ip: getClientIp(req),
+        method: req.method,
+        path: req.originalUrl || req.url,
+        statusCode: 302,
+        message: '管理员钉钉授权登录成功',
+      });
+      return res.redirect(302, returnTo);
+    } catch (err) {
+      return res.redirect(302, buildAdminLoginErrorUrl('failed', returnTo));
+    }
+  });
+
   router.get('/home', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', buildClearLegacyAdminPathCookie());
@@ -2548,62 +2666,6 @@ export function adminRouter() {
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
-  });
-
-  router.post('/login', async (req, res) => {
-    const cfg = req.app?.locals?.cfg;
-    const body = req.body || {};
-
-    const username = body.username ? String(body.username) : '';
-    const password = body.password ? String(body.password) : '';
-
-    if (!username || !password) {
-      safeAppendAuditLog(req.app?.locals?.db, {
-        eventType: 'admin_login_failed',
-        actorType: 'admin',
-        actorId: username,
-        ip: getClientIp(req),
-        method: req.method,
-        path: req.originalUrl || req.url,
-        statusCode: 400,
-        message: '管理员登录失败：缺少用户名或密码',
-      });
-      return res.status(400).json({ error: 'missing username or password' });
-    }
-
-    if (username !== cfg?.adminFallbackUsername || password !== cfg?.adminFallbackPassword) {
-      safeAppendAuditLog(req.app?.locals?.db, {
-        eventType: 'admin_login_failed',
-        actorType: 'admin',
-        actorId: username,
-        ip: getClientIp(req),
-        method: req.method,
-        path: req.originalUrl || req.url,
-        statusCode: 401,
-        message: '管理员登录失败：账号或密码错误',
-      });
-      return res.status(401).json({ error: 'unauthorized' });
-    }
-
-    const userid = cfg?.adminFallbackUserid || '';
-    const db = req.app?.locals?.db;
-    const name = await resolveAdminDisplayName(db, cfg, { userid, username });
-    const secret = `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
-    const token = createSessionToken(secret, { userid, name, username, mode: 'password' }, 8 * 3600);
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Set-Cookie', [buildClearLegacyAdminPathCookie(), buildSessionCookie(token)]);
-    safeAppendAuditLog(req.app?.locals?.db, {
-      eventType: 'admin_login_success',
-      actorType: 'admin',
-      actorId: userid,
-      actorName: name,
-      ip: getClientIp(req),
-      method: req.method,
-      path: req.originalUrl || req.url,
-      statusCode: 200,
-      message: '管理员登录成功',
-    });
-    return res.json({ ok: true, name });
   });
 
   router.post('/logout', (req, res) => {

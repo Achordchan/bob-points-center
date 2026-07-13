@@ -481,7 +481,6 @@
     };
     const requestActionMap = {
       'GET /admin/login': '打开管理员登录页',
-      'POST /admin/login': '管理员登录',
       'POST /admin/logout': '管理员退出登录',
       'GET /admin/home': '加载后台首页',
       'GET /admin/me': '获取当前管理员信息',

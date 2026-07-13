@@ -83,11 +83,8 @@ function normalizePermissions(input, { allowSuperOnly = false } = {}) {
 
 export function isSuperAdminSession(cfg, payload = {}) {
   const uid = String(payload?.userid || '').trim();
-  const username = String(payload?.username || '').trim();
-  const mode = String(payload?.mode || '').trim();
   const allow = Array.isArray(cfg?.adminUserids) ? cfg.adminUserids.map(String) : [];
-  if (uid && allow.includes(uid)) return true;
-  return mode === 'password' && username && username === String(cfg?.adminFallbackUsername || 'admin');
+  return Boolean(uid && allow.includes(uid));
 }
 
 export async function ensureAdminRoles(db) {
@@ -183,7 +180,7 @@ function matchPathPermission(method, path) {
 function isPublicAdminPath(method, path) {
   const m = String(method || 'GET').toUpperCase();
   const p = String(path || '');
-  return (m === 'GET' && ['/', '/login', '/auth', '/config', '/me', '/home'].includes(p)) || (m === 'POST' && ['/login', '/logout'].includes(p));
+  return (m === 'GET' && ['/', '/login', '/auth', '/config', '/me', '/home', '/oauth/start', '/oauth/callback'].includes(p)) || (m === 'POST' && p === '/logout');
 }
 
 export function adminAccessMiddleware() {

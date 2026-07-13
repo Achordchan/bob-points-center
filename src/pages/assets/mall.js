@@ -62,6 +62,7 @@
     redPacketClaimInFlight: false,
     redPacketLastCountdown: null,
     reauthInFlight: false,
+    oauthSession: null,
     modalLockScrollTop: 0,
 
     mallEasterClicks: 0,
@@ -810,7 +811,13 @@
   async function reauthIfNeeded() {
     if (state.reauthInFlight) return false;
     const cfg = state.cfg;
-    if (!cfg || !window.dd?.runtime?.permission?.requestAuthCode) return false;
+    if (!cfg || !window.dd?.runtime?.permission?.requestAuthCode) {
+      state.reauthInFlight = true;
+      const returnTo = window.location.pathname + window.location.search + window.location.hash;
+      const params = new URLSearchParams({ redirect: returnTo });
+      window.location.replace(`/web/oauth/start?${params.toString()}`);
+      return false;
+    }
     state.reauthInFlight = true;
     try {
       const authCode = await new Promise((resolve, reject) => {
@@ -3701,20 +3708,39 @@
     if (await shouldStopForSiteGate()) {
       return;
     }
-    if (typeof dd === 'undefined') {
-      const message = '当前页面未在钉钉环境中打开，功能无法正常使用';
-      setText('userHint', message);
-      showNotice(message, 'error');
-      return;
-    }
-    const cfgResp = await fetchJson(`/web/config?url=${encodeURIComponent(currentUrl)}`);
-    if (cfgResp.data?.error) {
-      setText('userHint', '配置获取失败：' + cfgResp.data.error);
+    const session = await safeFetchJson('/web/me');
+    const hasSession = session?.status === 200 && Boolean(session?.data?.userid);
+    const inDingtalk = /DingTalk/i.test(window.navigator.userAgent || '')
+      && typeof window.dd !== 'undefined'
+      && Boolean(window.dd?.runtime?.permission?.requestAuthCode);
+
+    if (!inDingtalk && !hasSession) {
+      const returnTo = window.location.pathname + window.location.search + window.location.hash;
+      const params = new URLSearchParams({ redirect: returnTo });
+      window.location.replace(`/web/oauth/start?${params.toString()}`);
       return;
     }
 
-    const cfg = cfgResp.data;
-    state.cfg = cfg;
+    let cfg;
+    if (inDingtalk) {
+      const cfgResp = await fetchJson(`/web/config?url=${encodeURIComponent(currentUrl)}`);
+      if (cfgResp.data?.error) {
+        setText('userHint', '配置获取失败：' + cfgResp.data.error);
+        return;
+      }
+      cfg = cfgResp.data;
+      state.cfg = cfg;
+    } else {
+      state.oauthSession = session.data;
+      state.cfg = null;
+      cfg = { agentId: '', corpId: '', timeStamp: 0, nonceStr: '', signature: '' };
+      window.dd = {
+        config() {},
+        ready(callback) { callback(); },
+        error() {},
+        runtime: { permission: { requestAuthCode({ onSuccess }) { onSuccess({ code: '' }); } } },
+      };
+    }
 
     dd.config({
       agentId: cfg.agentId,
@@ -3729,7 +3755,10 @@
       dd.runtime.permission.requestAuthCode({
         corpId: cfg.corpId,
         onSuccess: async (info) => {
-          const auth = await fetchJson(`/web/auth?code=${encodeURIComponent(info.code)}`);
+          const auth = state.oauthSession
+            ? { data: state.oauthSession }
+            : await fetchJson(`/web/auth?code=${encodeURIComponent(info.code)}`);
+          state.oauthSession = null;
           const userid = auth.data?.userid;
           const name = auth.data?.name;
           if (!userid) {

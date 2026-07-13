@@ -1,8 +1,74 @@
 import { Router } from 'express';
-import { buildJsapiConfig, getUserIdByAuthCode, getUserProfile } from '../services/dingtalkService.js';
+import {
+  buildDingtalkOAuthAuthorizeUrl,
+  buildJsapiConfig,
+  getUserIdByAuthCode,
+  getUserIdByOAuthCode,
+  getUserProfile,
+} from '../services/dingtalkService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
 import { getSiteVisibilitySettings } from '../services/systemSettings.js';
+import { parseCookies } from '../services/adminSession.js';
+import { requireWebSession } from '../middleware/requireWebSession.js';
+import {
+  buildClearDingtalkOAuthStateCookie,
+  buildDingtalkOAuthStateCookie,
+  createDingtalkOAuthState,
+  verifyDingtalkOAuthState,
+} from '../services/dingtalkOAuthState.js';
+
+const WEB_OAUTH_COOKIE = 'bob_web_oauth_state';
+
+function getWebOAuthSecret(cfg) {
+  return `${cfg?.webSessionSecret || ''}:${cfg?.sessionSalt || ''}:dingtalk-oauth`;
+}
+
+function normalizeMallReturnTo(value) {
+  const target = value ? String(value).trim() : '';
+  if (!target.startsWith('/') || target.startsWith('//')) return '/mall';
+  if (target === '/mall' || target.startsWith('/mall?') || target.startsWith('/mall#')) return target;
+  return '/mall';
+}
+
+function getOAuthCallbackUrl(cfg, pathname) {
+  const baseUrl = cfg?.serverBaseUrl ? String(cfg.serverBaseUrl).trim() : '';
+  if (!baseUrl) throw new Error('SERVER_BASE_URL missing');
+  return new URL(pathname, baseUrl).toString();
+}
+
+function sendOAuthError(res, message, status = 400) {
+  const text = String(message || '钉钉登录失败').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
+  return res.status(status).type('html').send(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录失败</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#17233d"><main style="width:min(420px,calc(100% - 40px));box-sizing:border-box;padding:28px;border:1px solid #e5e7eb;border-radius:16px;background:#fff"><h1 style="margin:0 0 12px;font-size:22px">钉钉登录未完成</h1><p style="margin:0 0 22px;line-height:1.7;color:#64748b">${text}</p><a href="/mall" style="display:block;padding:12px 16px;border-radius:10px;background:#1677ff;color:#fff;text-align:center;text-decoration:none;font-weight:700">重新登录</a></main></body></html>`);
+}
+
+async function establishWebSession(req, res, userid) {
+  const cfg = req.app?.locals?.cfg;
+  const db = req.app.locals.db;
+  const cached = await db.get('SELECT name FROM users WHERE userid = ?', [userid]);
+  const cachedName = cached?.name ? String(cached.name) : '';
+
+  let profile;
+  try {
+    profile = await getUserProfile(cfg, userid);
+  } catch {
+    profile = cachedName ? { userid, name: cachedName, avatar: '' } : null;
+  }
+
+  if (!profile?.userid) throw new Error('missing userid');
+  const finalUserid = String(profile.userid);
+  const finalName = profile?.name ? String(profile.name) : '';
+  const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
+  await ensureAccount(db, { userid: finalUserid, name: finalName });
+
+  const sessionSecret = `${cfg?.webSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
+  const sessionTtlSeconds = 86400 * 7;
+  const token = createWebSessionToken(sessionSecret, { userid: finalUserid, name: finalName }, sessionTtlSeconds);
+  res.setHeader('Set-Cookie', buildWebSessionCookie(token, sessionTtlSeconds));
+  return { userid: finalUserid, name: finalName, avatar: finalAvatar };
+}
 
 export function webRouter() {
   const router = Router();
@@ -36,6 +102,58 @@ export function webRouter() {
     }
   });
 
+  router.get('/me', requireWebSession(), (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      userid: req.webSession?.userid || '',
+      name: req.webSession?.name || '',
+      avatar: '',
+    });
+  });
+
+  router.get('/oauth/start', (req, res) => {
+    try {
+      const cfg = req.app?.locals?.cfg;
+      const returnTo = normalizeMallReturnTo(req.query.redirect);
+      const secret = getWebOAuthSecret(cfg);
+      const { state, nonce } = createDingtalkOAuthState(secret, { purpose: 'web', returnTo });
+      const redirectUri = getOAuthCallbackUrl(cfg, '/web/oauth/callback');
+      const authorizeUrl = buildDingtalkOAuthAuthorizeUrl(cfg, { redirectUri, state });
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE, nonce));
+      return res.redirect(302, authorizeUrl);
+    } catch (err) {
+      return sendOAuthError(res, String(err?.message || err), 500);
+    }
+  });
+
+  router.get('/oauth/callback', async (req, res) => {
+    const cfg = req.app?.locals?.cfg;
+    const cookies = parseCookies(req.header('cookie'));
+    const state = req.query.state ? String(req.query.state) : '';
+    const code = req.query.authCode || req.query.code ? String(req.query.authCode || req.query.code) : '';
+    const payload = verifyDingtalkOAuthState(getWebOAuthSecret(cfg), state, {
+      purpose: 'web',
+      nonce: cookies[WEB_OAUTH_COOKIE],
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE));
+    if (!payload || !code) return sendOAuthError(res, '授权状态已失效，请重新登录');
+
+    try {
+      const userid = await getUserIdByOAuthCode(cfg, code);
+      await establishWebSession(req, res, userid);
+      const sessionCookie = res.getHeader('Set-Cookie');
+      res.setHeader('Set-Cookie', [
+        buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE),
+        sessionCookie,
+      ]);
+      return res.redirect(302, normalizeMallReturnTo(payload.returnTo));
+    } catch (err) {
+      return sendOAuthError(res, String(err?.message || err), 502);
+    }
+  });
+
   router.get('/auth', async (req, res) => {
     const cfg = req.app?.locals?.cfg;
     const code = req.query.code ? String(req.query.code) : '';
@@ -44,35 +162,8 @@ export function webRouter() {
     }
 
     try {
-      const db = req.app.locals.db;
       const userid = await getUserIdByAuthCode(cfg, code);
-
-      const sessionSecret = `${cfg?.webSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
-      const sessionTtlSeconds = 86400 * 7;
-
-      const cached = await db.get('SELECT name FROM users WHERE userid = ?', [userid]);
-      const cachedName = cached?.name ? String(cached.name) : '';
-
-      let profile;
-      try {
-        profile = await getUserProfile(cfg, userid);
-      } catch {
-        profile = cachedName ? { userid, name: cachedName, avatar: '' } : null;
-      }
-
-      if (!profile?.userid) {
-        return res.status(500).json({ error: 'missing userid' });
-      }
-
-      const finalUserid = String(profile.userid);
-      const finalName = profile?.name ? String(profile.name) : '';
-      const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
-      await ensureAccount(db, { userid: finalUserid, name: finalName });
-
-      const token = createWebSessionToken(sessionSecret, { userid: finalUserid, name: finalName }, sessionTtlSeconds);
-      res.setHeader('Set-Cookie', buildWebSessionCookie(token, sessionTtlSeconds));
-
-      return res.json({ userid: finalUserid, name: finalName, avatar: finalAvatar });
+      return res.json(await establishWebSession(req, res, userid));
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
