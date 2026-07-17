@@ -1,4 +1,5 @@
 import { parseCookies, verifySessionToken } from './adminSession.js';
+import { adminSessionSigningSecret, isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 export const ADMIN_PERMISSION_CATALOG = [
   { group: '首页概览', permissions: [{ key: 'dashboard:view', label: '查看首页' }] },
   { group: '用户与账户', permissions: [
@@ -169,7 +170,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/resources')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/site-visibility') || p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
-  if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export';
+  if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export'; // full 另在 handler 校验 super
   if (p.startsWith('/backup/import')) return 'super';
   if (p.startsWith('/backup/history')) return 'integrations:view';
   if (p.startsWith('/logs')) return 'audit:view';
@@ -189,15 +190,18 @@ export function adminAccessMiddleware() {
       if (isPublicAdminPath(req.method, req.path)) return next();
       const cfg = req.app?.locals?.cfg;
       let payload = req.adminSession || null;
+      const db = req.app?.locals?.db;
       if (!payload) {
         const cookies = parseCookies(req.header('cookie'));
         const token = cookies.bob_admin_session;
-        const secret = `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
+        const secret = adminSessionSigningSecret(cfg);
         payload = verifySessionToken(secret, token);
+        if (payload && !(await isSessionVersionValidLive(payload, db, cfg))) payload = null;
         if (payload) req.adminSession = payload;
+      } else if (!(await isSessionVersionValidLive(payload, db, cfg))) {
+        return res.status(401).json({ error: 'unauthorized' });
       }
       if (!payload) return next();
-      const db = req.app?.locals?.db;
       const access = await getAdminAccess(db, cfg, payload);
       req.adminAccess = access;
       const permission = matchPathPermission(req.method, req.path);

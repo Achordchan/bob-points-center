@@ -12,7 +12,8 @@ function toBool(value, fallback) {
 export function loadConfig() {
   dotenv.config();
 
-  const adminFallbackUserid = (process.env.ADMIN_FALLBACK_USERID || '021444176521-1423302501').trim();
+  // 不再内置固定超级管理员。生产必须显式配置 ADMIN_USERIDS。
+  const adminFallbackUserid = (process.env.ADMIN_FALLBACK_USERID || '').trim();
   const adminUserids = (process.env.ADMIN_USERIDS || '')
     .split(',')
     .map((s) => s.trim())
@@ -20,13 +21,40 @@ export function loadConfig() {
   if (adminFallbackUserid && !adminUserids.includes(adminFallbackUserid)) {
     adminUserids.push(adminFallbackUserid);
   }
+  // 仅在明确 production 时强制要求；本地未设 NODE_ENV 可空跑，但无硬编码超管。
+  const nodeEnv = String(process.env.NODE_ENV || '').trim().toLowerCase();
+  if (nodeEnv === 'production' && adminUserids.length === 0) {
+    throw new Error('生产环境必须配置 ADMIN_USERIDS（超级管理员名单），已取消内置默认 userid');
+  }
 
   const dbKind = (process.env.DB_KIND || 'postgres').trim().toLowerCase();
   const pgSsl = toBool(process.env.PG_SSL, false);
 
+  // 会话与 Cookie：sessionSalt 已废弃，签名仅依赖稳定 secret。
+  // Secure 判定：显式 COOKIE_SECURE > HTTPS 的 SERVER_BASE_URL > NODE_ENV=production。
+  // 宝塔反代 HTTPS 时即使 NODE_ENV 为空，也不应发出可被 HTTP 窃听的会话 Cookie。
+  const serverBaseUrl = process.env.SERVER_BASE_URL || `http://127.0.0.1:${process.env.PORT || 8000}`;
+  const baseIsHttps = /^https:\/\//i.test(String(serverBaseUrl).trim());
+  const cookieSecureEnv = process.env.COOKIE_SECURE;
+  let cookieSecure;
+  if (cookieSecureEnv !== undefined && cookieSecureEnv !== '') {
+    cookieSecure = toBool(cookieSecureEnv, false);
+  } else {
+    cookieSecure = nodeEnv === 'production' || baseIsHttps;
+  }
+
+  const trustProxy = toBool(process.env.TRUST_PROXY, baseIsHttps || nodeEnv === 'production');
+
   return {
     port: Number(process.env.PORT || 8000),
-    serverBaseUrl: process.env.SERVER_BASE_URL || `http://127.0.0.1:${process.env.PORT || 8000}`,
+    nodeEnv,
+    cookieSecure,
+    trustProxy,
+    // 启动时由 index 从 DB 载入；此处默认 0
+    sessionGlobalVersion: 0,
+    // 可选会话轮换盐（稳定配置，不再启动时随机）；默认空
+    sessionSalt: (process.env.SESSION_SALT || '').trim(),
+    serverBaseUrl,
     db: {
       kind: dbKind === 'postgres' ? 'postgres' : dbKind,
       host: process.env.PG_HOST || '127.0.0.1',

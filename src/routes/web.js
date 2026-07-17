@@ -8,6 +8,7 @@ import {
 } from '../services/dingtalkService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
+import { cookieOptions, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
 import { getSiteVisibilitySettings } from '../services/systemSettings.js';
 import { parseCookies } from '../services/adminSession.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
@@ -21,7 +22,7 @@ import {
 const WEB_OAUTH_COOKIE = 'bob_web_oauth_state';
 
 function getWebOAuthSecret(cfg) {
-  return `${cfg?.webSessionSecret || ''}:${cfg?.sessionSalt || ''}:dingtalk-oauth`;
+  return webOAuthSigningSecret(cfg);
 }
 
 function normalizeMallReturnTo(value) {
@@ -63,10 +64,14 @@ async function establishWebSession(req, res, userid) {
   const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
   await ensureAccount(db, { userid: finalUserid, name: finalName });
 
-  const sessionSecret = `${cfg?.webSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
+  const sessionSecret = webSessionSigningSecret(cfg);
   const sessionTtlSeconds = 86400 * 7;
-  const token = createWebSessionToken(sessionSecret, { userid: finalUserid, name: finalName }, sessionTtlSeconds);
-  res.setHeader('Set-Cookie', buildWebSessionCookie(token, sessionTtlSeconds));
+  const token = createWebSessionToken(
+    sessionSecret,
+    withSessionVersion({ userid: finalUserid, name: finalName }, cfg),
+    sessionTtlSeconds,
+  );
+  res.setHeader('Set-Cookie', buildWebSessionCookie(token, sessionTtlSeconds, cookieOptions(cfg)));
   return { userid: finalUserid, name: finalName, avatar: finalAvatar };
 }
 
@@ -169,9 +174,10 @@ export function webRouter() {
     }
   });
 
-  router.get('/logout', (_req, res) => {
+  router.get('/logout', (req, res) => {
+    const cfg = req.app?.locals?.cfg;
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Set-Cookie', buildClearWebSessionCookie());
+    res.setHeader('Set-Cookie', buildClearWebSessionCookie(cookieOptions(cfg)));
     return res.json({ ok: true });
   });
 

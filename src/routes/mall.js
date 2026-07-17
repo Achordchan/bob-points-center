@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 
 import { requireBobToken } from '../middleware/requireBobToken.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
+import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { createRedeemOrderInTx } from '../services/redeemService.js';
 import { ensureAccount, listLedgerRecords, transferBob } from '../services/ledgerService.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
@@ -481,6 +482,15 @@ function buildQrForRedeem({ exchange_id, userid, product_id, product_name, bob_a
 
 export function mallRouter() {
   const router = Router();
+  // 站点关闭时拦截业务 API（含购买/交易/公益/反馈写接口）；HTML 入口继续走页面 gate。
+  // 仅放行：首页/screen/events 页面与红包大屏公开读。
+  router.use((req, res, next) => {
+    const p = String(req.path || '');
+    if (req.method === 'GET' && (p === '/' || p === '/screen' || p === '/events' || p === '/red-packet/screen')) {
+      return next();
+    }
+    return requireSiteEnabled()(req, res, next);
+  });
   const pagesRoot = fileURLToPath(new URL('../pages/', import.meta.url));
 
   router.get('/', async (req, res) => {
@@ -1362,10 +1372,17 @@ export function mallRouter() {
           fromName: buyerName,
           toName: sellerName,
         });
-        await tx.run(
-          'UPDATE redeems SET userid = ? WHERE exchange_id = ?',
-          [buyerUserid, listing.exchange_id],
+        const ownership = await tx.run(
+          `UPDATE redeems
+              SET userid = ?
+            WHERE exchange_id = ?
+              AND userid = ?
+              AND fulfilled_at IS NULL`,
+          [buyerUserid, listing.exchange_id, sellerUserid],
         );
+        if (!Number(ownership?.changes || 0)) {
+          throw new Error('listing not active');
+        }
         await tx.run(
           `UPDATE redeem_cdks
               SET redeemed_by = ?, redeemed_name = ?

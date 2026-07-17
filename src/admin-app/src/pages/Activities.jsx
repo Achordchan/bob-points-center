@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { App, Alert, Button, Card, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
-import RichTextEditor from '../components/RichTextEditor.jsx';
+const RichTextEditor = lazy(() => import('../components/RichTextEditor.jsx'));
 import { amountText, formatTs, localTablePagination } from '../utils.js';
 import { hasPermission } from '../permissions.js';
 
@@ -316,14 +316,14 @@ function Charity({ me }) {
         <Form.Item name="project_id" label="项目ID" rules={[{ required: true }]}><Input readOnly className="readonly-input" /></Form.Item>
         <Form.Item name="project_name" label="项目名称" rules={[{ required: true }]}><Input readOnly={!canEdit} /></Form.Item>
         <Form.Item name="cover_image_url" label="项目封面"><ProductImageEditor emptyText="未设置项目封面" disabled={!canEdit} /></Form.Item>
-        <Form.Item name="summary" label="简介" rules={[{ required: true }]}><RichTextEditor minHeight={150} disabled={!canEdit} /></Form.Item>
-        <Form.Item name="rules_text" label="规则" rules={[{ required: true }]}><RichTextEditor minHeight={180} disabled={!canEdit} /></Form.Item>
+        <Form.Item name="summary" label="简介" rules={[{ required: true }]}><Suspense fallback={<Input.TextArea rows={4} disabled placeholder="编辑器加载中..." />}><RichTextEditor minHeight={150} disabled={!canEdit} /></Suspense></Form.Item>
+        <Form.Item name="rules_text" label="规则" rules={[{ required: true }]}><Suspense fallback={<Input.TextArea rows={5} disabled placeholder="编辑器加载中..." />}><RichTextEditor minHeight={180} disabled={!canEdit} /></Suspense></Form.Item>
         <Form.Item name="target_bob_amount" label="目标BOB币" rules={[{ required: true }]}><InputNumber min={1} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="tier_options" label="助力档位"><Input placeholder="10,20,50,100" readOnly={!canEdit} /></Form.Item>
         <Form.Item name="sort" label="排序"><InputNumber min={0} precision={0} disabled={!canEdit} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="status" label="状态"><Select disabled={!canEdit} options={[{ value: 'active', label: '启用' }, { value: 'paused', label: '暂停' }, { value: 'archived', label: '归档' }]} /></Form.Item>
         <Form.Item name="execution_status" label="执行状态"><Select disabled={!canEdit} options={[{ value: 'pending', label: '待执行' }, { value: 'in_progress', label: '执行中' }, { value: 'completed', label: '已完成' }]} /></Form.Item>
-        <Form.Item name="execution_note" label="执行说明"><RichTextEditor minHeight={130} disabled={!canEdit} /></Form.Item>
+        <Form.Item name="execution_note" label="执行说明"><Suspense fallback={<Input.TextArea rows={3} disabled placeholder="编辑器加载中..." />}><RichTextEditor minHeight={130} disabled={!canEdit} /></Suspense></Form.Item>
       </Form>
     </Drawer>
   </Space>;

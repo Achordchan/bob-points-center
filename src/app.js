@@ -15,10 +15,70 @@ import { startMallOpeningScheduler } from './services/mallOpeningScheduler.js';
 import { startDingtalkStream } from './services/dingtalkStreamService.js';
 import { handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './services/attendanceRewardService.js';
 import { getClientIp, safeAppendAuditLog } from './services/auditLogService.js';
+import { clientIpKey, createRateLimiter } from './middleware/rateLimit.js';
 
 export function createApp({ db, cfg } = {}) {
   const app = express();
-  app.use(express.json({ limit: '50mb' }));
+  if (cfg?.trustProxy) {
+    // 仅在配置信任反代时启用；配合 clientIp 工具只读 XFF。
+    app.set('trust proxy', 1);
+  }
+  // 默认 JSON 1MB；备份导入/图片 base64 上传路由单独放宽到 50MB。
+  app.use((req, res, next) => {
+    const pth = String(req.path || '');
+    const large = pth === '/admin/backup/import' || pth === '/admin/image-optimization/upload';
+    return express.json({
+      limit: large ? '50mb' : '1mb',
+      verify: (req2, _res, buf) => {
+        req2.rawBodyLength = buf?.length || 0;
+      },
+    })(req, res, next);
+  });
+
+  const oauthLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 30,
+    keyFn: (req) => clientIpKey(req, 'oauth'),
+    message: '登录请求过于频繁，请稍后再试',
+  });
+  const qrLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 120,
+    keyFn: (req) => clientIpKey(req, 'qr'),
+    message: '二维码请求过于频繁，请稍后再试',
+  });
+  const feedbackLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 20,
+    keyFn: (req) => clientIpKey(req, 'feedback'),
+    message: '反馈提交过于频繁，请稍后再试',
+  });
+  const transferLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 30,
+    keyFn: (req) => clientIpKey(req, 'transfer'),
+    message: '转账过于频繁，请稍后再试',
+  });
+  const sseLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 60,
+    keyFn: (req) => clientIpKey(req, 'sse'),
+    message: '实时连接请求过于频繁，请稍后再试',
+  });
+
+  app.use((req, res, next) => {
+    const p = String(req.path || '');
+    if (p.startsWith('/admin/oauth') || p.startsWith('/web/oauth')) return oauthLimiter(req, res, next);
+    if (p.startsWith('/qr/')) return qrLimiter(req, res, next);
+    if (p === '/mall/events') return sseLimiter(req, res, next);
+    if (req.method === 'POST' && (p === '/mall/more/feedback' || p.startsWith('/mall/more/feedback/'))) {
+      return feedbackLimiter(req, res, next);
+    }
+    if (req.method === 'POST' && (p === '/ledger/transfer' || p === '/mall/transfer')) {
+      return transferLimiter(req, res, next);
+    }
+    return next();
+  });
 
   const pagesAssetsRoot = fileURLToPath(new URL('./pages/assets/', import.meta.url));
   app.use('/assets', express.static(pagesAssetsRoot, { maxAge: 0 }));

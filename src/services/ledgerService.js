@@ -233,8 +233,12 @@ export async function transferBob(db, {
     await ensureAccount(tx, { userid: fromId, name: fromName });
     await ensureAccount(tx, { userid: toId, name: toName });
 
-    const fromRow = await tx.get('SELECT balance FROM accounts WHERE userid = ? FOR UPDATE', [fromId]);
-    const toRow = await tx.get('SELECT balance FROM accounts WHERE userid = ? FOR UPDATE', [toId]);
+    // 始终按 userid 字典序加锁，避免 A→B 与 B→A 并发死锁。
+    const lockOrder = [fromId, toId].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const uid of lockOrder) {
+      await tx.get('SELECT balance FROM accounts WHERE userid = ? FOR UPDATE', [uid]);
+    }
+    const fromRow = await tx.get('SELECT balance FROM accounts WHERE userid = ?', [fromId]);
     const fromBalance = Number(fromRow?.balance ?? 0);
     if (fromBalance < delta) {
       throw new Error('insufficient balance');

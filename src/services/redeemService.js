@@ -113,8 +113,9 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
 
   await ensureAccount(db, { userid });
 
+  // 先锁订单行，再按当前 owner/product/amount 校验，避免转售后旧二维码核销新买家订单。
   const existing = await db.get(
-    'SELECT exchange_id, userid, product_id, bob_amount, fulfilled_at FROM redeems WHERE exchange_id = ? LIMIT 1',
+    'SELECT exchange_id, userid, product_id, bob_amount, fulfilled_at FROM redeems WHERE exchange_id = ? LIMIT 1 FOR UPDATE',
     [String(exchangeId)],
   );
   if (existing) {
@@ -130,10 +131,26 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
       throw new Error('payload mismatch');
     }
 
-    await db.run(
-      'UPDATE redeems SET fulfilled_at = unixepoch(), fulfilled_by = ?, fulfilled_name = ? WHERE exchange_id = ? AND fulfilled_at IS NULL',
-      [cleanFulfilledBy || null, cleanFulfilledName || null, String(exchangeId)],
+    const updated = await db.run(
+      `UPDATE redeems
+          SET fulfilled_at = unixepoch(), fulfilled_by = ?, fulfilled_name = ?
+        WHERE exchange_id = ?
+          AND fulfilled_at IS NULL
+          AND userid = ?
+          AND product_id = ?
+          AND bob_amount = ?`,
+      [
+        cleanFulfilledBy || null,
+        cleanFulfilledName || null,
+        String(exchangeId),
+        String(userid),
+        String(productId),
+        Number(amount),
+      ],
     );
+    if (!Number(updated?.changes || 0)) {
+      throw new Error('payload mismatch');
+    }
     const cancelledListing = await db.get(
       `UPDATE mall_order_listings
           SET status = 'cancelled', cancelled_at = unixepoch(), updated_at = unixepoch()

@@ -1,3 +1,4 @@
+/* LEGACY_MALL_MODULE: 前台商城大文件；新功能优先拆到 src/routes/mall.js + 按业务域页面模块，避免继续堆叠本文件。 */
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
 

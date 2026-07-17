@@ -72,17 +72,24 @@ export function verifySessionToken(secret, token) {
   return payload;
 }
 
-export function buildSessionCookie(token) {
+function cookieSecureFlag(options) {
+  if (options && typeof options.secure === 'boolean') return options.secure;
+  return false;
+}
+
+export function buildSessionCookie(token, options = {}) {
+  // 使用 Path=/ + 无 Domain；生产补 Secure。不用 __Host- 前缀，避免破坏既有 Cookie 名与兼容。
   const attrs = [
     `bob_admin_session=${token}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
   ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
   return attrs.join('; ');
 }
 
-export function buildClearSessionCookie() {
+export function buildClearSessionCookie(options = {}) {
   const attrs = [
     'bob_admin_session=',
     'Path=/',
@@ -90,10 +97,11 @@ export function buildClearSessionCookie() {
     'SameSite=Lax',
     'Max-Age=0',
   ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
   return attrs.join('; ');
 }
 
-export function buildClearLegacyAdminPathCookie() {
+export function buildClearLegacyAdminPathCookie(options = {}) {
   const attrs = [
     'bob_admin_session=',
     'Path=/admin',
@@ -101,5 +109,6 @@ export function buildClearLegacyAdminPathCookie() {
     'SameSite=Lax',
     'Max-Age=0',
   ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
   return attrs.join('; ');
 }

@@ -2,13 +2,19 @@ import { Router } from 'express';
 
 import { verifyEncoded, QRSignError } from '../utils/qr.js';
 import { listRedeemsByUserid } from '../services/redeemService.js';
-import { requireBobToken } from '../middleware/requireBobToken.js';
+import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.js';
+import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { verifyBobToken } from '../services/bobTokenService.js';
+import { parseCookies } from '../services/adminSession.js';
+import { verifyWebSessionToken } from '../services/webSession.js';
+import { isSessionVersionValid, webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { redeemConfirmWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 export function redeemRouter() {
   const router = Router();
+  router.use(requireSiteEnabled());
 
   router.post('/confirm', requireBobToken(), async (req, res) => {
     const secret = req.app?.locals?.cfg?.qrSignSecret;
@@ -81,17 +87,35 @@ export function redeemRouter() {
     }
   });
 
+  function attachOptionalWebSession(req) {
+    if (req.webSession?.userid) return;
+    try {
+      const cfg = req.app?.locals?.cfg;
+      const cookies = parseCookies(req.header('cookie'));
+      const token = cookies.bob_web_session;
+      const secret = webSessionSigningSecret(cfg);
+      const payload = verifyWebSessionToken(secret, token);
+      if (payload?.userid && isSessionVersionValid(payload, cfg)) req.webSession = payload;
+    } catch {
+      // optional
+    }
+  }
+
   router.get('/', async (req, res) => {
-    const userid = req.query.userid ? String(req.query.userid) : '';
     const page = req.query.page ? Number(req.query.page) : 1;
     const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
-
-    if (!userid) {
-      return res.status(400).json({ error: 'missing userid' });
-    }
-
     try {
+      attachOptionalWebSession(req);
       const db = req.app.locals.db;
+      let userid = req.webSession?.userid ? String(req.webSession.userid).trim() : '';
+      if (!userid) {
+        const token = extractBobToken(req, { allowBody: false });
+        if (!token) return res.status(401).json({ error: 'unauthorized', message: '需要 web session 或 Header X-BOB-Token' });
+        const ok = await verifyBobToken(db, token);
+        if (!ok) return res.status(401).json({ error: 'invalid bob_token' });
+        userid = req.query.userid ? String(req.query.userid).trim() : '';
+        if (!userid) return res.status(400).json({ error: 'missing userid' });
+      }
       const result = await listRedeemsByUserid(db, { userid, page, pageSize });
       return res.json(result);
     } catch (err) {

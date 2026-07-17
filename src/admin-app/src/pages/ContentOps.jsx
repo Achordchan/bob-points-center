@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { App, Button, Card, Descriptions, Drawer, Form, Input, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
-import RichTextEditor from '../components/RichTextEditor.jsx';
+const RichTextEditor = lazy(() => import('../components/RichTextEditor.jsx'));
 import { formatTs, toUnix } from '../utils.js';
 import { hasPermission } from '../permissions.js';
+import { sanitizeRichHtml } from '../utils/sanitizeHtml.js';
 
 const feedbackStatusText = { pending: '待处理', processing: '处理中', resolved: '已处理', rejected: '已驳回' };
 const feedbackCategoryText = { bug: '问题反馈', question: '咨询问题', rule: '规则相关', suggestion: '建议', other: '其他' };
@@ -32,7 +33,8 @@ function plainText(value) {
 function FeedbackMessageContent({ item }) {
   const content = String(item?.content || '');
   if (item?.sender_type === 'admin' && /^\s*</.test(content)) {
-    return <div className="feedback-message-content rich-content" dangerouslySetInnerHTML={{ __html: content }} />;
+    const safe = sanitizeRichHtml(content);
+    return <div className="feedback-message-content rich-content" dangerouslySetInnerHTML={{ __html: safe }} />;
   }
   return <div className="feedback-message-content">{content || '-'}</div>;
 }
@@ -92,7 +94,7 @@ function Feedback({ canEdit }) {
     const values = await form.validateFields(['status']);
     const reply = form.getFieldValue('reply') || '';
     if (richTextIsEmpty(reply)) return message.warning('请先填写回复内容');
-    await api('/admin/content/feedback/handle', { method: 'POST', body: { id: handling.id, status: values.status, reply } });
+    await api('/admin/content/feedback/handle', { method: 'POST', body: { id: handling.id, status: values.status, reply: sanitizeRichHtml(reply) } });
     message.success('回复已发送');
     form.setFieldValue('reply', '');
     setHandling(null);
@@ -141,7 +143,7 @@ function Feedback({ canEdit }) {
               {canEdit && <Button onClick={saveStatus}>保存状态</Button>}
             </Space.Compact>
           </Form.Item>
-          <Form.Item label="追加回复" name="reply"><RichTextEditor minHeight={150} disabled={!canEdit} /></Form.Item>
+          <Form.Item label="追加回复" name="reply"><Suspense fallback={<Input.TextArea rows={4} disabled placeholder="编辑器加载中..." />}><RichTextEditor minHeight={150} disabled={!canEdit} /></Suspense></Form.Item>
           {canEdit && <div className="feedback-reply-actions"><Button type="primary" onClick={sendReply}>发送回复</Button></div>}
         </Form>
       </Space>}

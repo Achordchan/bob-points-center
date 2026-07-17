@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Lint (syntax + no latest + no bak + no tracked dist)
+        run: npm run lint
+      - name: Typecheck (node --check)
+        run: npm run typecheck
+      - name: Security / unit tests
+        run: npm test
+      - name: OpenAPI coverage (missing + extra fail)
+        run: npm run check:openapi
+      - name: Build admin app
+        run: npm run build

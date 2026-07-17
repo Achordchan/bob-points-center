@@ -1,0 +1,1638 @@
+// Auto-split from admin.js — backupRoutes.js
+import { requireAdminSession } from '../../middleware/requireAdminSession.js';
+import {
+  ADMIN_PERMISSION_CATALOG,
+  adminAccessMiddleware,
+  getAdminAccess,
+  hasAdminPermission,
+  isSuperAdminSession,
+  normalizePermissions,
+  serializeRole,
+} from '../../services/adminPermissionService.js';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  getAdminSessionPayload,
+  publishMallRealtimeFullRefresh,
+  runInTransaction,
+  toOptionalInt,
+  toPositiveInt,
+} from './shared.js';
+
+export function registerAdminBackupRoutes(router) {
+
+  // 设置类表：结构配置，适合日常导出恢复
+  const SETTINGS_TABLES = [
+    'system_settings',
+    'mall_products',
+    'charity_projects',
+    'mall_opening_schedule',
+    'content_faq',
+    'content_announcements',
+    'system_versions',
+    'admin_roles',
+  ];
+
+  // 全量表：包含用户数据（顺序决定导入顺序，users 必须最先）
+  const FULL_TABLES = [
+    'users',
+    'accounts',
+    'bob_tokens',
+    'ledger',
+    'redeems',
+    'mall_order_listings',
+    'redeem_cdks',
+    'mall_products',
+    'charity_projects',
+    'charity_contributions',
+    'attendance_reward_records',
+    'mall_opening_schedule',
+    'red_packet_activity',
+    'red_packet_items',
+    'content_faq',
+    'content_announcements',
+    'system_versions',
+    'user_feedback',
+    'user_feedback_messages',
+    'audit_logs',
+    'admin_roles',
+    'admin_user_roles',
+    'system_settings',
+  ];
+
+  async function dumpTable(db, tableName) {
+    // 查询失败必须抛错，禁止静默返回 []，否则损坏备份会被当成“空表成功”。
+    try {
+      const rows = await db.all(`SELECT * FROM ${tableName} ORDER BY id ASC`, []);
+      return Array.isArray(rows) ? rows : [];
+    } catch (errOrder) {
+      // 无 id 列的表（如 system_settings、mall_opening_schedule）
+      try {
+        const rows = await db.all(`SELECT * FROM ${tableName}`, []);
+        return Array.isArray(rows) ? rows : [];
+      } catch (errPlain) {
+        const msg = String(errPlain?.message || errOrder?.message || errPlain || errOrder);
+        throw new Error(`导出表 ${tableName} 失败: ${msg}`);
+      }
+    }
+  }
+
+  function backupStorageDir() {
+    // 优先 BOB_BACKUP_DIR；默认使用项目父目录 bob-admin-backups，避免被部署 rsync --delete 清掉。
+    if (process.env.BOB_BACKUP_DIR) return String(process.env.BOB_BACKUP_DIR);
+    return path.join(path.dirname(fileURLToPath(new URL('../../../', import.meta.url))), 'bob-admin-backups');
+  }
+
+  function safeBackupFilename(filename) {
+    const name = path.basename(String(filename || '').trim());
+    // 兼容旧：YYYYMMDD_HHMM；新：YYYYMMDD_HHMMSS_随机后缀，避免同一分钟互相覆盖
+    if (!/^bob_backup_(settings|full)_\d{8}_\d{4,6}(?:_[a-zA-Z0-9]+)?\.json$/.test(name)) {
+      throw new Error('备份文件名不合法');
+    }
+    return name;
+  }
+
+  function buildBackupFilename(mode) {
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, '0'),
+      String(now.getDate()).padStart(2, '0'),
+      '_',
+      String(now.getHours()).padStart(2, '0'),
+      String(now.getMinutes()).padStart(2, '0'),
+      String(now.getSeconds()).padStart(2, '0'),
+    ].join('');
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `bob_backup_${mode}_${stamp}_${rand}.json`;
+  }
+
+  function isFullBackupFilename(filename) {
+    return /^bob_backup_full_/.test(String(filename || ''));
+  }
+
+  function backupFilePath(filename) {
+    return path.join(backupStorageDir(), safeBackupFilename(filename));
+  }
+
+  function writeBackupFile(filename, payload) {
+    const dir = backupStorageDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // 部分文件系统/属主下 chmod 可能失败，不阻断写入
+    }
+    const filePath = backupFilePath(filename);
+    writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    try {
+      chmodSync(filePath, 0o600);
+    } catch {
+      // ignore
+    }
+    const stat = statSync(filePath);
+    return { filePath, size: stat.size };
+  }
+
+  async function appendBackupHistory(db, req, input) {
+    const payload = getAdminSessionPayload(req) || {};
+    await db.run(
+      `INSERT INTO admin_backup_history(action, mode, filename, status, actor_id, actor_name, details, created_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+      [
+        input.action,
+        input.mode,
+        input.filename || '',
+        input.status || '完成',
+        payload?.userid ? String(payload.userid) : '',
+        payload?.name ? String(payload.name) : '',
+        input.details ? JSON.stringify(input.details) : null,
+      ],
+    );
+  }
+
+  router.get('/backup/history', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const limit = Math.min(100, Math.max(1, toPositiveInt(req.query?.limit, 30)));
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const rows = await db.all(
+        `SELECT id, action, mode, filename, status, actor_id, actor_name, details, created_at AS at
+         FROM admin_backup_history
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        [limit],
+      );
+      return res.json({ ok: true, data: rows || [] });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  function redactBackupSecrets(tableName, rows, { keepSecrets = false } = {}) {
+    const list = Array.isArray(rows) ? rows : [];
+    // 自动恢复点必须保留密钥，否则回滚后钉钉 OAuth/通知/Stream 会中断。
+    // 普通导出仍脱敏。
+    if (keepSecrets) return list.map((row) => ({ ...row }));
+    if (tableName === 'bob_tokens') {
+      return list.map((row) => ({
+        ...row,
+        token: null,
+      }));
+    }
+    if (tableName === 'system_settings') {
+      return list.map((row) => {
+        const key = String(row?.key || '');
+        if (key !== 'dingtalk_connection_settings') return row;
+        try {
+          const parsed = JSON.parse(String(row.value || '{}'));
+          if (parsed && typeof parsed === 'object') {
+            if (parsed.appSecret) parsed.appSecret = '';
+            if (parsed.app_secret) parsed.app_secret = '';
+            return { ...row, value: JSON.stringify(parsed) };
+          }
+        } catch {
+          // keep original if not json
+        }
+        return row;
+      });
+    }
+    return list;
+  }
+
+  async function mergeSystemSettingValue(tx, key, value) {
+    const k = String(key || '');
+    if (k !== 'dingtalk_connection_settings') return value ?? null;
+    let incoming = {};
+    try {
+      incoming = JSON.parse(String(value || '{}')) || {};
+    } catch {
+      return value ?? null;
+    }
+    if (!incoming || typeof incoming !== 'object') return value ?? null;
+    const secretIn = String(incoming.appSecret || incoming.app_secret || '').trim();
+    if (secretIn) return JSON.stringify(incoming);
+    const existing = await tx.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', [k]);
+    let current = {};
+    try {
+      current = JSON.parse(String(existing?.value || '{}')) || {};
+    } catch {
+      current = {};
+    }
+    if (current && typeof current === 'object') {
+      if (current.appSecret) incoming.appSecret = current.appSecret;
+      if (current.app_secret) incoming.app_secret = current.app_secret;
+    }
+    return JSON.stringify(incoming);
+  }
+
+  // GET /admin/backup/export?mode=settings|full
+  router.get('/backup/export', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const mode = req.query?.mode === 'full' ? 'full' : 'settings';
+    const tables = mode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+    try {
+      // 全量备份仅超级管理员；设置备份保持 integrations:export 权限控制。
+      if (mode === 'full' && !isSuperAdminSession(req.app?.locals?.cfg, req.adminSession || {})) {
+        return res.status(403).json({ error: '全量备份仅超级管理员可导出' });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      const data = {};
+      for (const t of tables) {
+        // eslint-disable-next-line no-await-in-loop
+        data[t] = redactBackupSecrets(t, await dumpTable(db, t));
+      }
+      const now = new Date();
+      const filename = buildBackupFilename(mode);
+      const payload = {
+        _meta: {
+          version: 1,
+          mode,
+          filename,
+          exportedAt: now.toISOString(),
+          tables: Object.fromEntries(tables.map((t) => [t, data[t]?.length ?? 0])),
+          secretsRedacted: true,
+        },
+        data,
+      };
+      const stored = writeBackupFile(filename, payload);
+      await appendBackupHistory(db, req, {
+        action: '导出',
+        mode,
+        filename,
+        status: '完成',
+        details: { ...payload._meta, size: stored.size, downloadable: true },
+      });
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.json(payload);
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/backup/history/:id/download', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const id = toPositiveInt(req.params?.id, 0);
+    if (!id) return res.status(400).json({ error: '缺少备份记录 ID' });
+    try {
+      const row = await db.get(
+        `SELECT id, action, filename, mode, details
+         FROM admin_backup_history
+         WHERE id = ?
+         LIMIT 1`,
+        [id],
+      );
+      if (!row || row.action !== '导出' || !row.filename) {
+        return res.status(404).json({ error: '未找到可下载的备份文件' });
+      }
+      const filename = safeBackupFilename(row.filename);
+      const modeHint = String(row.mode || '').trim().toLowerCase();
+      const isFull = modeHint === 'full' || isFullBackupFilename(filename);
+      let isRecoveryPoint = false;
+      let secretsNotRedacted = false;
+      try {
+        const details = row.details ? JSON.parse(String(row.details)) : null;
+        isRecoveryPoint = details?.purpose === 'pre_import_recovery_point';
+        secretsNotRedacted = details?.secretsRedacted === false;
+      } catch {
+        isRecoveryPoint = false;
+        secretsNotRedacted = false;
+      }
+      // 全量备份 / 导入前恢复点（含明文 AppSecret）仅超级管理员可下载。
+      // 设置模式的普通导出仍可由 integrations:export 下载（已脱敏）。
+      const needsSuper = isFull || isRecoveryPoint || secretsNotRedacted;
+      if (needsSuper && !isSuperAdminSession(req.app?.locals?.cfg, req.adminSession || {})) {
+        return res.status(403).json({
+          error: isFull
+            ? '全量备份仅超级管理员可下载'
+            : '含密钥的恢复点仅超级管理员可下载',
+        });
+      }
+      const filePath = backupFilePath(filename);
+      if (!existsSync(filePath)) {
+        return res.status(404).json({ error: '服务器上的备份文件不存在，请重新导出' });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.download(filePath, filename);
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  // POST /admin/backup/import
+  // body: { backup: <备份 JSON 对象>, mode: 'merge'|'overwrite' }
+  // 安全约束：预校验 schema、覆盖前自动快照、全量在单事务内执行；任意失败回滚，禁止吞错后返回成功。
+  router.post('/backup/import', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const backup = req.body?.backup;
+    const mode = req.body?.mode === 'overwrite' ? 'overwrite' : 'merge';
+    const requestedFilename = String(req.body?.filename || backup?._meta?.filename || '').trim();
+
+    const failHistory = async (status, details) => {
+      try {
+        await appendBackupHistory(db, req, {
+          action: '导入',
+          mode,
+          filename: requestedFilename,
+          status,
+          details,
+        });
+      } catch {
+        // 历史记录失败不影响主错误返回
+      }
+    };
+
+    if (!backup || typeof backup !== 'object' || !backup.data || typeof backup.data !== 'object') {
+      return res.status(400).json({ error: '无效的备份文件格式' });
+    }
+    if (backup._meta?.version !== 1) {
+      return res.status(400).json({ error: `不支持的备份版本: ${backup._meta?.version}` });
+    }
+
+    const backupMode = backup._meta?.mode === 'full' ? 'full' : 'settings';
+    const backupData = backup.data;
+    const allowedTables = new Set(backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES);
+    const unknownTables = Object.keys(backupData).filter((name) => !allowedTables.has(name));
+    if (unknownTables.length > 0) {
+      await failHistory('失败', { reason: 'unknown_tables', unknownTables, backupMode });
+      return res.status(400).json({
+        error: `备份包含未知表，已拒绝导入: ${unknownTables.join(', ')}`,
+        unknownTables,
+      });
+    }
+
+    // overwrite 必须包含该模式下的完整表集合；缺失表不得被当成空数组后 DELETE。
+    const expectedTables = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+    if (mode === 'overwrite') {
+      const missingTables = expectedTables.filter((name) => backupData[name] == null);
+      if (missingTables.length > 0) {
+        await failHistory('失败', { reason: 'missing_tables_for_overwrite', missingTables, backupMode });
+        return res.status(400).json({
+          error: `覆盖导入要求备份包含全部 ${expectedTables.length} 张表，缺失: ${missingTables.join(', ')}`,
+          missingTables,
+          backupMode,
+        });
+      }
+    }
+
+    const parseRolePermissions = (value) => {
+      if (Array.isArray(value)) return normalizePermissions(value);
+      try {
+        return normalizePermissions(JSON.parse(String(value || '[]')));
+      } catch (err) {
+        throw new Error(`角色权限 JSON 无效: ${String(err?.message || err)}`);
+      }
+    };
+
+    const nowTs = () => Math.floor(Date.now() / 1000);
+
+    const requireArray = (tableName) => {
+      if (backupData[tableName] == null) return null;
+      if (!Array.isArray(backupData[tableName])) {
+        throw new Error(`备份表 ${tableName} 必须是数组`);
+      }
+      return backupData[tableName];
+    };
+
+    const bumpSerial = async (tx, tableName) => {
+      await tx.exec(
+        `SELECT setval(pg_get_serial_sequence('${tableName}', 'id'), COALESCE((SELECT MAX(id) FROM ${tableName}), 1), true)`,
+        [],
+      );
+    };
+
+    const execOrThrow = async (tx, sql, params, context) => {
+      try {
+        await tx.exec(sql, params);
+      } catch (err) {
+        const msg = String(err?.message || err);
+        throw new Error(`${context}: ${msg}`);
+      }
+    };
+
+    // 预校验：不改库，只验证结构与关键键，避免覆盖删除后才发现备份不可恢复。
+    const preflightErrors = [];
+    const pushPreflight = (table, index, message) => {
+      preflightErrors.push({ table, index, message });
+    };
+
+    try {
+      for (const tableName of Object.keys(backupData)) {
+        requireArray(tableName);
+      }
+
+      const systemSettings = requireArray('system_settings') || [];
+      systemSettings.forEach((row, index) => {
+        if (!row || typeof row !== 'object' || !row.key) pushPreflight('system_settings', index, '缺少 key');
+      });
+
+      const adminRoles = requireArray('admin_roles') || [];
+      adminRoles.forEach((row, index) => {
+        if (!row?.code || !row?.name) pushPreflight('admin_roles', index, '缺少 code/name');
+        try {
+          parseRolePermissions(row?.permissions);
+        } catch (err) {
+          pushPreflight('admin_roles', index, String(err.message || err));
+        }
+      });
+
+      const mallProducts = requireArray('mall_products') || [];
+      mallProducts.forEach((row, index) => {
+        if (!row?.product_id) pushPreflight('mall_products', index, '缺少 product_id');
+      });
+
+      const charityProjects = requireArray('charity_projects') || [];
+      charityProjects.forEach((row, index) => {
+        if (!row?.project_id) pushPreflight('charity_projects', index, '缺少 project_id');
+      });
+
+      const mallOpening = requireArray('mall_opening_schedule') || [];
+      if (mallOpening.length > 0 && (!mallOpening[0] || typeof mallOpening[0] !== 'object')) {
+        pushPreflight('mall_opening_schedule', 0, '行数据无效');
+      }
+
+      for (const tableName of ['content_faq', 'content_announcements', 'system_versions']) {
+        const rows = requireArray(tableName) || [];
+        rows.forEach((row, index) => {
+          if (!row?.id) pushPreflight(tableName, index, '缺少 id');
+        });
+      }
+
+      if (backupMode === 'full') {
+        const users = requireArray('users') || [];
+        users.forEach((row, index) => {
+          if (!row?.userid) pushPreflight('users', index, '缺少 userid');
+        });
+
+        const accounts = requireArray('accounts') || [];
+        accounts.forEach((row, index) => {
+          if (!row?.userid) pushPreflight('accounts', index, '缺少 userid');
+        });
+
+        const bobTokens = requireArray('bob_tokens') || [];
+        bobTokens.forEach((row, index) => {
+          if (!row?.token_hash) pushPreflight('bob_tokens', index, '缺少 token_hash');
+        });
+
+        const ledger = requireArray('ledger') || [];
+        ledger.forEach((row, index) => {
+          if (!row?.id || !row?.userid) pushPreflight('ledger', index, '缺少 id/userid');
+        });
+
+        const redeems = requireArray('redeems') || [];
+        redeems.forEach((row, index) => {
+          if (!row?.exchange_id) pushPreflight('redeems', index, '缺少 exchange_id');
+        });
+
+        const listings = requireArray('mall_order_listings') || [];
+        listings.forEach((row, index) => {
+          if (!row?.listing_id || !row?.exchange_id || !row?.seller_userid) {
+            pushPreflight('mall_order_listings', index, '缺少 listing_id/exchange_id/seller_userid');
+          }
+        });
+
+        const cdks = requireArray('redeem_cdks') || [];
+        cdks.forEach((row, index) => {
+          if (!row?.cdk_code) pushPreflight('redeem_cdks', index, '缺少 cdk_code');
+        });
+
+        const contributions = requireArray('charity_contributions') || [];
+        contributions.forEach((row, index) => {
+          if (!row?.id || !row?.project_id || !row?.userid) {
+            pushPreflight('charity_contributions', index, '缺少 id/project_id/userid');
+          }
+        });
+
+        const attendance = requireArray('attendance_reward_records') || [];
+        attendance.forEach((row, index) => {
+          if (!row?.userid || !row?.work_date || !row?.check_time_ms) {
+            pushPreflight('attendance_reward_records', index, '缺少 userid/work_date/check_time_ms');
+          }
+        });
+
+        const feedback = requireArray('user_feedback') || [];
+        feedback.forEach((row, index) => {
+          if (!row?.id || !row?.userid || row?.content == null) {
+            pushPreflight('user_feedback', index, '缺少 id/userid/content');
+          }
+        });
+
+        const feedbackMessages = requireArray('user_feedback_messages') || [];
+        feedbackMessages.forEach((row, index) => {
+          if (!row?.id || !row?.feedback_id || !row?.content) {
+            pushPreflight('user_feedback_messages', index, '缺少 id/feedback_id/content');
+          }
+        });
+
+        const auditLogs = requireArray('audit_logs') || [];
+        auditLogs.forEach((row, index) => {
+          if (!row?.id || !row?.event_type) pushPreflight('audit_logs', index, '缺少 id/event_type');
+        });
+
+        const adminUserRoles = requireArray('admin_user_roles') || [];
+        adminUserRoles.forEach((row, index) => {
+          if (!row?.userid || (!row?.role_id && !row?.role_code)) {
+            pushPreflight('admin_user_roles', index, '缺少 userid/role_id(role_code)');
+          }
+        });
+
+        const activities = requireArray('red_packet_activity') || [];
+        activities.forEach((row, index) => {
+          if (!row?.id) pushPreflight('red_packet_activity', index, '缺少 id');
+        });
+
+        const items = requireArray('red_packet_items') || [];
+        items.forEach((row, index) => {
+          if (!row?.activity_id || row?.amount == null) {
+            pushPreflight('red_packet_items', index, '缺少 activity_id/amount');
+          }
+        });
+      }
+    } catch (err) {
+      await failHistory('失败', { reason: 'preflight_exception', message: String(err?.message || err), backupMode });
+      return res.status(400).json({ error: String(err?.message || err) });
+    }
+
+    if (preflightErrors.length > 0) {
+      const sample = preflightErrors.slice(0, 20);
+      await failHistory('失败', {
+        reason: 'preflight_failed',
+        backupMode,
+        errorCount: preflightErrors.length,
+        errors: sample,
+      });
+      return res.status(400).json({
+        error: `备份预校验失败，共 ${preflightErrors.length} 处错误，未修改数据库`,
+        errorCount: preflightErrors.length,
+        errors: sample,
+      });
+    }
+
+    // 覆盖导入前自动生成恢复点，防止中途失败后无回滚文件。
+    let recoveryPoint = null;
+    try {
+      const tablesToSnapshot = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+      const snapshotData = {};
+      for (const tableName of tablesToSnapshot) {
+        // eslint-disable-next-line no-await-in-loop
+        // 恢复点保留密钥（keepSecrets），与普通导出脱敏分离。
+        snapshotData[tableName] = redactBackupSecrets(tableName, await dumpTable(db, tableName), { keepSecrets: true });
+      }
+      const stampDate = new Date();
+      const recoveryFilename = buildBackupFilename(backupMode);
+      const recoveryPayload = {
+        _meta: {
+          version: 1,
+          mode: backupMode,
+          filename: recoveryFilename,
+          exportedAt: stampDate.toISOString(),
+          purpose: 'pre_import_recovery_point',
+          importMode: mode,
+          sourceFilename: requestedFilename || null,
+          secretsRedacted: false,
+          tables: Object.fromEntries(tablesToSnapshot.map((t) => [t, snapshotData[t]?.length ?? 0])),
+        },
+        data: snapshotData,
+      };
+      const stored = writeBackupFile(recoveryFilename, recoveryPayload);
+      recoveryPoint = {
+        filename: recoveryFilename,
+        size: stored.size,
+        mode: backupMode,
+        tables: recoveryPayload._meta.tables,
+      };
+      await appendBackupHistory(db, req, {
+        action: '导出',
+        mode: backupMode,
+        filename: recoveryFilename,
+        status: '完成',
+        details: {
+          ...recoveryPayload._meta,
+          size: stored.size,
+          downloadable: true,
+          purpose: 'pre_import_recovery_point',
+          secretsRedacted: false,
+          sensitive: true,
+        },
+      });
+    } catch (err) {
+      await failHistory('失败', {
+        reason: 'recovery_point_failed',
+        message: String(err?.message || err),
+        backupMode,
+        mode,
+      });
+      return res.status(500).json({
+        error: `导入前自动快照失败，已中止导入: ${String(err?.message || err)}`,
+      });
+    }
+
+    const importedRoleIdMap = new Map();
+
+    try {
+      const report = await runInTransaction(db, async (tx) => {
+        const report = {};
+        let failedTable = null;
+        let failedIndex = null;
+
+        const markAndThrow = (table, index, err) => {
+          failedTable = table;
+          failedIndex = index;
+          const msg = String(err?.message || err);
+          throw new Error(`导入失败 @${table}${index == null ? '' : `[${index}]`}: ${msg}`);
+        };
+
+        // system_settings：始终 upsert，不清除；钉钉 AppSecret 若备份为空则保留库内现有值
+        {
+          const rows = requireArray('system_settings') || [];
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.key) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              const mergedValue = await mergeSystemSettingValue(tx, row.key, row.value ?? null);
+              // eslint-disable-next-line no-await-in-loop
+              await execOrThrow(
+                tx,
+                'INSERT INTO system_settings(key, value, updated_at) VALUES($1, $2, $3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+                [row.key, mergedValue, row.updated_at ?? nowTs()],
+                `system_settings[${i}]`,
+              );
+              count++;
+            } catch (err) {
+              markAndThrow('system_settings', i, err);
+            }
+          }
+          report.system_settings = count;
+        }
+
+        // admin_roles
+        {
+          const rows = requireArray('admin_roles') || [];
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.code || !row?.name) continue;
+            const code = String(row.code).trim();
+            const name = String(row.name).trim();
+            const permissions = parseRolePermissions(row.permissions);
+            const now = nowTs();
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              const existing = await tx.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [code]);
+              if (existing?.id) {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `UPDATE admin_roles
+                   SET name = $1, permissions = $2, is_builtin = $3, is_enabled = $4, updated_at = $5
+                   WHERE code = $6`,
+                  [name, JSON.stringify(permissions), row.is_builtin ?? 0, row.is_enabled ?? 1, row.updated_at ?? now, code],
+                  `admin_roles[${i}] update`,
+                );
+                importedRoleIdMap.set(Number(row.id), Number(existing.id));
+              } else {
+                const backupId = toOptionalInt(row.id);
+                let insertedWithBackupId = false;
+                if (backupId) {
+                  // eslint-disable-next-line no-await-in-loop
+                  const occupied = await tx.get('SELECT id FROM admin_roles WHERE id = ? LIMIT 1', [backupId]);
+                  if (!occupied?.id) {
+                    // eslint-disable-next-line no-await-in-loop
+                    await execOrThrow(
+                      tx,
+                      `INSERT INTO admin_roles(id, code, name, permissions, is_builtin, is_enabled, created_at, updated_at)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+                      [
+                        backupId,
+                        code,
+                        name,
+                        JSON.stringify(permissions),
+                        row.is_builtin ?? 0,
+                        row.is_enabled ?? 1,
+                        row.created_at ?? now,
+                        row.updated_at ?? now,
+                      ],
+                      `admin_roles[${i}] insert-id`,
+                    );
+                    insertedWithBackupId = true;
+                  }
+                }
+                if (!insertedWithBackupId) {
+                  // eslint-disable-next-line no-await-in-loop
+                  await execOrThrow(
+                    tx,
+                    `INSERT INTO admin_roles(code, name, permissions, is_builtin, is_enabled, created_at, updated_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7)
+                     ON CONFLICT(code) DO UPDATE SET
+                       name=excluded.name, permissions=excluded.permissions, is_builtin=excluded.is_builtin,
+                       is_enabled=excluded.is_enabled, updated_at=excluded.updated_at`,
+                    [
+                      code,
+                      name,
+                      JSON.stringify(permissions),
+                      row.is_builtin ?? 0,
+                      row.is_enabled ?? 1,
+                      row.created_at ?? now,
+                      row.updated_at ?? now,
+                    ],
+                    `admin_roles[${i}] upsert`,
+                  );
+                }
+                // eslint-disable-next-line no-await-in-loop
+                const saved = await tx.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [code]);
+                if (saved?.id) importedRoleIdMap.set(Number(row.id), Number(saved.id));
+              }
+              count++;
+            } catch (err) {
+              markAndThrow('admin_roles', i, err);
+            }
+          }
+          try {
+            await bumpSerial(tx, 'admin_roles');
+          } catch (err) {
+            markAndThrow('admin_roles', null, err);
+          }
+          report.admin_roles = count;
+        }
+
+        // mall_products
+        {
+          const rowsRaw = requireArray('mall_products');
+          const rows = rowsRaw || [];
+          if (mode === 'overwrite' && rowsRaw !== null) {
+            await execOrThrow(tx, 'DELETE FROM mall_products', [], 'mall_products overwrite delete');
+          }
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.product_id) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await execOrThrow(
+                tx,
+                `INSERT INTO mall_products(product_id, product_name, bob_amount, stock, limit_per_user, limit_round, cdk_enabled, status, sort, image_url, remark, created_at, updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                 ON CONFLICT(product_id) DO UPDATE SET
+                   product_name=excluded.product_name, bob_amount=excluded.bob_amount, stock=excluded.stock,
+                   limit_per_user=excluded.limit_per_user, limit_round=excluded.limit_round, cdk_enabled=excluded.cdk_enabled, status=excluded.status, sort=excluded.sort,
+                   image_url=excluded.image_url, remark=excluded.remark, updated_at=excluded.updated_at`,
+                [
+                  row.product_id,
+                  row.product_name,
+                  row.bob_amount,
+                  row.stock ?? null,
+                  row.limit_per_user ?? 0,
+                  row.limit_round ?? 1,
+                  row.cdk_enabled ?? 0,
+                  row.status ?? 'on',
+                  row.sort ?? null,
+                  row.image_url ?? null,
+                  row.remark ?? null,
+                  row.created_at ?? nowTs(),
+                  row.updated_at ?? nowTs(),
+                ],
+                `mall_products[${i}]`,
+              );
+              count++;
+            } catch (err) {
+              markAndThrow('mall_products', i, err);
+            }
+          }
+          report.mall_products = count;
+        }
+
+        // charity_projects
+        {
+          const rowsRaw = requireArray('charity_projects');
+          const rows = rowsRaw || [];
+          if (mode === 'overwrite' && rowsRaw !== null) {
+            await execOrThrow(tx, 'DELETE FROM charity_contributions', [], 'charity_contributions overwrite delete');
+            await execOrThrow(tx, 'DELETE FROM charity_projects', [], 'charity_projects overwrite delete');
+          }
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.project_id) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await execOrThrow(
+                tx,
+                `INSERT INTO charity_projects(project_id, project_name, cover_image_url, summary, rules_text, target_bob_amount, tier_options_json, status, execution_status, execution_note, sort, created_at, updated_at, executed_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                   project_name=excluded.project_name, cover_image_url=excluded.cover_image_url, summary=excluded.summary,
+                   rules_text=excluded.rules_text, target_bob_amount=excluded.target_bob_amount, tier_options_json=excluded.tier_options_json,
+                   status=excluded.status, execution_status=excluded.execution_status, execution_note=excluded.execution_note,
+                   sort=excluded.sort, updated_at=excluded.updated_at, executed_at=excluded.executed_at`,
+                [
+                  row.project_id,
+                  row.project_name ?? row.project_id,
+                  row.cover_image_url ?? null,
+                  row.summary ?? '',
+                  row.rules_text ?? '',
+                  row.target_bob_amount ?? 0,
+                  row.tier_options_json ?? '[10,20,50,100]',
+                  row.status ?? 'active',
+                  row.execution_status ?? 'pending',
+                  row.execution_note ?? null,
+                  row.sort ?? null,
+                  row.created_at ?? nowTs(),
+                  row.updated_at ?? nowTs(),
+                  row.executed_at ?? null,
+                ],
+                `charity_projects[${i}]`,
+              );
+              count++;
+            } catch (err) {
+              markAndThrow('charity_projects', i, err);
+            }
+          }
+          report.charity_projects = count;
+        }
+
+        // mall_opening_schedule
+        {
+          const rows = requireArray('mall_opening_schedule') || [];
+          if (rows.length > 0) {
+            const row = rows[0];
+            try {
+              await execOrThrow(
+                tx,
+                `INSERT INTO mall_opening_schedule(id, is_open, auto_enabled, next_open_at, interval_minutes, open_duration_minutes, remind_before_seconds, close_remind_seconds, remind_for_open_at, open_notify_for_open_at, close_remind_for_close_at, close_notify_for_close_at, updated_at)
+                 VALUES(1,$1,$2,$3,$4,$5,$6,$7,NULL,NULL,NULL,NULL,$8)
+                 ON CONFLICT(id) DO UPDATE SET
+                   is_open=excluded.is_open, auto_enabled=excluded.auto_enabled, next_open_at=excluded.next_open_at,
+                   interval_minutes=excluded.interval_minutes, open_duration_minutes=excluded.open_duration_minutes,
+                   remind_before_seconds=excluded.remind_before_seconds, close_remind_seconds=excluded.close_remind_seconds,
+                   remind_for_open_at=NULL, open_notify_for_open_at=NULL, close_remind_for_close_at=NULL, close_notify_for_close_at=NULL,
+                   updated_at=excluded.updated_at`,
+                [
+                  row.is_open ?? 1,
+                  row.auto_enabled ?? 0,
+                  row.next_open_at ?? null,
+                  row.interval_minutes ?? null,
+                  row.open_duration_minutes ?? null,
+                  row.remind_before_seconds ?? null,
+                  row.close_remind_seconds ?? null,
+                  row.updated_at ?? nowTs(),
+                ],
+                'mall_opening_schedule[0]',
+              );
+              report.mall_opening_schedule = 1;
+            } catch (err) {
+              markAndThrow('mall_opening_schedule', 0, err);
+            }
+          }
+        }
+
+        // content_faq / content_announcements / system_versions
+        const contentTables = [
+          {
+            name: 'content_faq',
+            sql: 'INSERT INTO content_faq(id, question, answer, sort, is_enabled, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',
+            params: (row) => [
+              row.id,
+              row.question ?? '',
+              row.answer ?? '',
+              row.sort ?? 0,
+              row.is_enabled ?? 1,
+              row.created_at ?? nowTs(),
+              row.updated_at ?? nowTs(),
+            ],
+          },
+          {
+            name: 'content_announcements',
+            sql: 'INSERT INTO content_announcements(id, title, content, level, sort, is_enabled, publish_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING',
+            params: (row) => [
+              row.id,
+              row.title ?? '',
+              row.content ?? '',
+              row.level ?? 'info',
+              row.sort ?? 0,
+              row.is_enabled ?? 1,
+              row.publish_at ?? null,
+              row.created_at ?? nowTs(),
+              row.updated_at ?? nowTs(),
+            ],
+          },
+          {
+            name: 'system_versions',
+            sql: 'INSERT INTO system_versions(id, version_name, release_notes, is_enabled, publish_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',
+            params: (row) => [
+              row.id,
+              row.version_name ?? '',
+              row.release_notes ?? null,
+              row.is_enabled ?? 1,
+              row.publish_at ?? null,
+              row.created_at ?? nowTs(),
+              row.updated_at ?? nowTs(),
+            ],
+          },
+        ];
+
+        for (const table of contentTables) {
+          const rowsRaw = requireArray(table.name);
+          const rows = rowsRaw || [];
+          if (mode === 'overwrite' && rowsRaw !== null) {
+            await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
+          }
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.id) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await execOrThrow(tx, table.sql, table.params(row), `${table.name}[${i}]`);
+              count++;
+            } catch (err) {
+              markAndThrow(table.name, i, err);
+            }
+          }
+          if (mode === 'overwrite' && count > 0) {
+            try {
+              await bumpSerial(tx, table.name);
+            } catch (err) {
+              markAndThrow(table.name, null, err);
+            }
+          }
+          report[table.name] = count;
+        }
+
+        if (backupMode === 'full') {
+          // users overwrite cascade
+          // 仅当备份包含 users 数组时才清空用户链路，避免 settings/full 混用导致误删。
+          {
+            const rows = Array.isArray(backupData.users) ? backupData.users : null;
+            if (rows && mode === 'overwrite') {
+              const deleteOrder = [
+                'admin_user_roles',
+                'audit_logs',
+                'attendance_reward_records',
+                'ledger',
+                'mall_order_listings',
+                'redeem_cdks',
+                'redeems',
+                'charity_contributions',
+                'user_feedback_messages',
+                'user_feedback',
+                'bob_tokens',
+                'accounts',
+                'users',
+              ];
+              for (const tableName of deleteOrder) {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(tx, `DELETE FROM ${tableName}`, [], `${tableName} overwrite delete`);
+              }
+            }
+            let count = 0;
+            const userRows = rows || [];
+            for (let i = 0; i < userRows.length; i++) {
+              const row = userRows[i];
+              if (!row?.userid) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  'INSERT INTO users(userid, name, is_admin, created_at) VALUES($1,$2,$3,$4) ON CONFLICT(userid) DO UPDATE SET name=excluded.name, is_admin=excluded.is_admin',
+                  [row.userid, row.name ?? null, row.is_admin ?? 0, row.created_at ?? nowTs()],
+                  `users[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('users', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'users');
+            } catch (err) {
+              markAndThrow('users', null, err);
+            }
+            if (rows) report.users = count;
+          }
+
+          // admin_user_roles
+          {
+            const rows = requireArray('admin_user_roles') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid || (!row?.role_id && !row?.role_code)) continue;
+              try {
+                let roleId = importedRoleIdMap.get(Number(row.role_id)) || toOptionalInt(row.role_id);
+                // eslint-disable-next-line no-await-in-loop
+                let role = roleId ? await tx.get('SELECT id FROM admin_roles WHERE id = ? LIMIT 1', [roleId]) : null;
+                if (!role?.id && row.role_code) {
+                  // eslint-disable-next-line no-await-in-loop
+                  const byCode = await tx.get('SELECT id FROM admin_roles WHERE code = ? LIMIT 1', [String(row.role_code)]);
+                  roleId = byCode?.id || null;
+                  role = byCode;
+                }
+                if (!roleId) {
+                  throw new Error(`无法映射 role_id=${row.role_id} role_code=${row.role_code || ''}`);
+                }
+                // eslint-disable-next-line no-await-in-loop
+                const user = await tx.get('SELECT userid FROM users WHERE userid = ? LIMIT 1', [row.userid]);
+                if (!user?.userid) {
+                  throw new Error(`用户不存在: ${row.userid}`);
+                }
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+                   VALUES($1,$2,$3,$4,$5)
+                   ON CONFLICT(userid) DO UPDATE SET
+                     role_id=excluded.role_id, assigned_by=excluded.assigned_by,
+                     assigned_name=excluded.assigned_name, assigned_at=excluded.assigned_at`,
+                  [
+                    row.userid,
+                    roleId,
+                    row.assigned_by ?? null,
+                    row.assigned_name ?? null,
+                    row.assigned_at ?? nowTs(),
+                  ],
+                  `admin_user_roles[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('admin_user_roles', i, err);
+              }
+            }
+            report.admin_user_roles = count;
+          }
+
+          // accounts
+          {
+            const rows = requireArray('accounts') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  'INSERT INTO accounts(userid, balance, updated_at) VALUES($1,$2,$3) ON CONFLICT(userid) DO UPDATE SET balance=excluded.balance, updated_at=excluded.updated_at',
+                  [row.userid, row.balance ?? 0, row.updated_at ?? nowTs()],
+                  `accounts[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('accounts', i, err);
+              }
+            }
+            report.accounts = count;
+          }
+
+          // bob_tokens
+          {
+            const rows = requireArray('bob_tokens') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.token_hash) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO bob_tokens(id, token, token_hash, created_at, revoked_at)
+                   VALUES($1,$2,$3,$4,$5) ON CONFLICT(token_hash) DO NOTHING`,
+                  [
+                    row.id ?? null,
+                    row.token ?? null,
+                    row.token_hash,
+                    row.created_at ?? nowTs(),
+                    row.revoked_at ?? null,
+                  ],
+                  `bob_tokens[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('bob_tokens', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'bob_tokens');
+            } catch (err) {
+              markAndThrow('bob_tokens', null, err);
+            }
+            report.bob_tokens = count;
+          }
+
+          // ledger
+          {
+            const rows = requireArray('ledger') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid || !row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  'INSERT INTO ledger(id, userid, delta, reason, ref_id, created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
+                  [row.id, row.userid, row.delta, row.reason ?? '', row.ref_id ?? null, row.created_at ?? nowTs()],
+                  `ledger[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('ledger', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'ledger');
+            } catch (err) {
+              markAndThrow('ledger', null, err);
+            }
+            report.ledger = count;
+          }
+
+          // redeems
+          {
+            const rows = requireArray('redeems') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.exchange_id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO redeems(id, exchange_id, userid, product_id, product_name, bob_amount, fulfilled_at, fulfilled_by, fulfilled_name, hidden, limit_round, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(exchange_id) DO NOTHING`,
+                  [
+                    row.id ?? null,
+                    row.exchange_id,
+                    row.userid,
+                    row.product_id,
+                    row.product_name ?? null,
+                    row.bob_amount,
+                    row.fulfilled_at ?? null,
+                    row.fulfilled_by ?? null,
+                    row.fulfilled_name ?? null,
+                    row.hidden ?? 0,
+                    row.limit_round ?? 1,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `redeems[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('redeems', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'redeems');
+            } catch (err) {
+              markAndThrow('redeems', null, err);
+            }
+            report.redeems = count;
+          }
+
+          // mall_order_listings
+          {
+            const rows = requireArray('mall_order_listings') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.listing_id || !row?.exchange_id || !row?.seller_userid) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO mall_order_listings(id, listing_id, exchange_id, seller_userid, seller_name_snapshot, buyer_userid, buyer_name_snapshot, price, status, created_at, updated_at, sold_at, cancelled_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                   ON CONFLICT(listing_id) DO NOTHING`,
+                  [
+                    row.id ?? null,
+                    row.listing_id,
+                    row.exchange_id,
+                    row.seller_userid,
+                    row.seller_name_snapshot ?? null,
+                    row.buyer_userid ?? null,
+                    row.buyer_name_snapshot ?? null,
+                    row.price ?? 0,
+                    row.status ?? 'active',
+                    row.created_at ?? nowTs(),
+                    row.updated_at ?? nowTs(),
+                    row.sold_at ?? null,
+                    row.cancelled_at ?? null,
+                  ],
+                  `mall_order_listings[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('mall_order_listings', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'mall_order_listings');
+            } catch (err) {
+              markAndThrow('mall_order_listings', null, err);
+            }
+            report.mall_order_listings = count;
+          }
+
+          // redeem_cdks
+          {
+            const rows = requireArray('redeem_cdks') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.cdk_code) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO redeem_cdks(id, batch_id, cdk_code, product_id, product_name, product_bob_amount, status, created_by, created_name, created_at, redeemed_by, redeemed_name, redeemed_at, redeem_exchange_id)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(cdk_code) DO NOTHING`,
+                  [
+                    row.id ?? null,
+                    row.batch_id ?? '',
+                    row.cdk_code,
+                    row.product_id ?? '',
+                    row.product_name ?? '',
+                    row.product_bob_amount ?? 0,
+                    row.status ?? 'unused',
+                    row.created_by ?? null,
+                    row.created_name ?? null,
+                    row.created_at ?? nowTs(),
+                    row.redeemed_by ?? null,
+                    row.redeemed_name ?? null,
+                    row.redeemed_at ?? null,
+                    row.redeem_exchange_id ?? null,
+                  ],
+                  `redeem_cdks[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('redeem_cdks', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'redeem_cdks');
+            } catch (err) {
+              markAndThrow('redeem_cdks', null, err);
+            }
+            report.redeem_cdks = count;
+          }
+
+          // charity_contributions
+          {
+            const rows = requireArray('charity_contributions') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id || !row?.project_id || !row?.userid) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO charity_contributions(id, project_id, userid, user_name_snapshot, bob_amount, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.project_id,
+                    row.userid,
+                    row.user_name_snapshot ?? null,
+                    row.bob_amount ?? 0,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `charity_contributions[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('charity_contributions', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'charity_contributions');
+            } catch (err) {
+              markAndThrow('charity_contributions', null, err);
+            }
+            report.charity_contributions = count;
+          }
+
+          // attendance_reward_records
+          {
+            const rows = requireArray('attendance_reward_records') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid || !row?.work_date || !row?.check_time_ms) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO attendance_reward_records(id, userid, user_name_snapshot, work_date, check_time_ms, check_time_text, check_type, source_type, time_result, event_source, status, skip_reason, reward_amount, reward_reason, notify_status, error_message, created_at, updated_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                   ON CONFLICT(userid, work_date, check_time_ms) DO NOTHING`,
+                  [
+                    row.id ?? null,
+                    row.userid,
+                    row.user_name_snapshot ?? null,
+                    row.work_date,
+                    row.check_time_ms,
+                    row.check_time_text ?? null,
+                    row.check_type ?? null,
+                    row.source_type ?? null,
+                    row.time_result ?? null,
+                    row.event_source ?? 'stream',
+                    row.status ?? 'pending',
+                    row.skip_reason ?? null,
+                    row.reward_amount ?? null,
+                    row.reward_reason ?? null,
+                    row.notify_status ?? null,
+                    row.error_message ?? null,
+                    row.created_at ?? nowTs(),
+                    row.updated_at ?? nowTs(),
+                  ],
+                  `attendance_reward_records[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('attendance_reward_records', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'attendance_reward_records');
+            } catch (err) {
+              markAndThrow('attendance_reward_records', null, err);
+            }
+            report.attendance_reward_records = count;
+          }
+
+          // user_feedback
+          {
+            const rowsRaw = requireArray('user_feedback');
+            const rows = rowsRaw || [];
+            if (mode === 'overwrite' && rowsRaw !== null) {
+              // users 段已清空时这里是 no-op；若备份未含 users，仍需确保反馈表可完整覆盖。
+              await execOrThrow(tx, 'DELETE FROM user_feedback_messages', [], 'user_feedback_messages overwrite delete');
+              await execOrThrow(tx, 'DELETE FROM user_feedback', [], 'user_feedback overwrite delete');
+            }
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id || !row?.userid) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO user_feedback(id, userid, name, category, content, contact, status, reply, handled_by, handled_name, handled_at, created_at, updated_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.userid,
+                    row.name ?? null,
+                    row.category ?? 'suggestion',
+                    row.content,
+                    row.contact ?? null,
+                    row.status ?? 'pending',
+                    row.reply ?? null,
+                    row.handled_by ?? null,
+                    row.handled_name ?? null,
+                    row.handled_at ?? null,
+                    row.created_at ?? nowTs(),
+                    row.updated_at ?? nowTs(),
+                  ],
+                  `user_feedback[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('user_feedback', i, err);
+              }
+            }
+            if (mode === 'overwrite' && count > 0) {
+              try {
+                await bumpSerial(tx, 'user_feedback');
+              } catch (err) {
+                markAndThrow('user_feedback', null, err);
+              }
+            }
+            report.user_feedback = count;
+          }
+
+          // user_feedback_messages
+          {
+            const rows = requireArray('user_feedback_messages') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id || !row?.feedback_id || !row?.content) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO user_feedback_messages(id, feedback_id, sender_type, sender_id, sender_name, content, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.feedback_id,
+                    row.sender_type ?? 'user',
+                    row.sender_id ?? null,
+                    row.sender_name ?? null,
+                    row.content,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `user_feedback_messages[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('user_feedback_messages', i, err);
+              }
+            }
+            if (mode === 'overwrite' && count > 0) {
+              try {
+                await bumpSerial(tx, 'user_feedback_messages');
+              } catch (err) {
+                markAndThrow('user_feedback_messages', null, err);
+              }
+            }
+            report.user_feedback_messages = count;
+          }
+
+          // audit_logs
+          {
+            const rows = requireArray('audit_logs') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id || !row?.event_type) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO audit_logs(id, event_type, actor_type, actor_id, actor_name, ip, method, path, status_code, message, payload, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.event_type,
+                    row.actor_type ?? null,
+                    row.actor_id ?? null,
+                    row.actor_name ?? null,
+                    row.ip ?? null,
+                    row.method ?? null,
+                    row.path ?? null,
+                    row.status_code ?? null,
+                    row.message ?? null,
+                    row.payload ?? null,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `audit_logs[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('audit_logs', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'audit_logs');
+            } catch (err) {
+              markAndThrow('audit_logs', null, err);
+            }
+            report.audit_logs = count;
+          }
+
+          // red packet
+          {
+            const activityRowsRaw = requireArray('red_packet_activity');
+            const itemRowsRaw = requireArray('red_packet_items');
+            if (mode === 'overwrite' && (activityRowsRaw !== null || itemRowsRaw !== null)) {
+              await execOrThrow(tx, 'DELETE FROM red_packet_items', [], 'red_packet_items overwrite delete');
+              await execOrThrow(tx, 'DELETE FROM red_packet_activity', [], 'red_packet_activity overwrite delete');
+            }
+          }
+          {
+            const rows = requireArray('red_packet_activity') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO red_packet_activity(id, total_amount, total_count, countdown_seconds, duration_minutes, start_at, end_at, status, sponsor, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.total_amount,
+                    row.total_count,
+                    row.countdown_seconds,
+                    row.duration_minutes,
+                    row.start_at,
+                    row.end_at,
+                    row.status ?? 'ended',
+                    row.sponsor ?? null,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `red_packet_activity[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('red_packet_activity', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'red_packet_activity');
+            } catch (err) {
+              markAndThrow('red_packet_activity', null, err);
+            }
+            report.red_packet_activity = count;
+          }
+          {
+            const rows = requireArray('red_packet_items') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.activity_id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO red_packet_items(id, activity_id, amount, claimed_by, claimed_at)
+                   VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`,
+                  [row.id, row.activity_id, row.amount, row.claimed_by ?? null, row.claimed_at ?? null],
+                  `red_packet_items[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('red_packet_items', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'red_packet_items');
+            } catch (err) {
+              markAndThrow('red_packet_items', null, err);
+            }
+            report.red_packet_items = count;
+          }
+        }
+
+        // 防御：事务内若有未统计表也算成功报告
+        report._failedTable = failedTable;
+        report._failedIndex = failedIndex;
+        return report;
+      });
+
+      // 清理内部字段
+      delete report._failedTable;
+      delete report._failedIndex;
+
+      await appendBackupHistory(db, req, {
+        action: '导入',
+        mode,
+        filename: requestedFilename,
+        status: '完成',
+        details: {
+          backupMode,
+          report,
+          recoveryPoint,
+        },
+      });
+      publishMallRealtimeFullRefresh('backup_import');
+      return res.json({
+        ok: true,
+        mode,
+        backupMode,
+        report,
+        recoveryPoint,
+      });
+    } catch (err) {
+      const message = String(err?.message || err);
+      // 从错误消息解析失败表/行
+      let failedTable = null;
+      let failedIndex = null;
+      const m = message.match(/@([a-z_]+)(?:\[(\d+)\])?/i);
+      if (m) {
+        failedTable = m[1];
+        failedIndex = m[2] == null ? null : Number(m[2]);
+      }
+      await failHistory('失败', {
+        reason: 'import_transaction_failed',
+        message,
+        backupMode,
+        mode,
+        failedTable,
+        failedIndex,
+        recoveryPoint,
+      });
+      return res.status(500).json({
+        ok: false,
+        error: message,
+        mode,
+        backupMode,
+        failedTable,
+        failedIndex,
+        recoveryPoint,
+      });
+    }
+  });
+
+
+}

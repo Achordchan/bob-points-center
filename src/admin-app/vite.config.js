@@ -9,6 +9,15 @@ export default defineConfig({
   build: {
     outDir: '../pages/admin-app-dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('@wangeditor')) return 'wangeditor';
+          if (id.includes('node_modules/antd') || id.includes('node_modules/@ant-design')) return 'antd';
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react-vendor';
+        },
+      },
+    },
   },
   server: {
     port: 5174,

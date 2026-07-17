@@ -19,7 +19,7 @@ function Tokens({ canEdit }) {
     onOk: async () => { await api('/bob-token/delete', { method: 'POST', body: { tokenId: row.id } }); message.success('Token 已删除'); load(); },
   });
   return <Card title="BOB Token" extra={<Space><Button onClick={load}>刷新</Button>{canEdit && <Button type="primary" onClick={create}>创建 Token</Button>}</Space>}>
-    <Table rowKey="id" dataSource={rows} columns={[{ title: 'ID', dataIndex: 'id' }, { title: 'Token', dataIndex: 'token', ellipsis: true }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '吊销时间', dataIndex: 'revoked_at', render: formatTs }, { title: '状态', render: (_, r) => r.revoked_at ? <Tag>已吊销</Tag> : <Tag color="green">有效</Tag> }, { title: '操作', render: (_, r) => <Space><Button disabled={!r.token} onClick={() => navigator.clipboard?.writeText(r.token)}>复制</Button>{canEdit && <Button danger disabled={Boolean(r.revoked_at)} onClick={() => api('/bob-token/revoke', { method: 'POST', body: { tokenId: r.id } }).then(load)}>吊销</Button>}{canEdit && <Button danger disabled={!r.revoked_at} onClick={() => remove(r)}>删除</Button>}</Space> }]} />
+    <Table rowKey="id" dataSource={rows} columns={[{ title: 'ID', dataIndex: 'id' }, { title: '创建时间', dataIndex: 'created_at', render: formatTs }, { title: '吊销时间', dataIndex: 'revoked_at', render: formatTs }, { title: '状态', render: (_, r) => r.revoked_at ? <Tag>已吊销</Tag> : <Tag color="green">有效</Tag> }, { title: '操作', render: (_, r) => <Space>{canEdit && <Button danger disabled={Boolean(r.revoked_at)} onClick={() => api('/bob-token/revoke', { method: 'POST', body: { tokenId: r.id } }).then(load)}>吊销</Button>}{canEdit && <Button danger disabled={!r.revoked_at} onClick={() => remove(r)}>删除</Button>}</Space> }]} />
   </Card>;
 }
 

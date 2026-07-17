@@ -300,6 +300,14 @@ async function countRewardedToday(tx, normalized) {
   return Number(row?.cnt || 0);
 }
 
+async function lockAttendanceRewardSlot(tx, normalized) {
+  // PostgreSQL 事务级 advisory lock：同一用户同一天串行发币，避免 maxPerDay 竞态。
+  await tx.exec(
+    `SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))`,
+    [String(normalized.userid || ''), String(normalized.work_date || '')],
+  );
+}
+
 async function finalizeAttendanceRecord(tx, recordId, fields) {
   const keys = Object.keys(fields || {});
   if (!keys.length) return;
@@ -442,6 +450,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
 
     const isTestMode = settings.testMode === true;
     if (!isTestMode) {
+      await lockAttendanceRewardSlot(tx, normalized);
       const todayCount = await countRewardedToday(tx, normalized);
       if (todayCount >= Number(settings.maxPerDay || 1)) {
         await finalizeAttendanceRecord(tx, existing.id, {

@@ -12,13 +12,19 @@
     "pg:down": "echo '当前使用 SSH 数据库隧道；在运行 pg:up 的终端按 Ctrl+C 关闭。'",
     "build": "npm run admin:build",
     "admin:build": "vite build --config src/admin-app/vite.config.js",
-    "admin:dev": "vite --config src/admin-app/vite.config.js --host 0.0.0.0"
+    "admin:dev": "vite --config src/admin-app/vite.config.js --host 0.0.0.0",
+    "check:openapi": "node scripts/check-openapi-coverage.mjs",
+    "check": "npm run lint && npm run check:openapi && npm run test",
+    "test": "node --test test/**/*.test.js",
+    "test:security": "node --test test/security/*.test.js",
+    "lint": "node scripts/check-lint.mjs",
+    "typecheck": "node scripts/check-js-syntax.mjs"
   },
   "dependencies": {
-    "@alicloud/dingtalk": "latest",
-    "@alicloud/openapi-client": "latest",
-    "@alicloud/tea-typescript": "latest",
-    "@alicloud/tea-util": "latest",
+    "@alicloud/dingtalk": "2.2.38",
+    "@alicloud/openapi-client": "0.4.15",
+    "@alicloud/tea-typescript": "1.8.0",
+    "@alicloud/tea-util": "1.4.11",
     "@ant-design/icons": "^6.2.5",
     "@ant-design/pro-components": "^2.8.10",
     "@wangeditor/editor": "^5.1.23",
@@ -39,5 +45,8 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.3",
     "vite": "^8.1.0"
+  },
+  "engines": {
+    "node": ">=20 <21"
   }
 }

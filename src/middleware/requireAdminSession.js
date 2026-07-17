@@ -1,13 +1,14 @@
 import { parseCookies, verifySessionToken } from '../services/adminSession.js';
-import { getAdminAccess } from '../services/adminPermissionService.js';
+import { adminSessionSigningSecret, isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 
 export function requireAdminSession() {
   return async function requireAdminSessionMiddleware(req, res, next) {
     const cfg = req.app?.locals?.cfg;
+    const db = req.app?.locals?.db;
     const cookies = parseCookies(req.header('cookie'));
     const token = cookies.bob_admin_session;
 
-    const secret = `${cfg?.adminSessionSecret || ''}:${cfg?.sessionSalt || ''}`;
+    const secret = adminSessionSigningSecret(cfg);
 
     let payload;
     try {
@@ -16,19 +17,11 @@ export function requireAdminSession() {
       return res.status(500).json({ error: String(err?.message || err) });
     }
 
-    if (!payload) {
+    if (!payload || !(await isSessionVersionValidLive(payload, db, cfg))) {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
-    try {
-      req.adminSession = payload;
-      if (!req.adminAccess) {
-        req.adminAccess = await getAdminAccess(req.app?.locals?.db, cfg, payload);
-      }
-    } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
-    }
-
+    req.adminSession = payload;
     return next();
   };
 }

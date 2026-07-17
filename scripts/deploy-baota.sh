@@ -16,6 +16,19 @@ PANEL_PY="/www/server/panel/pyenv/bin/python"
 echo "部署到宝塔项目：${DEPLOY_PROJECT}"
 echo "目标目录：${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}"
 
+# 服务器 npm ci --omit=dev 无 Vite；构建产物必须在部署前准备好。
+# CI 工作流若已 build，可设置 SKIP_LOCAL_BUILD=1 避免重复构建。
+if [ "${SKIP_LOCAL_BUILD:-0}" = "1" ]; then
+  echo "跳过本地构建（SKIP_LOCAL_BUILD=1）"
+  if [ ! -f "src/pages/admin-app-dist/index.html" ]; then
+    echo "SKIP_LOCAL_BUILD=1 但缺少 src/pages/admin-app-dist/index.html"
+    exit 1
+  fi
+else
+  echo "本地构建后台 admin-app ..."
+  npm run build
+fi
+
 rsync -az --delete \
   --omit-dir-times \
   --no-perms \
@@ -36,6 +49,9 @@ rsync -az --delete \
   --exclude "uploads/" \
   --exclude "public/uploads/" \
   --exclude "storage/" \
+  --exclude "data/" \
+  --exclude "data/admin-backups/" \
+  --exclude "bob-admin-backups/" \
   --exclude "logs/" \
   --exclude "*.log" \
   --exclude "bob-*.tar.gz" \
@@ -59,6 +75,25 @@ cd "${DEPLOY_PATH}"
 
 if [ ! -f ".env" ]; then
   echo "缺少服务器 .env，停止部署。"
+  exit 1
+fi
+
+# HTTPS 站点：若未配置 NODE_ENV/COOKIE_SECURE，追加安全默认值（不覆盖已有键）
+ensure_env_kv() {
+  local key="$1"
+  local val="$2"
+  if ! grep -Eq "^${key}=" .env; then
+    printf '\n%s=%s\n' "${key}" "${val}" >> .env
+    echo "已写入 .env 缺省 ${key}=${val}"
+  fi
+}
+ensure_env_kv "NODE_ENV" "production"
+ensure_env_kv "COOKIE_SECURE" "true"
+ensure_env_kv "TRUST_PROXY" "true"
+
+# 后台静态资源必须存在（由本地 npm run build 后 rsync 带上）
+if [ ! -f "src/pages/admin-app-dist/index.html" ]; then
+  echo "缺少 src/pages/admin-app-dist/index.html。请在部署前于本机执行 npm run build。"
   exit 1
 fi
 

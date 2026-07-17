@@ -1,8 +1,13 @@
 import { Router } from 'express';
 
 import { getBalance, listLedgerRecords, transferBob } from '../services/ledgerService.js';
-import { requireBobToken } from '../middleware/requireBobToken.js';
+import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.js';
+import { verifyBobToken } from '../services/bobTokenService.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
+import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { parseCookies } from '../services/adminSession.js';
+import { verifyWebSessionToken } from '../services/webSession.js';
+import { isSessionVersionValid, webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
 import { deductBatchWithNotify, deductWithNotify, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
@@ -20,15 +25,53 @@ function genExchangeId(prefix) {
 
 export function ledgerRouter() {
   const router = Router();
+  // 站点关闭时拦截业务读写；查询接口同样受限。
+  router.use(requireSiteEnabled());
+
+  function attachOptionalWebSession(req) {
+    if (req.webSession?.userid) return;
+    try {
+      const cfg = req.app?.locals?.cfg;
+      const cookies = parseCookies(req.header('cookie'));
+      const token = cookies.bob_web_session;
+      const secret = webSessionSigningSecret(cfg);
+      const payload = verifyWebSessionToken(secret, token);
+      if (payload?.userid && isSessionVersionValid(payload, cfg)) req.webSession = payload;
+    } catch {
+      // optional
+    }
+  }
+
+  // 前台仅查自己；内部 API 用 bob_token 指定 userid。禁止匿名/伪造查询主体。
+  async function resolveQueryUserid(req, res) {
+    attachOptionalWebSession(req);
+    const db = req.app.locals.db;
+    const sessionUser = req.webSession?.userid ? String(req.webSession.userid).trim() : '';
+    if (sessionUser) return sessionUser;
+
+    // 禁止 ?bob_token=；仅 Header（GET 不使用 body）
+    const token = extractBobToken(req, { allowBody: false });
+    if (!token) {
+      res.status(401).json({ error: 'unauthorized', message: '需要 web session 或 Header X-BOB-Token' });
+      return null;
+    }
+    const ok = await verifyBobToken(db, token);
+    if (!ok) {
+      res.status(401).json({ error: 'invalid bob_token' });
+      return null;
+    }
+    const userid = req.query.userid ? String(req.query.userid).trim() : '';
+    if (!userid) {
+      res.status(400).json({ error: 'missing userid' });
+      return null;
+    }
+    return userid;
+  }
 
   router.get('/balance', async (req, res) => {
-    const userid = req.query.userid ? String(req.query.userid) : '';
-
-    if (!userid) {
-      return res.status(400).json({ error: 'missing userid' });
-    }
-
     try {
+      const userid = await resolveQueryUserid(req, res);
+      if (!userid) return;
       const db = req.app.locals.db;
       const balance = await getBalance(db, { userid });
       return res.json({ userid, balance });
@@ -38,15 +81,11 @@ export function ledgerRouter() {
   });
 
   router.get('/records', async (req, res) => {
-    const userid = req.query.userid ? String(req.query.userid) : '';
-    const page = req.query.page ? Number(req.query.page) : 1;
-    const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
-
-    if (!userid) {
-      return res.status(400).json({ error: 'missing userid' });
-    }
-
     try {
+      const userid = await resolveQueryUserid(req, res);
+      if (!userid) return;
+      const page = req.query.page ? Number(req.query.page) : 1;
+      const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
       const db = req.app.locals.db;
       const result = await listLedgerRecords(db, { userid, page, pageSize });
       return res.json(result);

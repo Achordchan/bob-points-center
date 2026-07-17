@@ -3,7 +3,11 @@ import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import sharp from 'sharp';
+let sharpModulePromise = null;
+async function getSharp() {
+  if (!sharpModulePromise) sharpModulePromise = import('sharp').then((m) => m.default || m);
+  return sharpModulePromise;
+}
 
 const UPLOAD_ROOT = fileURLToPath(new URL('../pages/assets/uploads/', import.meta.url));
 const UPLOAD_PREFIX = '/assets/uploads';
@@ -148,6 +152,7 @@ async function writeOriginal(buffer, mime, hash) {
 }
 
 async function convertBufferToWebp(buffer, settings) {
+  const sharp = await getSharp();
   return await sharp(buffer)
     .rotate()
     .resize({ width: settings.maxWidth, height: settings.maxHeight, fit: 'inside', withoutEnlargement: true })

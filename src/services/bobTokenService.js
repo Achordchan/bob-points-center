@@ -8,9 +8,10 @@ export async function createBobToken(db) {
   const token = crypto.randomBytes(32).toString('base64url');
   const tokenHash = hashToken(token);
 
+  // 库内只保存 hash；明文 token 仅创建响应返回一次。
   const result = await db.run(
     'INSERT INTO bob_tokens(token, token_hash, created_at, revoked_at) VALUES(?, ?, unixepoch(), NULL)',
-    [token, tokenHash],
+    [null, tokenHash],
   );
 
   return {
@@ -47,10 +48,21 @@ export async function listBobTokens(db, { includeRevoked = true, limit = 200 } =
   const max = Number.isInteger(n) && n > 0 ? Math.min(500, n) : 200;
   const where = includeRevoked ? '' : 'WHERE revoked_at IS NULL';
   const rows = await db.all(
-    `SELECT id, token, created_at, revoked_at FROM bob_tokens ${where} ORDER BY id DESC LIMIT ?`,
+    `SELECT id, created_at, revoked_at,
+            CASE WHEN revoked_at IS NULL THEN 'active' ELSE 'revoked' END AS status
+       FROM bob_tokens
+       ${where}
+      ORDER BY id DESC
+      LIMIT ?`,
     [max],
   );
-  return rows || [];
+  // 列表不返回明文 token。
+  return (rows || []).map((row) => ({
+    id: row.id,
+    created_at: row.created_at,
+    revoked_at: row.revoked_at,
+    status: row.status,
+  }));
 }
 
 export async function deleteBobToken(db, tokenId) {

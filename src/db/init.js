@@ -679,6 +679,48 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS hired_date BIGINT");
   await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS leader_in_dept TEXT");
   await ensureAdminRoles(db);
+  // 历史 bob_tokens.token 明文清空（仅保留 hash）；新 Token 创建时本就写 null。
+  try {
+    await db.exec("UPDATE bob_tokens SET token = NULL WHERE token IS NOT NULL");
+  } catch (err) {
+    // 非阻塞：表不存在或权限问题时不阻止启动
+  }
+
+  // P2: 用户关联外键（存在则跳过；脏数据失败只告警不阻断启动）
+  await db.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_mall_order_listings_seller') THEN
+        ALTER TABLE mall_order_listings
+          ADD CONSTRAINT fk_mall_order_listings_seller
+          FOREIGN KEY (seller_userid) REFERENCES users(userid) ON DELETE CASCADE;
+      END IF;
+    EXCEPTION WHEN others THEN
+      RAISE NOTICE 'skip fk_mall_order_listings_seller: %', SQLERRM;
+    END $$;
+  `);
+  await db.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_user_feedback_userid') THEN
+        ALTER TABLE user_feedback
+          ADD CONSTRAINT fk_user_feedback_userid
+          FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE;
+      END IF;
+    EXCEPTION WHEN others THEN
+      RAISE NOTICE 'skip fk_user_feedback_userid: %', SQLERRM;
+    END $$;
+  `);
+  await db.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_attendance_reward_userid') THEN
+        ALTER TABLE attendance_reward_records
+          ADD CONSTRAINT fk_attendance_reward_userid
+          FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE;
+      END IF;
+    EXCEPTION WHEN others THEN
+      RAISE NOTICE 'skip fk_attendance_reward_userid: %', SQLERRM;
+    END $$;
+  `);
+
   await db.exec(`INSERT INTO user_feedback_messages(feedback_id, sender_type, sender_id, sender_name, content, created_at)
     SELECT f.id, 'user', f.userid, COALESCE(f.name, ''), f.content, f.created_at
     FROM user_feedback f

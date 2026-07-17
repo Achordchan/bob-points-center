@@ -47,4 +47,5 @@ jobs:
           DEPLOY_DOMAIN: bob.baymaxgroup.com
           DEPLOY_PORT: "8000"
           SSH_OPTS: -i ~/.ssh/bob_baota_deploy -o StrictHostKeyChecking=yes
+          SKIP_LOCAL_BUILD: "1"
         run: bash scripts/deploy-baota.sh

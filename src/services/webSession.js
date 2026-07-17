@@ -57,7 +57,12 @@ export function verifyWebSessionToken(secret, token) {
   return payload;
 }
 
-export function buildWebSessionCookie(token, maxAgeSeconds) {
+function cookieSecureFlag(options) {
+  if (options && typeof options.secure === 'boolean') return options.secure;
+  return false;
+}
+
+export function buildWebSessionCookie(token, maxAgeSeconds, options = {}) {
   const attrs = [
     `bob_web_session=${token}`,
     'Path=/',
@@ -68,10 +73,11 @@ export function buildWebSessionCookie(token, maxAgeSeconds) {
   if (Number.isFinite(maxAge) && maxAge > 0) {
     attrs.push(`Max-Age=${Math.floor(maxAge)}`);
   }
+  if (cookieSecureFlag(options)) attrs.push('Secure');
   return attrs.join('; ');
 }
 
-export function buildClearWebSessionCookie() {
+export function buildClearWebSessionCookie(options = {}) {
   const attrs = [
     'bob_web_session=',
     'Path=/',
@@ -79,5 +85,6 @@ export function buildClearWebSessionCookie() {
     'SameSite=Lax',
     'Max-Age=0',
   ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
   return attrs.join('; ');
 }

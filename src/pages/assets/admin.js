@@ -1,3 +1,25 @@
+
+/* LEGACY_ADMIN_BANNER: 旧版后台，建议使用 /admin/home（admin-app）。 */
+(function showLegacyAdminBanner() {
+  try {
+    if (document.getElementById('bobLegacyAdminBanner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'bobLegacyAdminBanner';
+    bar.setAttribute('role', 'status');
+    bar.style.cssText = 'position:sticky;top:0;z-index:9999;padding:8px 12px;background:#fff7e6;border-bottom:1px solid #ffd591;color:#ad6800;font-size:13px;line-height:1.5;';
+    bar.textContent = '当前为旧版管理端兼容页。请改用新版后台 /admin/home；本页后续将下线。';
+    const link = document.createElement('a');
+    link.href = '/admin/home';
+    link.textContent = '打开新版后台';
+    link.style.cssText = 'margin-left:12px;color:#d46b08;font-weight:600;';
+    bar.appendChild(link);
+    const mount = () => {
+      if (document.body) document.body.prepend(bar);
+      else document.addEventListener('DOMContentLoaded', () => document.body.prepend(bar), { once: true });
+    };
+    mount();
+  } catch (_) {}
+})();
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
 
@@ -5254,7 +5276,7 @@
     tbody.innerHTML = rows
       .map((t) => {
         const id = Number(t?.id) || 0;
-        const token = t?.token ? String(t.token) : '';
+        const token = ''; // 列表不再返回明文 token
         const created = formatTs(t?.created_at);
         const revoked = t?.revoked_at ? formatTs(t.revoked_at) : '-';
         return `<tr data-tokenid="${id}">

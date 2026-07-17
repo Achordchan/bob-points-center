@@ -1,42 +1,39 @@
 version: "3.9"
 
+# 仅本机开发辅助。生产默认走宝塔 + 既有 PostgreSQL，不依赖本文件。
+# 使用前请设置 POSTGRES_PASSWORD；Redis 默认不启用（项目主链路未使用）。
 services:
   postgres:
     image: postgres:16
     container_name: bob-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: bob
-      POSTGRES_USER: bob
-      POSTGRES_PASSWORD: bob123456
+      POSTGRES_DB: ${POSTGRES_DB:-bob}
+      POSTGRES_USER: ${POSTGRES_USER:-bob}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       TZ: Asia/Shanghai
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - bob_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bob -d bob"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 5s
 
-  redis:
-    image: redis:7
-    container_name: bob-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - bob_redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 5s
+  # 如本地调试需要 Redis，取消注释并设置 REDIS_PASSWORD。
+  # redis:
+  #   image: redis:7
+  #   container_name: bob-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:6379:6379"
+  #   command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+  #   volumes:
+  #     - bob_redis_data:/data
 
 volumes:
   bob_pg_data:
-  bob_redis_data:
+  # bob_redis_data:

@@ -12,3 +12,16 @@ _deploy/
 data.db
 *.bak-*
 .tmp/
+# runtime / local
+data/
+*.db
+bob-admin-backups/
+uploads/
+public/uploads/
+storage/
+logs/
+# build artifacts (deploy workflow builds before rsync)
+src/pages/admin-app-dist/
+# leftovers
+*.bak
+**/*.bak-*
