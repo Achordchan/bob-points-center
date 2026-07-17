@@ -38,7 +38,7 @@ import {
 import { ensureAccount, listLedgerRecords } from '../../services/ledgerService.js';
 import { deleteRedeemCdks, generateRedeemCdks, listCdkEnabledProducts, listRedeemCdks } from '../../services/cdkService.js';
 import { deleteUsersCompletely, purgeUserBusinessData } from '../../services/userDataPurgeService.js';
-import { adminSessionSigningSecret, cookieOptions, withSessionVersion, isSessionVersionValid } from '../../utils/sessionCrypto.js';
+import { adminSessionSigningSecret, cookieOptions, withSessionVersion, isSessionVersionValidLive } from '../../utils/sessionCrypto.js';
 import {
   listAdminCharityContributions,
   listAdminCharityProjects,
@@ -954,7 +954,7 @@ export function adminRouter() {
         state,
       });
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE, nonce));
+      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE, nonce, 600, cookieOptions(cfg)));
       return res.redirect(302, authorizeUrl);
     } catch (err) {
       return res.redirect(302, buildAdminLoginErrorUrl('config', req.query.redirect));
@@ -972,7 +972,7 @@ export function adminRouter() {
     });
     const returnTo = normalizeAdminReturnTo(payload?.returnTo);
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE));
+    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE, cookieOptions(cfg)));
     if (!payload || !code) {
       return res.redirect(302, buildAdminLoginErrorUrl('expired', returnTo));
     }
@@ -1003,7 +1003,7 @@ export function adminRouter() {
       const secret = adminSessionSigningSecret(cfg);
       const token = createSessionToken(secret, withSessionVersion({ userid: profile.userid, name: profile.name, mode: 'dingtalk' }, cfg), 8 * 3600);
       res.setHeader('Set-Cookie', [
-        buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE),
+        buildClearDingtalkOAuthStateCookie(ADMIN_OAUTH_COOKIE, cookieOptions(cfg)),
         buildClearLegacyAdminPathCookie(cookieOptions(cfg)),
         buildSessionCookie(token, cookieOptions(cfg)),
       ]);
@@ -1024,13 +1024,13 @@ export function adminRouter() {
     }
   });
 
-  router.get('/home', (req, res) => {
+  router.get('/home', async (req, res) => {
     const cfg = req.app?.locals?.cfg;
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', buildClearLegacyAdminPathCookie(cookieOptions(cfg)));
     let payload;
     try {
-      payload = getAdminSessionPayload(req);
+      payload = await getAdminSessionPayload(req);
     } catch (err) {
       return res.status(500).type('text').send(String(err?.message || err));
     }
@@ -1059,10 +1059,10 @@ export function adminRouter() {
       res.setHeader('Set-Cookie', buildClearLegacyAdminPathCookie(cookieOptions(cfg)));
       const secret = adminSessionSigningSecret(cfg);
       const payload = verifySessionToken(secret, token);
-      if (!payload || !isSessionVersionValid(payload, cfg)) {
+      const db = req.app?.locals?.db;
+      if (!payload || !(await isSessionVersionValidLive(payload, db, cfg))) {
         return res.status(401).json({ error: 'unauthorized' });
       }
-      const db = req.app?.locals?.db;
       const name = await resolveAdminDisplayName(db, cfg, payload);
       const access = await getAdminAccess(db, cfg, { ...payload, name });
       return res.json({
@@ -1665,9 +1665,9 @@ export function adminRouter() {
 
   registerAdminContentRoutes(router);
 
-  router.post('/logout', (req, res) => {
+  router.post('/logout', async (req, res) => {
     const cfg = req.app?.locals?.cfg;
-    const payload = getAdminSessionPayload(req);
+    const payload = await getAdminSessionPayload(req);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', [buildClearLegacyAdminPathCookie(cookieOptions(cfg)), buildClearSessionCookie(cookieOptions(cfg))]);
     safeAppendAuditLog(req.app?.locals?.db, {

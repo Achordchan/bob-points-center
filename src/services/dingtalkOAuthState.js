@@ -62,22 +62,31 @@ export function verifyDingtalkOAuthState(secret, state, expected = {}) {
   return payload;
 }
 
-export function buildDingtalkOAuthStateCookie(name, nonce, maxAgeSeconds = 600) {
-  return [
+function cookieSecureFlag(options = {}) {
+  if (options && typeof options.secure === 'boolean') return options.secure;
+  return false;
+}
+
+export function buildDingtalkOAuthStateCookie(name, nonce, maxAgeSeconds = 600, options = {}) {
+  const attrs = [
     `${name}=${encodeURIComponent(String(nonce || ''))}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
     `Max-Age=${Math.max(60, Number(maxAgeSeconds) || 600)}`,
-  ].join('; ');
+  ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
+  return attrs.join('; ');
 }
 
-export function buildClearDingtalkOAuthStateCookie(name) {
-  return [
+export function buildClearDingtalkOAuthStateCookie(name, options = {}) {
+  const attrs = [
     `${name}=`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
     'Max-Age=0',
-  ].join('; ');
+  ];
+  if (cookieSecureFlag(options)) attrs.push('Secure');
+  return attrs.join('; ');
 }

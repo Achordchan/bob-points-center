@@ -191,7 +191,7 @@ export function registerAdminContentRoutes(router) {
     const status = normalizeFeedbackStatus(req.body?.status);
     const reply = req.body?.reply ? sanitizeRichHtml(String(req.body.reply).trim()) : '';
     if (!id) return res.status(400).json({ error: 'missing id' });
-    const payload = getAdminSessionPayload(req) || {};
+    const payload = (await getAdminSessionPayload(req)) || {};
     const actorId = payload?.userid ? String(payload.userid) : '';
     const actorName = payload?.name ? String(payload.name) : '';
     try {

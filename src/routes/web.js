@@ -125,7 +125,7 @@ export function webRouter() {
       const redirectUri = getOAuthCallbackUrl(cfg, '/web/oauth/callback');
       const authorizeUrl = buildDingtalkOAuthAuthorizeUrl(cfg, { redirectUri, state });
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE, nonce));
+      res.setHeader('Set-Cookie', buildDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE, nonce, 600, cookieOptions(cfg)));
       return res.redirect(302, authorizeUrl);
     } catch (err) {
       return sendOAuthError(res, String(err?.message || err), 500);
@@ -142,7 +142,7 @@ export function webRouter() {
       nonce: cookies[WEB_OAUTH_COOKIE],
     });
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE));
+    res.setHeader('Set-Cookie', buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE, cookieOptions(cfg)));
     if (!payload || !code) return sendOAuthError(res, '授权状态已失效，请重新登录');
 
     try {
@@ -150,7 +150,7 @@ export function webRouter() {
       await establishWebSession(req, res, userid);
       const sessionCookie = res.getHeader('Set-Cookie');
       res.setHeader('Set-Cookie', [
-        buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE),
+        buildClearDingtalkOAuthStateCookie(WEB_OAUTH_COOKIE, cookieOptions(cfg)),
         sessionCookie,
       ]);
       return res.redirect(302, normalizeMallReturnTo(payload.returnTo));

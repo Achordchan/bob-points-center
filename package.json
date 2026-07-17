@@ -18,7 +18,8 @@
     "test": "node --test test/**/*.test.js",
     "test:security": "node --test test/security/*.test.js",
     "lint": "node scripts/check-lint.mjs",
-    "typecheck": "node scripts/check-js-syntax.mjs"
+    "typecheck": "node scripts/check-js-syntax.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org"
   },
   "dependencies": {
     "@alicloud/dingtalk": "2.2.38",
@@ -31,7 +32,7 @@
     "@wangeditor/editor-for-react": "^1.0.6",
     "antd": "^5.29.3",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.22.1",
     "jsqr": "^1.4.0",
     "pg": "^8.19.0",
     "qrcode": "^1.5.4",
@@ -40,7 +41,7 @@
     "sharp": "^0.35.2",
     "swagger-jsdoc": "^6.3.0",
     "swagger-ui-express": "^5.0.1",
-    "ws": "^8.19.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.3",
@@ -48,5 +49,12 @@
   },
   "engines": {
     "node": ">=20 <21"
+  },
+  "overrides": {
+    "lodash": "4.18.1",
+    "qs": "6.15.3",
+    "@ant-design/pro-layout": {
+      "path-to-regexp": "8.4.2"
+    }
   }
 }

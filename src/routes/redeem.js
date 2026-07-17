@@ -7,7 +7,7 @@ import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { parseCookies } from '../services/adminSession.js';
 import { verifyWebSessionToken } from '../services/webSession.js';
-import { isSessionVersionValid, webSessionSigningSecret } from '../utils/sessionCrypto.js';
+import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { redeemConfirmWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
@@ -87,15 +87,16 @@ export function redeemRouter() {
     }
   });
 
-  function attachOptionalWebSession(req) {
+  async function attachOptionalWebSession(req) {
     if (req.webSession?.userid) return;
     try {
       const cfg = req.app?.locals?.cfg;
+      const db = req.app?.locals?.db;
       const cookies = parseCookies(req.header('cookie'));
       const token = cookies.bob_web_session;
       const secret = webSessionSigningSecret(cfg);
       const payload = verifyWebSessionToken(secret, token);
-      if (payload?.userid && isSessionVersionValid(payload, cfg)) req.webSession = payload;
+      if (payload?.userid && (await isSessionVersionValidLive(payload, db, cfg))) req.webSession = payload;
     } catch {
       // optional
     }
@@ -105,7 +106,7 @@ export function redeemRouter() {
     const page = req.query.page ? Number(req.query.page) : 1;
     const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
     try {
-      attachOptionalWebSession(req);
+      await attachOptionalWebSession(req);
       const db = req.app.locals.db;
       let userid = req.webSession?.userid ? String(req.webSession.userid).trim() : '';
       if (!userid) {

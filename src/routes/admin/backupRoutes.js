@@ -136,7 +136,7 @@ export function registerAdminBackupRoutes(router) {
   }
 
   async function appendBackupHistory(db, req, input) {
-    const payload = getAdminSessionPayload(req) || {};
+    const payload = (await getAdminSessionPayload(req)) || {};
     await db.run(
       `INSERT INTO admin_backup_history(action, mode, filename, status, actor_id, actor_name, details, created_at)
        VALUES(?, ?, ?, ?, ?, ?, ?, unixepoch())`,

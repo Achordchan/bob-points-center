@@ -33,7 +33,8 @@ export function createSessionToken(secret, payload, ttlSeconds) {
   }
   const now = Math.floor(Date.now() / 1000);
   const exp = now + Math.max(60, Number(ttlSeconds || 0) || 3600);
-  const body = { ...payload, iat: now, exp };
+  // aud 固定为 admin，防止 Web Token 跨域复用。
+  const body = { ...payload, aud: 'admin', iat: now, exp };
   const raw = Buffer.from(JSON.stringify(body), 'utf8');
   const sig = sign(secret, raw);
   return `${b64urlEncode(raw)}.${b64urlEncode(sig)}`;
@@ -69,6 +70,8 @@ export function verifySessionToken(secret, token) {
 
   const now = Math.floor(Date.now() / 1000);
   if (!payload?.exp || now >= payload.exp) return null;
+  // 强校验 aud；无 aud 的旧 Admin Cookie 拒绝（强制重新登录）
+  if (payload?.aud !== 'admin') return null;
   return payload;
 }
 

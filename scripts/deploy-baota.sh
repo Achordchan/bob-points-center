@@ -91,6 +91,35 @@ ensure_env_kv "NODE_ENV" "production"
 ensure_env_kv "COOKIE_SECURE" "true"
 ensure_env_kv "TRUST_PROXY" "true"
 
+# 生产会话密钥：WEB 与 ADMIN 必须独立；缺失或相同则生成 WEB_SESSION_SECRET
+get_env_kv() {
+  local key="$1"
+  if [ -f .env ]; then
+    grep -E "^${key}=" .env | tail -n 1 | cut -d= -f2- || true
+  fi
+}
+admin_secret="$(get_env_kv ADMIN_SESSION_SECRET | tr -d '\r')"
+web_secret="$(get_env_kv WEB_SESSION_SECRET | tr -d '\r')"
+if [ -z "${admin_secret}" ]; then
+  echo "生产环境缺少 ADMIN_SESSION_SECRET，停止部署。请在服务器 .env 中配置后重试。"
+  exit 1
+fi
+if [ -z "${web_secret}" ] || [ "${web_secret}" = "${admin_secret}" ]; then
+  new_web="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if [ -z "${new_web}" ] || [ "${new_web}" = "${admin_secret}" ]; then
+    echo "无法生成 WEB_SESSION_SECRET，停止部署。"
+    exit 1
+  fi
+  if grep -Eq "^WEB_SESSION_SECRET=" .env; then
+    tmp_env="$(mktemp)"
+    awk -v v="${new_web}" 'BEGIN{done=0} /^WEB_SESSION_SECRET=/{print "WEB_SESSION_SECRET=" v; done=1; next} {print} END{if(!done) print "WEB_SESSION_SECRET=" v}' .env > "${tmp_env}"
+    mv "${tmp_env}" .env
+  else
+    printf '\nWEB_SESSION_SECRET=%s\n' "${new_web}" >> .env
+  fi
+  echo "已写入/更新服务器 .env 的 WEB_SESSION_SECRET（独立随机密钥）"
+fi
+
 # 后台静态资源必须存在（由本地 npm run build 后 rsync 带上）
 if [ ! -f "src/pages/admin-app-dist/index.html" ]; then
   echo "缺少 src/pages/admin-app-dist/index.html。请在部署前于本机执行 npm run build。"

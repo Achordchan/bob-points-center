@@ -20,6 +20,8 @@ jobs:
         run: npm run lint
       - name: Typecheck (node --check)
         run: npm run typecheck
+      - name: Production dependency audit (high+)
+        run: npm run audit:prod
       - name: Security / unit tests
         run: npm test
       - name: OpenAPI coverage (missing + extra fail)

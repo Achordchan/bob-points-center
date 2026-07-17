@@ -14,7 +14,8 @@ export function adminSessionSigningSecret(cfg) {
 }
 
 export function webSessionSigningSecret(cfg) {
-  const base = cfg?.webSessionSecret || cfg?.adminSessionSecret || '';
+  // 禁止在签名层回退到 admin 密钥；配置层已负责本地兼容与生产强校验。
+  const base = cfg?.webSessionSecret || '';
   const salt = cfg?.sessionSalt || '';
   return salt ? `${base}:${salt}` : String(base);
 }

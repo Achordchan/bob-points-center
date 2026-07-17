@@ -9,15 +9,17 @@ export default defineConfig({
   build: {
     outDir: '../pages/admin-app-dist',
     emptyOutDir: true,
+    // 不再把 antd / wangeditor 打成超大 manualChunks；交给 Rollup 按页面动态导入自然拆包。
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('@wangeditor')) return 'wangeditor';
-          if (id.includes('node_modules/antd') || id.includes('node_modules/@ant-design')) return 'antd';
-          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react-vendor';
+          if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) {
+            return 'react-vendor';
+          }
         },
       },
     },
+    chunkSizeWarningLimit: 900,
   },
   server: {
     port: 5174,

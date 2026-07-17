@@ -4,7 +4,7 @@ import swaggerUi from 'swagger-ui-express';
 import { buildOpenApiSpec, swaggerUiOptions } from '../docs/swagger.js';
 import { parseCookies, verifySessionToken } from '../services/adminSession.js';
 import { getAdminAccess } from '../services/adminPermissionService.js';
-import { adminSessionSigningSecret, isSessionVersionValid } from '../utils/sessionCrypto.js';
+import { adminSessionSigningSecret, isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 
 function getBaseUrl(req) {
   const cfg = req.app?.locals?.cfg;
@@ -30,7 +30,8 @@ function requireDocsAdminSession() {
       return res.status(500).json({ error: String(err?.message || err) });
     }
 
-    if (!payload || !isSessionVersionValid(payload, cfg)) {
+    const db = req.app?.locals?.db;
+    if (!payload || !(await isSessionVersionValidLive(payload, db, cfg))) {
       if (isDocsPageRequest(req)) {
         return res.redirect(302, '/admin/login?redirect=%2Fdocs%2F');
       }

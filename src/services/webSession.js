@@ -18,7 +18,8 @@ export function createWebSessionToken(secret, payload, ttlSeconds) {
   }
   const now = Math.floor(Date.now() / 1000);
   const exp = now + Math.max(60, Number(ttlSeconds || 0) || 86400 * 7);
-  const body = { ...payload, iat: now, exp };
+  // aud 固定为 web，即使密钥误配置相同也不能当 Admin Token。
+  const body = { ...payload, aud: 'web', iat: now, exp };
   const raw = Buffer.from(JSON.stringify(body), 'utf8');
   const sig = sign(secret, raw);
   return `${b64urlEncode(raw)}.${b64urlEncode(sig)}`;
@@ -54,6 +55,7 @@ export function verifyWebSessionToken(secret, token) {
 
   const now = Math.floor(Date.now() / 1000);
   if (!payload?.exp || now >= payload.exp) return null;
+  if (payload?.aud !== 'web') return null;
   return payload;
 }
 

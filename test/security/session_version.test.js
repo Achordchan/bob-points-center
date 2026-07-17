@@ -13,6 +13,7 @@ test('会话版本与 Secure Cookie', () => {
   const secret = adminSessionSigningSecret(cfg);
   const token = createSessionToken(secret, withSessionVersion({ userid: 'u1' }, cfg), 3600);
   const payload = verifySessionToken(secret, token);
+  assert.equal(payload.aud, 'admin');
   assert.equal(payload.sv, 2);
   assert.equal(isSessionVersionValid(payload, cfg), true);
   assert.equal(isSessionVersionValid({ userid: 'u1', exp: 9999999999 }, cfg), false);

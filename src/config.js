@@ -74,8 +74,28 @@ export function loadConfig() {
     adminUserids,
     adminFallbackUserid,
     adminFallbackName: (process.env.ADMIN_FALLBACK_NAME || '').trim(),
-    adminSessionSecret: process.env.ADMIN_SESSION_SECRET || '',
-    webSessionSecret: process.env.WEB_SESSION_SECRET || process.env.ADMIN_SESSION_SECRET || '',
+    adminSessionSecret: (() => {
+      const secret = process.env.ADMIN_SESSION_SECRET || '';
+      if (nodeEnv === 'production' && !String(secret).trim()) {
+        throw new Error('生产环境必须配置 ADMIN_SESSION_SECRET');
+      }
+      return secret;
+    })(),
+    webSessionSecret: (() => {
+      const adminSecret = String(process.env.ADMIN_SESSION_SECRET || '').trim();
+      const webSecret = String(process.env.WEB_SESSION_SECRET || '').trim();
+      if (nodeEnv === 'production') {
+        if (!webSecret) {
+          throw new Error('生产环境必须配置 WEB_SESSION_SECRET，禁止回退到 ADMIN_SESSION_SECRET');
+        }
+        if (webSecret === adminSecret) {
+          throw new Error('生产环境 WEB_SESSION_SECRET 必须与 ADMIN_SESSION_SECRET 不同');
+        }
+        return webSecret;
+      }
+      // 本地开发：未配置 WEB_SESSION_SECRET 时才回退；Token 仍带 aud 域隔离。
+      return webSecret || adminSecret || '';
+    })(),
     dingtalk: {
       corpId: process.env.DINGTALK_CORP_ID || '',
       appKey: process.env.DINGTALK_APP_KEY || '',

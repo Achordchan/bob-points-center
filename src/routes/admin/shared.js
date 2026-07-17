@@ -38,7 +38,7 @@ import {
 import { ensureAccount, listLedgerRecords } from '../../services/ledgerService.js';
 import { deleteRedeemCdks, generateRedeemCdks, listCdkEnabledProducts, listRedeemCdks } from '../../services/cdkService.js';
 import { deleteUsersCompletely, purgeUserBusinessData } from '../../services/userDataPurgeService.js';
-import { adminSessionSigningSecret, cookieOptions, withSessionVersion, isSessionVersionValid } from '../../utils/sessionCrypto.js';
+import { adminSessionSigningSecret, cookieOptions, withSessionVersion, isSessionVersionValidLive } from '../../utils/sessionCrypto.js';
 import {
   listAdminCharityContributions,
   listAdminCharityProjects,
@@ -788,14 +788,15 @@ export function compactUserSearchKeyword(value) {
   return normalizeUserSearchKeyword(value).toLowerCase().replace(/[\s_\-@.]+/g, '');
 }
 
-export function getAdminSessionPayload(req) {
+export async function getAdminSessionPayload(req) {
   const cfg = req.app?.locals?.cfg;
+  const db = req.app?.locals?.db;
   const cookies = parseCookies(req.header('cookie'));
   const token = cookies.bob_admin_session;
   const secret = adminSessionSigningSecret(cfg);
   const payload = verifySessionToken(secret, token);
   if (!payload) return null;
-  if (!isSessionVersionValid(payload, cfg)) return null;
+  if (!(await isSessionVersionValidLive(payload, db, cfg))) return null;
   return payload;
 }
 
