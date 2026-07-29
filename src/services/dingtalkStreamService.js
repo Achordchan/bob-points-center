@@ -69,6 +69,7 @@ async function openConnection(cfg) {
       clientSecret: appSecret,
       subscriptions: [
         { type: 'EVENT', topic: '*' },
+        { type: 'CALLBACK', topic: '/v1.0/im/bot/messages/get' },
       ],
       ua: 'bob-server/1.0',
     }),

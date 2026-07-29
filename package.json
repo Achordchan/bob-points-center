@@ -10,6 +10,7 @@
     "db:tunnel": "bash scripts/pg-tunnel.sh",
     "db:sync-from-prod": "bash scripts/sync-prod-to-local.sh",
     "dev:session": "node scripts/dev-session.js",
+    "dev:tunnel": "bash scripts/dev-domain-tunnel.sh",
     "pg:up": "npm run db:tunnel",
     "pg:down": "echo '当前使用 SSH 数据库隧道；在运行 pg:up 的终端按 Ctrl+C 关闭。'",
     "build": "npm run admin:build",

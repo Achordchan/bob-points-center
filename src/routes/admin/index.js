@@ -1020,6 +1020,7 @@ export function adminRouter() {
       });
       return res.redirect(302, returnTo);
     } catch (err) {
+      console.error('[admin/oauth/callback] login failed:', err?.message || err);
       return res.redirect(302, buildAdminLoginErrorUrl('failed', returnTo));
     }
   });
@@ -1073,6 +1074,7 @@ export function adminRouter() {
         isSuperAdmin: access.isSuperAdmin === true,
         role: access.role,
         permissions: access.permissions || [],
+        env: cfg?.env || process.env.NODE_ENV || 'production',
       });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -2103,6 +2105,7 @@ export function adminRouter() {
         'insufficient balance',
         'exchange already redeemed',
         'payload mismatch',
+        'order listed on market',
       ].includes(message)
         ? 400
         : 500;

@@ -804,6 +804,10 @@ export function publishMoreChanged(section) {
   publishMallRealtimeEvent('more_changed', { section });
 }
 
+export function publishAnnouncementAccessChanged(payload = {}) {
+  publishMallRealtimeEvent('announcement_access_changed', payload);
+}
+
 export function publishMallRealtimeResetForUser(userid, reason) {
   const uid = userid ? String(userid) : '';
   if (!uid) return;

@@ -19,6 +19,7 @@ import {
   toOptionalInt,
   toPositiveInt,
 } from './shared.js';
+import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 
 export function registerAdminBackupRoutes(router) {
 
@@ -30,6 +31,7 @@ export function registerAdminBackupRoutes(router) {
     'mall_opening_schedule',
     'content_faq',
     'content_announcements',
+    'content_announcement_revisions',
     'system_versions',
     'admin_roles',
   ];
@@ -52,6 +54,8 @@ export function registerAdminBackupRoutes(router) {
     'red_packet_items',
     'content_faq',
     'content_announcements',
+    'content_announcement_revisions',
+    'content_announcement_acknowledgements',
     'system_versions',
     'user_feedback',
     'user_feedback_messages',
@@ -247,7 +251,7 @@ export function registerAdminBackupRoutes(router) {
       const filename = buildBackupFilename(mode);
       const payload = {
         _meta: {
-          version: 1,
+          version: 2,
           mode,
           filename,
           exportedAt: now.toISOString(),
@@ -348,13 +352,22 @@ export function registerAdminBackupRoutes(router) {
     if (!backup || typeof backup !== 'object' || !backup.data || typeof backup.data !== 'object') {
       return res.status(400).json({ error: '无效的备份文件格式' });
     }
-    if (backup._meta?.version !== 1) {
+    const backupVersion = Number(backup._meta?.version);
+    if (![1, 2].includes(backupVersion)) {
       return res.status(400).json({ error: `不支持的备份版本: ${backup._meta?.version}` });
     }
 
     const backupMode = backup._meta?.mode === 'full' ? 'full' : 'settings';
     const backupData = backup.data;
-    const allowedTables = new Set(backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES);
+    const v1ExcludedTables = new Set([
+      'content_announcement_revisions',
+      'content_announcement_acknowledgements',
+    ]);
+    const modeTables = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+    const versionTables = backupVersion === 1
+      ? modeTables.filter((name) => !v1ExcludedTables.has(name))
+      : modeTables;
+    const allowedTables = new Set(versionTables);
     const unknownTables = Object.keys(backupData).filter((name) => !allowedTables.has(name));
     if (unknownTables.length > 0) {
       await failHistory('失败', { reason: 'unknown_tables', unknownTables, backupMode });
@@ -365,7 +378,7 @@ export function registerAdminBackupRoutes(router) {
     }
 
     // overwrite 必须包含该模式下的完整表集合；缺失表不得被当成空数组后 DELETE。
-    const expectedTables = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+    const expectedTables = versionTables;
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
       if (missingTables.length > 0) {
@@ -461,8 +474,70 @@ export function registerAdminBackupRoutes(router) {
         });
       }
 
+      const announcements = requireArray('content_announcements') || [];
+      const announcementIds = new Set(announcements.map((row) => Number(row?.id)).filter(Number.isSafeInteger));
+      const announcementRevisionHashes = new Map();
+      const revisions = requireArray('content_announcement_revisions') || [];
+      revisions.forEach((row, index) => {
+        const announcementId = Number(row?.announcement_id);
+        const revision = Number(row?.revision);
+        const contentHash = String(row?.content_hash || '').toLowerCase();
+        const expectedHash = computeAnnouncementContentHash({
+          title: row?.title,
+          content: row?.content,
+          requiresAcknowledgement: Number(row?.requires_acknowledgement || 0) === 1,
+        });
+        if (!Number.isSafeInteger(announcementId) || announcementId <= 0) {
+          pushPreflight('content_announcement_revisions', index, 'announcement_id 无效');
+        }
+        if (!Number.isSafeInteger(revision) || revision <= 0) {
+          pushPreflight('content_announcement_revisions', index, 'revision 无效');
+        }
+        if (!/^[a-f0-9]{64}$/i.test(contentHash)) {
+          pushPreflight('content_announcement_revisions', index, 'content_hash 必须为 64 位十六进制');
+        } else if (contentHash !== expectedHash) {
+          pushPreflight('content_announcement_revisions', index, 'content_hash 与修订正文不匹配');
+        }
+        if (!announcementIds.has(announcementId)) {
+          pushPreflight('content_announcement_revisions', index, '找不到关联公告');
+        }
+        announcementRevisionHashes.set(`${announcementId}:${revision}`, {
+          hash: expectedHash,
+          requiresAcknowledgement: Number(row?.requires_acknowledgement || 0) === 1,
+        });
+      });
+
+      if (backupVersion === 2) {
+        announcements.forEach((row, index) => {
+          const announcementId = Number(row?.id);
+          const revision = Number(row?.revision);
+          const contentHash = String(row?.content_hash || '').toLowerCase();
+          const requiresAcknowledgement = Number(row?.requires_acknowledgement || 0) === 1;
+          const expectedHash = computeAnnouncementContentHash({
+            title: row?.title,
+            content: row?.content,
+            requiresAcknowledgement,
+          });
+          if (!Number.isSafeInteger(revision) || revision <= 0) {
+            pushPreflight('content_announcements', index, 'revision 无效');
+          }
+          if (!/^[a-f0-9]{64}$/i.test(contentHash)) {
+            pushPreflight('content_announcements', index, 'content_hash 必须为 64 位十六进制');
+          } else if (contentHash !== expectedHash) {
+            pushPreflight('content_announcements', index, 'content_hash 与当前正文不匹配');
+          }
+          if (requiresAcknowledgement && Number(row?.show_fullscreen || 0) !== 1) {
+            pushPreflight('content_announcements', index, '要求确认的公告必须全屏展示');
+          }
+          if (announcementRevisionHashes.get(`${announcementId}:${revision}`)?.hash !== expectedHash) {
+            pushPreflight('content_announcements', index, '找不到与当前公告一致的修订快照');
+          }
+        });
+      }
+
       if (backupMode === 'full') {
         const users = requireArray('users') || [];
+        const userIds = new Set(users.map((row) => String(row?.userid || '')).filter(Boolean));
         users.forEach((row, index) => {
           if (!row?.userid) pushPreflight('users', index, '缺少 userid');
         });
@@ -539,6 +614,37 @@ export function registerAdminBackupRoutes(router) {
           }
         });
 
+        const acknowledgements = requireArray('content_announcement_acknowledgements') || [];
+        acknowledgements.forEach((row, index) => {
+          const announcementId = Number(row?.announcement_id);
+          const revision = Number(row?.revision);
+          const action = String(row?.action || '');
+          if (!row?.userid) pushPreflight('content_announcement_acknowledgements', index, '缺少 userid');
+          if (row?.userid && !userIds.has(String(row.userid))) {
+            pushPreflight('content_announcement_acknowledgements', index, '找不到关联用户');
+          }
+          if (!Number.isSafeInteger(announcementId) || announcementId <= 0) {
+            pushPreflight('content_announcement_acknowledgements', index, 'announcement_id 无效');
+          }
+          if (!Number.isSafeInteger(revision) || revision <= 0) {
+            pushPreflight('content_announcement_acknowledgements', index, 'revision 无效');
+          }
+          if (!/^[a-f0-9]{64}$/i.test(String(row?.content_hash || ''))) {
+            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 必须为 64 位十六进制');
+          }
+          if (!['acknowledged', 'dismissed'].includes(action)) {
+            pushPreflight('content_announcement_acknowledgements', index, 'action 无效');
+          }
+          const revisionSnapshot = announcementRevisionHashes.get(`${announcementId}:${revision}`);
+          if (!revisionSnapshot) {
+            pushPreflight('content_announcement_acknowledgements', index, '找不到关联公告修订');
+          } else if (revisionSnapshot.hash !== String(row?.content_hash || '').toLowerCase()) {
+            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 与关联修订不匹配');
+          } else if (revisionSnapshot.requiresAcknowledgement && action !== 'acknowledged') {
+            pushPreflight('content_announcement_acknowledgements', index, '强制确认公告不允许 dismissed');
+          }
+        });
+
         const activities = requireArray('red_packet_activity') || [];
         activities.forEach((row, index) => {
           if (!row?.id) pushPreflight('red_packet_activity', index, '缺少 id');
@@ -585,7 +691,7 @@ export function registerAdminBackupRoutes(router) {
       const recoveryFilename = buildBackupFilename(backupMode);
       const recoveryPayload = {
         _meta: {
-          version: 1,
+          version: 2,
           mode: backupMode,
           filename: recoveryFilename,
           exportedAt: stampDate.toISOString(),
@@ -907,18 +1013,55 @@ export function registerAdminBackupRoutes(router) {
           },
           {
             name: 'content_announcements',
-            sql: 'INSERT INTO content_announcements(id, title, content, level, sort, is_enabled, publish_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING',
-            params: (row) => [
-              row.id,
-              row.title ?? '',
-              row.content ?? '',
-              row.level ?? 'info',
-              row.sort ?? 0,
-              row.is_enabled ?? 1,
-              row.publish_at ?? null,
-              row.created_at ?? nowTs(),
-              row.updated_at ?? nowTs(),
-            ],
+            sql: `INSERT INTO content_announcements(
+                    id, title, content, level, sort, is_enabled, publish_at,
+                    show_fullscreen, requires_acknowledgement, revision, content_hash,
+                    created_at, updated_at
+                  )
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  ON CONFLICT(id) DO NOTHING`,
+            overwriteSql: `INSERT INTO content_announcements(
+                    id, title, content, level, sort, is_enabled, publish_at,
+                    show_fullscreen, requires_acknowledgement, revision, content_hash,
+                    created_at, updated_at
+                  )
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title, content=excluded.content, level=excluded.level,
+                    sort=excluded.sort, is_enabled=excluded.is_enabled, publish_at=excluded.publish_at,
+                    show_fullscreen=excluded.show_fullscreen,
+                    requires_acknowledgement=excluded.requires_acknowledgement,
+                    revision=excluded.revision, content_hash=excluded.content_hash,
+                    created_at=excluded.created_at, updated_at=excluded.updated_at`,
+            params: (row) => {
+              const requiresAcknowledgement = backupVersion === 2
+                && Number(row.requires_acknowledgement || 0) === 1;
+              const showFullscreen = requiresAcknowledgement
+                || (backupVersion === 2 && Number(row.show_fullscreen || 0) === 1);
+              const revision = backupVersion === 2 ? Number(row.revision) : 1;
+              const contentHash = backupVersion === 2
+                ? String(row.content_hash).toLowerCase()
+                : computeAnnouncementContentHash({
+                    title: row.title,
+                    content: row.content,
+                    requiresAcknowledgement: false,
+                  });
+              return [
+                row.id,
+                row.title ?? '',
+                row.content ?? '',
+                row.level ?? 'info',
+                row.sort ?? 0,
+                row.is_enabled ?? 1,
+                row.publish_at ?? null,
+                showFullscreen ? 1 : 0,
+                requiresAcknowledgement ? 1 : 0,
+                revision,
+                contentHash,
+                row.created_at ?? nowTs(),
+                row.updated_at ?? nowTs(),
+              ];
+            },
           },
           {
             name: 'system_versions',
@@ -939,15 +1082,31 @@ export function registerAdminBackupRoutes(router) {
           const rowsRaw = requireArray(table.name);
           const rows = rowsRaw || [];
           if (mode === 'overwrite' && rowsRaw !== null) {
-            await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
+            if (table.name === 'content_announcements') {
+              const ids = rows.map((row) => Number(row?.id)).filter((id) => Number.isSafeInteger(id) && id > 0);
+              if (ids.length > 0) {
+                const placeholders = ids.map((_, index) => `$${index + 1}`).join(',');
+                await execOrThrow(
+                  tx,
+                  `DELETE FROM content_announcements WHERE id NOT IN (${placeholders})`,
+                  ids,
+                  'content_announcements overwrite delete missing',
+                );
+              } else {
+                await execOrThrow(tx, 'DELETE FROM content_announcements', [], 'content_announcements overwrite delete all');
+              }
+            } else {
+              await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
+            }
           }
           let count = 0;
           for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
             if (!row?.id) continue;
             try {
+              const sql = mode === 'overwrite' && table.overwriteSql ? table.overwriteSql : table.sql;
               // eslint-disable-next-line no-await-in-loop
-              await execOrThrow(tx, table.sql, table.params(row), `${table.name}[${i}]`);
+              await execOrThrow(tx, sql, table.params(row), `${table.name}[${i}]`);
               count++;
             } catch (err) {
               markAndThrow(table.name, i, err);
@@ -961,6 +1120,96 @@ export function registerAdminBackupRoutes(router) {
             }
           }
           report[table.name] = count;
+        }
+
+        // content_announcement_revisions：v1 备份按普通公告补齐 v1 快照
+        {
+          const rows = backupVersion === 1
+            ? (requireArray('content_announcements') || []).map((row) => ({
+                announcement_id: row.id,
+                revision: 1,
+                title: row.title ?? '',
+                content: row.content ?? '',
+                requires_acknowledgement: 0,
+                content_hash: computeAnnouncementContentHash({
+                  title: row.title,
+                  content: row.content,
+                  requiresAcknowledgement: false,
+                }),
+                created_by: null,
+                created_name: null,
+                created_at: row.created_at ?? nowTs(),
+              }))
+            : (requireArray('content_announcement_revisions') || []);
+          if (mode === 'overwrite' && requireArray('content_announcements') !== null) {
+            const announcementIds = (requireArray('content_announcements') || [])
+              .map((row) => Number(row?.id))
+              .filter((id) => Number.isSafeInteger(id) && id > 0);
+            if (announcementIds.length > 0) {
+              const placeholders = announcementIds.map((_, index) => `$${index + 1}`).join(',');
+              await execOrThrow(
+                tx,
+                `DELETE FROM content_announcement_revisions WHERE announcement_id IN (${placeholders})`,
+                announcementIds,
+                'content_announcement_revisions overwrite delete restored announcements',
+              );
+            }
+          }
+          let count = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row?.announcement_id || !row?.revision) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await execOrThrow(
+                tx,
+                `INSERT INTO content_announcement_revisions(
+                   announcement_id, revision, title, content, requires_acknowledgement,
+                   content_hash, created_by, created_name, created_at
+                 )
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 ON CONFLICT(announcement_id, revision) DO NOTHING`,
+                [
+                  row.announcement_id,
+                  row.revision,
+                  row.title ?? '',
+                  row.content ?? '',
+                  row.requires_acknowledgement ?? 0,
+                  String(row.content_hash || '').toLowerCase(),
+                  row.created_by ?? null,
+                  row.created_name ?? null,
+                  row.created_at ?? nowTs(),
+                ],
+                `content_announcement_revisions[${i}]`,
+              );
+              count++;
+            } catch (err) {
+              markAndThrow('content_announcement_revisions', i, err);
+            }
+          }
+          if (mode === 'overwrite' && requireArray('content_announcements') !== null) {
+            const announcementIds = (requireArray('content_announcements') || [])
+              .map((row) => Number(row?.id))
+              .filter((id) => Number.isSafeInteger(id) && id > 0);
+            if (announcementIds.length > 0) {
+              const placeholders = announcementIds.map((_, index) => `$${index + 1}`).join(',');
+              await execOrThrow(
+                tx,
+                `DELETE FROM content_announcement_acknowledgements ack
+                  WHERE ack.announcement_id IN (${placeholders})
+                    AND NOT EXISTS (
+                      SELECT 1
+                        FROM content_announcement_revisions revision
+                       WHERE revision.announcement_id = ack.announcement_id
+                         AND revision.revision = ack.revision
+                         AND revision.content_hash = ack.content_hash
+                    )`,
+                announcementIds,
+                'content_announcement_acknowledgements overwrite delete incompatible',
+              );
+            }
+          }
+          report.content_announcement_revisions = count;
         }
 
         if (backupMode === 'full') {
@@ -980,6 +1229,7 @@ export function registerAdminBackupRoutes(router) {
                 'charity_contributions',
                 'user_feedback_messages',
                 'user_feedback',
+                'content_announcement_acknowledgements',
                 'bob_tokens',
                 'accounts',
                 'users',
@@ -1013,6 +1263,58 @@ export function registerAdminBackupRoutes(router) {
               markAndThrow('users', null, err);
             }
             if (rows) report.users = count;
+          }
+
+          // content_announcement_acknowledgements
+          {
+            const rows = requireArray('content_announcement_acknowledgements') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid || !row?.announcement_id || !row?.revision) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                const revisionSnapshot = await tx.get(
+                  `SELECT content_hash, requires_acknowledgement
+                   FROM content_announcement_revisions
+                   WHERE announcement_id = ? AND revision = ?
+                   LIMIT 1`,
+                  [row.announcement_id, row.revision],
+                );
+                const contentHash = String(row.content_hash || '').toLowerCase();
+                if (!revisionSnapshot || String(revisionSnapshot.content_hash || '').toLowerCase() !== contentHash) {
+                  throw new Error('数据库中的公告修订与确认记录不匹配');
+                }
+                if (Number(revisionSnapshot.requires_acknowledgement || 0) === 1 && row.action !== 'acknowledged') {
+                  throw new Error('强制确认公告不允许 dismissed');
+                }
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO content_announcement_acknowledgements(
+                     userid, announcement_id, revision, content_hash, action, created_at
+                   )
+                   VALUES($1,$2,$3,$4,$5,$6)
+                   ON CONFLICT(userid, announcement_id, revision) DO UPDATE SET
+                     content_hash=excluded.content_hash,
+                     action=excluded.action,
+                     created_at=excluded.created_at`,
+                  [
+                    row.userid,
+                    row.announcement_id,
+                    row.revision,
+                    contentHash,
+                    row.action,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `content_announcement_acknowledgements[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('content_announcement_acknowledgements', i, err);
+              }
+            }
+            report.content_announcement_acknowledgements = count;
           }
 
           // admin_user_roles
@@ -1204,8 +1506,8 @@ export function registerAdminBackupRoutes(router) {
                 // eslint-disable-next-line no-await-in-loop
                 await execOrThrow(
                   tx,
-                  `INSERT INTO mall_order_listings(id, listing_id, exchange_id, seller_userid, seller_name_snapshot, buyer_userid, buyer_name_snapshot, price, status, created_at, updated_at, sold_at, cancelled_at)
-                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  `INSERT INTO mall_order_listings(id, listing_id, exchange_id, seller_userid, seller_name_snapshot, buyer_userid, buyer_name_snapshot, price, seller_note, status, created_at, updated_at, sold_at, cancelled_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                    ON CONFLICT(listing_id) DO NOTHING`,
                   [
                     row.id ?? null,
@@ -1216,6 +1518,7 @@ export function registerAdminBackupRoutes(router) {
                     row.buyer_userid ?? null,
                     row.buyer_name_snapshot ?? null,
                     row.price ?? 0,
+                    row.seller_note ?? null,
                     row.status ?? 'active',
                     row.created_at ?? nowTs(),
                     row.updated_at ?? nowTs(),

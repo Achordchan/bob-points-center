@@ -4,6 +4,7 @@ import { verifyEncoded, QRSignError } from '../utils/qr.js';
 import { listRedeemsByUserid } from '../services/redeemService.js';
 import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { parseCookies } from '../services/adminSession.js';
 import { verifyWebSessionToken } from '../services/webSession.js';
@@ -80,6 +81,7 @@ export function redeemRouter() {
         'insufficient balance',
         'exchange already redeemed',
         'payload mismatch',
+        'order listed on market',
       ].includes(message)
         ? 400
         : 500;
@@ -107,6 +109,11 @@ export function redeemRouter() {
     const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
     try {
       await attachOptionalWebSession(req);
+      if (req.webSession?.userid) {
+        let allowed = false;
+        await requireAnnouncementAccess()(req, res, () => { allowed = true; });
+        if (!allowed) return;
+      }
       const db = req.app.locals.db;
       let userid = req.webSession?.userid ? String(req.webSession.userid).trim() : '';
       if (!userid) {

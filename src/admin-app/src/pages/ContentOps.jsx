@@ -66,13 +66,40 @@ function Faq({ canEdit, canDelete }) {
 
 function Announcements({ canEdit, canDelete }) {
   const { message, modal } = App.useApp(); const [rows, setRows] = useState([]); const [editing, setEditing] = useState(null); const [form] = Form.useForm();
+  const requiresAcknowledgement = Form.useWatch('requires_acknowledgement', form);
   const load = async () => setRows((await api('/admin/content/announcements?limit=120')).data || []);
   useEffect(() => { load().catch((e) => message.error(e.message)); }, []);
-  const open = (r = { level: 'info', is_enabled: 1, sort: 0 }) => { form.resetFields(); setEditing(r); form.setFieldsValue({ ...r, publish_at: toDateTimeLocal(r.publish_at), is_enabled: Number(r.is_enabled ?? 1) === 1 }); };
-  const save = async (v) => { await api('/admin/content/announcements/save', { method: 'POST', body: { ...v, id: editing?.id || null, is_enabled: v.is_enabled ? 1 : 0, publish_at: toUnix(v.publish_at) } }); message.success('公告已保存'); setEditing(null); form.resetFields(); load(); };
+  const open = (r = { level: 'info', is_enabled: 1, sort: 0, show_fullscreen: 0, requires_acknowledgement: 0 }) => {
+    form.resetFields();
+    setEditing(r);
+    form.setFieldsValue({
+      ...r,
+      publish_at: toDateTimeLocal(r.publish_at),
+      is_enabled: Number(r.is_enabled ?? 1) === 1,
+      show_fullscreen: Number(r.show_fullscreen || 0) === 1,
+      requires_acknowledgement: Number(r.requires_acknowledgement || 0) === 1,
+    });
+  };
+  const save = async (v) => {
+    await api('/admin/content/announcements/save', {
+      method: 'POST',
+      body: {
+        ...v,
+        id: editing?.id || null,
+        is_enabled: v.is_enabled ? 1 : 0,
+        show_fullscreen: v.show_fullscreen ? 1 : 0,
+        requires_acknowledgement: v.requires_acknowledgement ? 1 : 0,
+        publish_at: toUnix(v.publish_at),
+      },
+    });
+    message.success('公告已保存'); setEditing(null); form.resetFields(); load();
+  };
   const del = (id) => modal.confirm({ title: '删除公告', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/announcements/delete', { method: 'POST', body: { id } }); load(); } });
-  return <Card><DataToolbar onRefresh={load} onCreate={canEdit ? () => open() : null} createText="新增公告" /><Table rowKey="id" dataSource={rows} columns={[{ title: '标题', dataIndex: 'title' }, { title: '级别', dataIndex: 'level', render: (v) => <Tag color={announcementLevelColor[v] || 'default'}>{announcementLevelText[v] || v || '-'}</Tag> }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }, { title: '发布时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => del(r.id)}>删除</Button>}</Space> }]} />
-    <Drawer title={editing?.id ? "编辑公告" : "新增公告"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={canEdit ? <Button type="primary" onClick={() => form.submit()}>保存</Button> : null}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item><Form.Item name="level" label="级别"><Select options={[{ value: 'info', label: '普通' }, { value: 'success', label: '成功' }, { value: 'warning', label: '提醒' }, { value: 'danger', label: '重要' }]} /></Form.Item><Form.Item name="publish_at" label="发布时间"><Input type="datetime-local" /></Form.Item><Form.Item name="sort" label="排序"><Input /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
+  const onRequiresAcknowledgementChange = (checked) => {
+    if (checked) form.setFieldValue('show_fullscreen', true);
+  };
+  return <Card><DataToolbar onRefresh={load} onCreate={canEdit ? () => open() : null} createText="新增公告" /><Table rowKey="id" dataSource={rows} columns={[{ title: '标题', dataIndex: 'title' }, { title: '级别', dataIndex: 'level', render: (v) => <Tag color={announcementLevelColor[v] || 'default'}>{announcementLevelText[v] || v || '-'}</Tag> }, { title: '展示策略', render: (_, r) => <Space size={4} wrap>{Number(r.show_fullscreen) === 1 && <Tag color="geekblue">全屏</Tag>}{Number(r.requires_acknowledgement) === 1 && <Tag color="red">需确认</Tag>}{Number(r.show_fullscreen) !== 1 && Number(r.requires_acknowledgement) !== 1 && <Tag>普通</Tag>}</Space> }, { title: '修订', dataIndex: 'revision', width: 80, render: (v) => `v${Number(v || 1)}` }, { title: '状态', dataIndex: 'is_enabled', render: (v) => Number(v) === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }, { title: '发布时间', dataIndex: 'publish_at', render: formatTs }, { title: '操作', render: (_, r) => <Space>{canEdit && <Button onClick={() => open(r)}>编辑</Button>}{canDelete && <Button danger onClick={() => del(r.id)}>删除</Button>}</Space> }]} />
+    <Drawer title={editing?.id ? "编辑公告" : "新增公告"} open={Boolean(editing)} onClose={() => { setEditing(null); form.resetFields(); }} extra={canEdit ? <Button type="primary" onClick={() => form.submit()}>保存</Button> : null}><Form form={form} layout="vertical" onFinish={save}><Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={9} /></Form.Item><Form.Item name="level" label="级别"><Select options={[{ value: 'info', label: '普通' }, { value: 'success', label: '成功' }, { value: 'warning', label: '提醒' }, { value: 'danger', label: '重要' }]} /></Form.Item><Form.Item name="publish_at" label="发布时间"><Input type="datetime-local" /></Form.Item><Form.Item name="sort" label="排序"><Input /></Form.Item><Form.Item name="show_fullscreen" label="全屏展示" valuePropName="checked"><Switch disabled={Boolean(requiresAcknowledgement)} /></Form.Item><Form.Item name="requires_acknowledgement" label="要求用户确认后继续访问" valuePropName="checked" extra="开启后，用户确认前无法访问商城、余额、流水、订单等业务。修改标题、正文或此开关会生成新修订，并要求所有用户重新确认。"><Switch onChange={onRequiresAcknowledgementChange} /></Form.Item><Form.Item name="is_enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Drawer>
   </Card>;
 }
 

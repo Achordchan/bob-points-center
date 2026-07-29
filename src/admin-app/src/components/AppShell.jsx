@@ -32,6 +32,15 @@ export const navItems = [
   { key: 'audit', icon: <SafetyOutlined />, label: '审计安全' },
 ];
 
+function DevBanner({ env }) {
+  if (!env || env === 'production') return null;
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999, background: '#ff4d4f', color: '#fff', textAlign: 'center', padding: '4px 0', fontSize: 13, fontWeight: 600, letterSpacing: 1, height: 28 }}>
+      ⚠ 开发环境（{env}） — 操作不影响生产数据
+    </div>
+  );
+}
+
 export default function AppShell({ activeKey, onChange, user, dingtalk, canEditDingtalk = false, onOpenDingtalk, onLogout, children }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -47,8 +56,10 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, canEditD
   };
 
   return (
-    <Layout className="admin-shell">
-      {!isMobile && <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed} width={232}>
+    <>
+      <DevBanner env={user?.env} />
+      <Layout className="admin-shell" style={user?.env && user.env !== 'production' ? { marginTop: 28, height: 'calc(100vh - 28px)' } : undefined}>
+        {!isMobile && <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed} width={232}>
         <div className="brand">
           {!collapsed && <b>BOB币发行管理</b>}
         </div>
@@ -83,5 +94,6 @@ export default function AppShell({ activeKey, onChange, user, dingtalk, canEditD
         <Content className="content-wrap">{children}</Content>
       </Layout>
     </Layout>
+    </>
   );
 }

@@ -14,7 +14,6 @@
     marketListings: [],
     marketMine: null,
     marketLoading: false,
-    marketSellableVisibleCount: 0,
     products: [],
     charityProjects: [],
     charityProjectDetail: null,
@@ -44,6 +43,7 @@
     ordersSearchKeyword: '',
     ordersTimeFilter: 'all',
     shopFilter: 'all',
+    productSearchKeyword: '',
     reqSeq: 0,
     qrModalExchangeId: null,
     qrModalPayload: null,
@@ -82,6 +82,13 @@
     eventsSource: null,
     realtimeTimers: {},
     hasSeenRealtimeSnapshot: false,
+    announcementPending: [],
+    announcementCurrent: null,
+    announcementRefreshInFlight: null,
+    announcementNextTimer: null,
+    announcementSubmitting: false,
+    announcementReadyResolver: null,
+    announcementGateBound: false,
   };
 
   function normalizeCartItems(items) {
@@ -455,7 +462,9 @@
   }
 
   function updateModalScrollLock() {
-    const hasVisibleModal = Array.from(document.querySelectorAll('.modal')).some((el) => !el.classList.contains('hidden'));
+    const announcementGate = document.getElementById('announcementGate');
+    const hasVisibleModal = (!announcementGate?.classList.contains('hidden'))
+      || Array.from(document.querySelectorAll('.modal')).some((el) => !el.classList.contains('hidden'));
     document.body.classList.toggle('modalOpen', hasVisibleModal);
     document.documentElement.classList.toggle('modalOpen', hasVisibleModal);
     if (hasVisibleModal) {
@@ -486,6 +495,13 @@
 
   function setCartModalVisible(visible) {
     const m = document.getElementById('cartModal');
+    if (!m) return;
+    m.classList.toggle('hidden', !visible);
+    updateModalScrollLock();
+  }
+
+  function setProductSearchVisible(visible) {
+    const m = document.getElementById('productSearchModal');
     if (!m) return;
     m.classList.toggle('hidden', !visible);
     updateModalScrollLock();
@@ -734,11 +750,27 @@
     const exchangeIdBox = document.getElementById('orderDetailExchangeId');
     const amountBox = document.getElementById('orderDetailAmount');
     const createdAtBox = document.getElementById('orderDetailCreatedAt');
+    const statusBox = document.getElementById('orderDetailStatus');
 
     if (productNameBox) productNameBox.textContent = row?.product_name ? String(row.product_name) : '-';
     if (exchangeIdBox) exchangeIdBox.textContent = row?.exchange_id ? String(row.exchange_id) : '-';
     if (amountBox) amountBox.textContent = row?.bob_amount !== null && row?.bob_amount !== undefined ? `${row.bob_amount} BOB 币` : '-';
     if (createdAtBox) createdAtBox.textContent = fmtTs(row?.created_at);
+    if (statusBox) {
+      const s = String(row?.status || '');
+      const isListed = s === 'listed' || row?.is_listed === true || Number(row?.is_listed || 0) === 1;
+      const subBox = document.getElementById('orderDetailSub');
+      if (isListed) {
+        statusBox.innerHTML = '<span class="pill pillListed">挂单中</span>';
+        if (subBox) subBox.textContent = '该订单已上架到交易市场';
+      } else if (s === 'fulfilled') {
+        statusBox.innerHTML = '<span class="pill pillBad">已核销</span>';
+        if (subBox) subBox.textContent = '已核销订单信息';
+      } else {
+        statusBox.innerHTML = '<span class="pill pillOk">待核销</span>';
+        if (subBox) subBox.textContent = '订单信息';
+      }
+    }
     setHidden('btnOrderDetailCdkInfo', !(row?.cdk_info_available === true || Number(row?.cdk_info_available || 0) === 1));
 
     setOrderDetailVisible(true);
@@ -793,11 +825,224 @@
     }, 1000);
   }
 
+  /**
+   * 通用确认弹窗，复用项目 .modal/.modalBox 样式，返回 Promise<boolean>。
+   * @param {object} opts
+   * @param {string} opts.title - 弹窗标题
+   * @param {string} [opts.message] - 正文（支持多行 \n）
+   * @param {string} [opts.confirmText='确认'] - 确认按钮文字
+   * @param {string} [opts.cancelText='取消'] - 取消按钮文字
+   * @param {boolean} [opts.danger=false] - 确认按钮是否为危险色
+   */
+  function showConfirmDialog({ title, message = '', confirmText = '确认', cancelText = '取消', danger = false } = {}) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal';
+      overlay.style.zIndex = '90';
+      const msgHtml = message
+        ? `<div style="margin-top:12px;font-size:14px;line-height:1.6;color:rgba(15,23,42,0.72);white-space:pre-wrap;">${escapeHtml(message)}</div>`
+        : '';
+      overlay.innerHTML =
+        `<div class="modalBox" style="max-width:380px;">` +
+        `  <div class="modalTop"><div><div class="modalTitle">${escapeHtml(title)}</div></div></div>` +
+        msgHtml +
+        `  <div class="row modalActions" style="margin-top:16px;">` +
+        `    <button class="secondary" type="button" data-role="cancel">${escapeHtml(cancelText)}</button>` +
+        `    <button class="${danger ? 'secondary' : 'buyBtn'}" type="button" data-role="ok" ${danger ? 'style="border-color:rgba(239,68,68,0.36);background:rgba(254,202,202,0.92);color:#7f1d1d;font-weight:800;"' : ''}>${escapeHtml(confirmText)}</button>` +
+        `  </div>` +
+        `</div>`;
+
+      function cleanup(result) {
+        overlay.remove();
+        resolve(result);
+      }
+
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) cleanup(false);
+        if (e.target.dataset?.role === 'cancel') cleanup(false);
+        if (e.target.dataset?.role === 'ok') cleanup(true);
+      });
+
+      document.body.appendChild(overlay);
+    });
+  }
+
   async function safeFetchJson(url, opts) {
     try {
-      return await fetchJson(url, opts);
+      const resp = await fetchJson(url, opts);
+      if (!opts?.skipAnnouncementGate && resp?.status === 403 && resp?.data?.error === 'announcement_ack_required') {
+        window.setTimeout(() => refreshAnnouncementAccessState(), 0);
+      }
+      return resp;
     } catch (err) {
       return { status: 0, data: { error: 'network_error', message: String(err?.message || err) } };
+    }
+  }
+
+  function clearAnnouncementNextTimer() {
+    if (state.announcementNextTimer) clearTimeout(state.announcementNextTimer);
+    state.announcementNextTimer = null;
+  }
+
+  function scheduleAnnouncementNextCheck(nextCheckAt, serverTime) {
+    clearAnnouncementNextTimer();
+    const next = Number(nextCheckAt || 0);
+    const server = Number(serverTime || nowSec());
+    if (!Number.isFinite(next) || next <= server) return;
+    const delay = Math.min(2147483647, Math.max(1000, (next - server + 1) * 1000));
+    state.announcementNextTimer = setTimeout(() => refreshAnnouncementAccessState(), delay);
+  }
+
+  function setAnnouncementGateError(message) {
+    const box = document.getElementById('announcementGateError');
+    if (!box) return;
+    box.textContent = message ? String(message) : '';
+    box.classList.toggle('hidden', !message);
+  }
+
+  function renderAnnouncementGate() {
+    const gate = document.getElementById('announcementGate');
+    const current = state.announcementPending[0] || null;
+    state.announcementCurrent = current;
+    if (!gate) return;
+    if (!current) {
+      gate.classList.add('hidden');
+      updateModalScrollLock();
+      if (state.announcementReadyResolver) {
+        const resolve = state.announcementReadyResolver;
+        state.announcementReadyResolver = null;
+        resolve(true);
+      }
+      return;
+    }
+    const required = Number(current.requires_acknowledgement || 0) === 1;
+    setText('announcementGateProgress', `${required ? '必须确认' : '全屏公告'} · 第 1 / ${state.announcementPending.length} 项`);
+    setText('announcementGateTitle', current.title || '公告');
+    setText('announcementGateRevision', `v${Number(current.revision || 1)}`);
+    setText('announcementGateMeta', current.publish_at ? `发布时间：${fmtTs(current.publish_at)}` : '即时发布');
+    setText('announcementGateContent', current.content || '');
+    const consent = document.getElementById('announcementGateConsent');
+    const checkbox = document.getElementById('announcementGateCheckbox');
+    const confirm = document.getElementById('announcementGateConfirm');
+    const dismiss = document.getElementById('announcementGateDismiss');
+    if (consent) consent.classList.toggle('hidden', !required);
+    if (checkbox) checkbox.checked = false;
+    if (confirm) {
+      confirm.classList.toggle('hidden', !required);
+      confirm.disabled = required;
+      confirm.textContent = '确认并继续';
+    }
+    if (dismiss) dismiss.classList.toggle('hidden', required);
+    setAnnouncementGateError('');
+    gate.classList.remove('hidden');
+    updateModalScrollLock();
+  }
+
+  async function submitAnnouncementAction(action) {
+    const current = state.announcementCurrent;
+    if (!current || state.announcementSubmitting) return;
+    state.announcementSubmitting = true;
+    const confirm = document.getElementById('announcementGateConfirm');
+    const dismiss = document.getElementById('announcementGateDismiss');
+    if (confirm) confirm.disabled = true;
+    if (dismiss) dismiss.disabled = true;
+    setAnnouncementGateError('');
+    try {
+      const resp = await safeFetchJson(`/mall/announcements/${encodeURIComponent(current.id)}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          revision: current.revision,
+          content_hash: current.content_hash,
+          action,
+        }),
+        skipAnnouncementGate: true,
+      });
+      if (!resp?.data?.ok) {
+        if (resp?.status === 409) {
+          await refreshAnnouncementAccessState({ force: true });
+          setAnnouncementGateError('公告内容已更新，请阅读最新版本后重新确认。');
+          return;
+        }
+        setAnnouncementGateError(resp?.data?.message || '提交失败，请稍后重试。');
+        return;
+      }
+      state.announcementPending = Array.isArray(resp.data.pending) ? resp.data.pending : [];
+      scheduleAnnouncementNextCheck(resp.data.next_check_at, resp.data.server_time);
+      renderAnnouncementGate();
+    } finally {
+      state.announcementSubmitting = false;
+      if (dismiss) dismiss.disabled = false;
+      const required = Number(state.announcementCurrent?.requires_acknowledgement || 0) === 1;
+      const checkbox = document.getElementById('announcementGateCheckbox');
+      if (confirm) confirm.disabled = required && !checkbox?.checked;
+    }
+  }
+
+  async function waitForAnnouncementAccess() {
+    const ready = await refreshAnnouncementAccessState();
+    if (ready) return true;
+    return await new Promise((resolve) => {
+      state.announcementReadyResolver = resolve;
+    });
+  }
+
+  function bindAnnouncementGate() {
+    if (state.announcementGateBound) return;
+    state.announcementGateBound = true;
+    const checkbox = document.getElementById('announcementGateCheckbox');
+    const confirm = document.getElementById('announcementGateConfirm');
+    const dismiss = document.getElementById('announcementGateDismiss');
+    checkbox?.addEventListener('change', () => {
+      if (confirm) confirm.disabled = !checkbox.checked || state.announcementSubmitting;
+    });
+    confirm?.addEventListener('click', () => {
+      if (!state.announcementCurrent) {
+        refreshAnnouncementAccessState({ force: true });
+        return;
+      }
+      submitAnnouncementAction('acknowledged');
+    });
+    dismiss?.addEventListener('click', () => submitAnnouncementAction('dismissed'));
+  }
+
+  async function refreshAnnouncementAccessState({ force = false } = {}) {
+    if (state.announcementRefreshInFlight) {
+      const inFlight = state.announcementRefreshInFlight;
+      if (!force) return inFlight;
+      await inFlight;
+      return refreshAnnouncementAccessState();
+    }
+    const request = (async () => {
+      const resp = await safeFetchJson('/mall/access-state', { skipAnnouncementGate: true });
+      if (!resp?.data?.ok) {
+        state.announcementPending = [];
+        state.announcementCurrent = null;
+        const gate = document.getElementById('announcementGate');
+        if (gate) gate.classList.remove('hidden');
+        setText('announcementGateProgress', '访问状态校验');
+        setText('announcementGateTitle', '暂时无法加载公告');
+        setText('announcementGateRevision', '');
+        setText('announcementGateMeta', '请检查网络后重试');
+        setText('announcementGateContent', '系统暂时无法确认您是否已阅读最新规则。为保护访问安全，业务功能暂不可用。');
+        document.getElementById('announcementGateConsent')?.classList.add('hidden');
+        document.getElementById('announcementGateDismiss')?.classList.add('hidden');
+        const confirm = document.getElementById('announcementGateConfirm');
+        if (confirm) { confirm.classList.remove('hidden'); confirm.disabled = false; confirm.textContent = '重新加载'; }
+        setAnnouncementGateError(resp?.data?.message || '访问状态校验失败');
+        updateModalScrollLock();
+        return false;
+      }
+      state.announcementPending = Array.isArray(resp.data.pending) ? resp.data.pending : [];
+      scheduleAnnouncementNextCheck(resp.data.next_check_at, resp.data.server_time);
+      renderAnnouncementGate();
+      return state.announcementPending.length === 0;
+    })();
+    state.announcementRefreshInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (state.announcementRefreshInFlight === request) state.announcementRefreshInFlight = null;
     }
   }
 
@@ -833,6 +1078,8 @@
       if (auth?.data?.userid) {
         setUserIdentity(auth?.data?.name, auth?.data?.avatar);
         syncMeIdentity({ userid: auth?.data?.userid, name: auth?.data?.name });
+        bindAnnouncementGate();
+        if (!(await waitForAnnouncementAccess())) return false;
         ensureMallRealtime(true);
         await refreshBalanceAndLedger();
         return true;
@@ -865,7 +1112,9 @@
       return;
     }
     if (state.activeTab === 'shop') {
-      await loadProducts(undefined, { force: true });
+      if (isMallOpen(state.opening) || isMallEasterUnlocked()) {
+        await loadProducts(undefined, { force: true });
+      }
       await loadCharityProjects();
       return;
     }
@@ -996,6 +1245,12 @@
       }, 20);
       return;
     }
+    if (eventName === 'announcement_access_changed') {
+      scheduleRealtimeTask('announcement_access', async () => {
+        await refreshAnnouncementAccessState({ force: true });
+      }, 20);
+      return;
+    }
     if (eventName === 'more_changed') {
       if (state.activeTab === 'more') {
         scheduleRealtimeTask('more', async () => {
@@ -1030,7 +1285,7 @@
       setRealtimeNotice('实时连接正在重试...');
     };
 
-    ['snapshot', 'ping', 'balance_changed', 'order_updated', 'products_changed', 'charity_changed', 'opening_changed', 'market_changed', 'red_packet_changed', 'more_changed']
+    ['snapshot', 'ping', 'balance_changed', 'order_updated', 'products_changed', 'charity_changed', 'opening_changed', 'market_changed', 'red_packet_changed', 'more_changed', 'announcement_access_changed']
       .forEach((eventName) => {
         source.addEventListener(eventName, (evt) => {
           if (state.eventsSource !== source) return;
@@ -1081,6 +1336,16 @@
     if (!Number.isFinite(n) || n <= 0) return '';
     try {
       return new Date(n * 1000).toLocaleString('zh-CN', { hour12: false });
+    } catch (_) {
+      return String(ts);
+    }
+  }
+
+  function fmtDate(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    try {
+      return new Date(n * 1000).toLocaleDateString('zh-CN');
     } catch (_) {
       return String(ts);
     }
@@ -1220,7 +1485,7 @@
       const statusText = row?.status === 'paused' ? '暂停助力' : (row?.goal_reached ? '已达标' : '进行中');
       return (
         `<div class="charityProjectCard" data-charity-project="${escapeHtml(String(row?.project_id || ''))}">` +
-        `<div class="charityProjectCardMedia ${imageUrl ? '' : 'charityProjectCardMediaEmpty'}">${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(String(row?.project_name || '公益项目'))}" />` : '<span>公益项目</span>'}` +
+        `<div class="charityProjectCardMedia">${imageUrl ? `<div class="imgFallback"></div><img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(String(row?.project_name || '公益项目'))}" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />` : '<div class="imgFallback">公益项目</div>'}` +
         `<button class="charityProjectDetailHint" type="button" aria-label="查看公益项目详情" data-charity-detail="${escapeHtml(String(row?.project_id || ''))}">` +
         `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>` +
         `</button>` +
@@ -1415,6 +1680,12 @@
     state.openingRefreshInFlight = true;
     try {
       await loadMallOpening();
+      // 商城刚开放且尚未加载过商品时，触发加载
+      if (isMallOpen(state.opening) && (!state.products || state.products.length === 0)) {
+        const products = await loadProducts(undefined, { force: true });
+        state.products = products;
+        renderProductsWithFilterAndOrder(state.products);
+      }
     } finally {
       state.openingRefreshInFlight = false;
     }
@@ -1422,10 +1693,12 @@
 
   function applyMallOverlay(row) {
     const overlay = document.getElementById('mallOverlay');
+    const productsWrap = document.getElementById('shopProductsWrap');
     if (!overlay) return;
     const open = isMallOpen(row);
     const showOverlay = state.activeTab === 'shop' && !open && !isMallEasterUnlocked();
     overlay.classList.toggle('hidden', !showOverlay);
+    if (productsWrap) productsWrap.classList.toggle('hidden', showOverlay);
     syncCartViewButtonState();
     const cartModal = document.getElementById('cartModal');
     if (cartModal && !cartModal.classList.contains('hidden')) {
@@ -1524,7 +1797,7 @@
     updateModalScrollLock();
   }
 
-  function showQrModal({ exchangeId, encoded, qrImageUrl, hint, productTitle, amountText, balanceText, cdkInfoAvailable = false, marketListAvailable = false, refundAvailable = true }) {
+  function showQrModal({ exchangeId, encoded, qrImageUrl, hint, productTitle, amountText, balanceText, createdAt = null, cdkInfoAvailable = false, marketListAvailable = false, refundAvailable = true }) {
     const img = document.getElementById('qrImg');
     const exchangeBox = document.getElementById('qrExchangeId');
     const encodedBox = document.getElementById('qrEncoded');
@@ -1532,11 +1805,13 @@
     const productBox = document.getElementById('qrProduct');
     const amountBox = document.getElementById('qrAmount');
     const balanceBox = document.getElementById('qrBalance');
+    const createdAtBox = document.getElementById('qrCreatedAt');
 
     if (hintBox) hintBox.textContent = hint || '请出示给核销人员扫码';
     if (productBox) productBox.textContent = productTitle ? `商品：${String(productTitle)}` : '';
     if (amountBox) amountBox.textContent = amountText ? `价格：${String(amountText)}` : '';
     if (balanceBox) balanceBox.textContent = balanceText ? `剩余：${String(balanceText)}` : '';
+    if (createdAtBox) createdAtBox.textContent = createdAt ? `下单时间：${fmtTs(createdAt)}` : '';
     if (exchangeBox) exchangeBox.textContent = exchangeId ? `订单号：${String(exchangeId)}` : '';
     if (encodedBox) encodedBox.textContent = encoded ? String(encoded) : '';
 
@@ -1551,6 +1826,7 @@
     const safeProductTitle = productTitle ? String(productTitle) : '';
     const safeAmountText = amountText ? String(amountText) : '';
     const safeBalanceText = balanceText ? String(balanceText) : '';
+    const safeCreatedAt = Number(createdAt);
     const cdkAvailable = cdkInfoAvailable === true || Number(cdkInfoAvailable || 0) === 1;
     const marketListVisible = marketListAvailable === true || Number(marketListAvailable || 0) === 1;
     const refundVisible = refundAvailable === true || Number(refundAvailable || 0) === 1;
@@ -1564,6 +1840,7 @@
       productTitle: safeProductTitle,
       amountText: safeAmountText,
       balanceText: safeBalanceText,
+      createdAt: Number.isFinite(safeCreatedAt) && safeCreatedAt > 0 ? safeCreatedAt : null,
       cdkInfoAvailable: cdkAvailable,
       marketListAvailable: marketListVisible,
       refundAvailable: refundVisible,
@@ -1636,7 +1913,7 @@
     const btn = document.getElementById('btnCartView');
     if (!btn) return;
     const count = getCartCount();
-    btn.textContent = `查看购物车（${count}）`;
+    btn.textContent = `购物车（${count}）`;
   }
 
   function isCartViewLocked() {
@@ -2308,9 +2585,10 @@
         const limitText = limit.enabled ? `已购：${limit.used}/${limit.total}` : '';
 
         const imageUrl = p?.image_url ? String(p.image_url) : '';
-        const imgHtml = imageUrl
-          ? `<img class="productImg" src="${escapeHtml(imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
-          : `<div class="productImgFallback"></div>`;
+        // 渐变兜底垫底，图片盖在上面；加载失败时隐藏图片露出兜底，避免出现浏览器裂图图标
+        const imgHtml = `<div class="productImgFallback"></div>` + (imageUrl
+          ? `<img class="productImg" src="${escapeHtml(imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />`
+          : '');
 
         const soldOut = stockNum !== null && Number.isFinite(stockNum) && stockNum <= 0;
         const limitReached = limit.enabled && limit.remaining <= 0;
@@ -2329,9 +2607,9 @@
           `<div class="productBody">` +
           `<div class="productTitle">${escapeHtml(name || productId || '-') }</div>` +
           `<div class="productMeta">${escapeHtml(metaText || stockText)}</div>` +
-          `<div class="productRemark">${escapeHtml(remark || '')}</div>` +
+          (remark ? `<div class="productRemark">${escapeHtml(remark)}</div>` : '') +
           `<div class="productActions">` +
-          `<div class="pricePill">${escapeHtml(amountText)} BOB 币</div>` +
+          `<div class="productPrice"><span class="productPriceNum">${escapeHtml(amountText)}</span><span class="productPriceUnit">BOB 币</span></div>` +
           `</div>` +
           `</div>` +
           `${soldOutHtml}` +
@@ -2344,7 +2622,17 @@
   function renderProductsLoading() {
     const list = document.getElementById('products');
     if (!list) return;
-    list.innerHTML = '<div class="productEmpty productLoading">正在加载商品中…</div>';
+    // 骨架卡片与真实卡片同结构，撑住列表高度，数据到达时不跳动
+    const skeleton =
+      '<div class="productSkeleton" aria-hidden="true">' +
+      '<div class="skelMedia"></div>' +
+      '<div class="skelBody">' +
+      '<div class="skelLine w70"></div>' +
+      '<div class="skelLine w45"></div>' +
+      '<div class="skelLine w45"></div>' +
+      '</div>' +
+      '</div>';
+    list.innerHTML = skeleton.repeat(4);
   }
 
   function renderProductsLoadingFailed() {
@@ -2371,6 +2659,136 @@
     renderProducts(ordered);
   }
 
+  // ===== 商品搜索 =====
+
+  function getProductSearchMatches(keyword) {
+    const kw = String(keyword || '').trim().toLowerCase();
+    if (!kw) return [];
+    const rows = Array.isArray(state.products) ? state.products : [];
+    const hit = rows.filter((p) => {
+      const name = String(p?.product_name || '').toLowerCase();
+      const remark = String(p?.remark || '').toLowerCase();
+      const pid = String(p?.product_id || '').toLowerCase();
+      return name.includes(kw) || remark.includes(kw) || pid.includes(kw);
+    });
+    // 有货优先，售罄沉底
+    const inStock = [];
+    const soldOut = [];
+    for (const x of hit) {
+      if (isProductInStock(x)) inStock.push(x);
+      else soldOut.push(x);
+    }
+    return inStock.concat(soldOut);
+  }
+
+  function getProductRecommendations(limit) {
+    const max = Math.max(1, Math.floor(Number(limit) || 6));
+    const rows = Array.isArray(state.products) ? state.products : [];
+    const usable = rows.filter((p) => {
+      if (!isProductInStock(p)) return false;
+      if (getProductLimitInfo(p).reached) return false;
+      return Number.isFinite(Number(p?.bob_amount));
+    });
+    const affordable = usable.filter((p) => isProductAffordable(p));
+    const pool = affordable.length > 0 ? affordable : usable;
+    // 价格从低到高，先把「马上就能换」的推给用户
+    return pool
+      .slice()
+      .sort((a, b) => Number(a?.bob_amount ?? 0) - Number(b?.bob_amount ?? 0))
+      .slice(0, max);
+  }
+
+  function renderProductSearchRow(p) {
+    const productId = p?.product_id ? String(p.product_id) : '';
+    const name = p?.product_name ? String(p.product_name) : productId;
+    const amount = Number(p?.bob_amount);
+    const amountText = Number.isFinite(amount) ? String(amount) : '-';
+    const stockRaw = p?.stock;
+    const stockNum = stockRaw === null || stockRaw === undefined ? null : Number(stockRaw);
+    const soldOut = stockNum !== null && Number.isFinite(stockNum) && stockNum <= 0;
+    const limit = getProductLimitInfo(p);
+    const limitReached = limit.enabled && limit.remaining <= 0;
+    const disabled = soldOut || limitReached;
+
+    const imageUrl = p?.image_url ? String(p.image_url) : '';
+    const imgHtml = '<div class="psRowFallback"></div>' + (imageUrl
+      ? `<img class="psRowImg" src="${escapeHtml(imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />`
+      : '');
+
+    const stockText = stockNum === null ? '库存：无限' : (Number.isFinite(stockNum) ? `库存：${stockNum}` : '库存：-');
+    const limitText = limit.enabled ? `已购：${limit.used}/${limit.total}` : '';
+    const metaText = [stockText, limitText].filter((x) => x).join(' · ');
+
+    const tag = soldOut ? '售罄' : (limitReached ? '已达限购' : '');
+    const attrs = disabled ? '' : ` data-search-product-id="${escapeHtml(productId)}"`;
+
+    return (
+      `<div class="psRow${disabled ? ' psRowDisabled' : ''}"${attrs}>` +
+      `<div class="psRowMedia">${imgHtml}</div>` +
+      '<div class="psRowBody">' +
+      `<div class="psRowName">${escapeHtml(name || '-')}</div>` +
+      `<div class="psRowMeta">${escapeHtml(metaText)}</div>` +
+      '</div>' +
+      (tag
+        ? `<div class="psRowTag">${escapeHtml(tag)}</div>`
+        : `<div class="psRowPrice"><span class="psRowPriceNum">${escapeHtml(amountText)}</span><span class="psRowPriceUnit">BOB</span></div>`) +
+      '</div>'
+    );
+  }
+
+  function renderProductSearchBody() {
+    const box = document.getElementById('productSearchBody');
+    if (!box) return;
+
+    const clearBtn = document.getElementById('btnProductSearchClear');
+    const keyword = String(state.productSearchKeyword || '');
+    if (clearBtn) clearBtn.classList.toggle('hidden', keyword.trim().length === 0);
+
+    const rows = Array.isArray(state.products) ? state.products : [];
+    if (rows.length === 0) {
+      box.innerHTML = '<div class="psEmpty">商品还没加载好，先回商城刷新一下</div>';
+      return;
+    }
+
+    let html = '';
+    const kw = keyword.trim();
+    if (kw) {
+      const matches = getProductSearchMatches(kw);
+      html += '<div class="psSectionHead"><div class="psSectionTitle">搜索结果</div>'
+        + `<div class="psSectionHint">${matches.length} 个</div></div>`;
+      html += matches.length > 0
+        ? `<div class="psList">${matches.map((p) => renderProductSearchRow(p)).join('')}</div>`
+        : '<div class="psEmpty">没找到相关商品，换个关键词试试</div>';
+    }
+
+    const recs = getProductRecommendations(kw ? 3 : 6);
+    if (recs.length > 0) {
+      html += '<div class="psSectionHead"><div class="psSectionTitle">推荐下单</div>'
+        + '<div class="psSectionHint">余额够 · 有货</div></div>';
+      html += `<div class="psList">${recs.map((p) => renderProductSearchRow(p)).join('')}</div>`;
+    } else if (!kw) {
+      html += '<div class="psEmpty">暂时没有可推荐的商品</div>';
+    }
+
+    box.innerHTML = html;
+  }
+
+  function openProductSearchModal() {
+    setProductSearchVisible(true);
+    renderProductSearchBody();
+    const input = document.getElementById('productSearchInput');
+    if (input) {
+      // 弹窗出现后再聚焦，避免移动端键盘顶掉动画
+      setTimeout(() => {
+        try { input.focus(); } catch (_e) { /* noop */ }
+      }, 60);
+    }
+  }
+
+  function closeProductSearchModal() {
+    setProductSearchVisible(false);
+  }
+
   function renderMarketListings(rows) {
     const list = document.getElementById('marketListings');
     if (!list) return;
@@ -2378,7 +2796,7 @@
     const marketOpen = marketIsOpen(state.marketMine);
 
     if (!data.length) {
-      list.innerHTML = '<div class="marketEmpty">当前暂无可交易挂单</div>';
+      list.innerHTML = '<div class="marketEmpty">暂无在售商品</div>';
       return;
     }
 
@@ -2386,26 +2804,23 @@
       .map((x) => {
         const listingId = x?.listing_id ? String(x.listing_id) : '';
         const productName = x?.product_name ? String(x.product_name) : '';
-        const seller = x?.seller_display_name ? String(x.seller_display_name) : '匿名用户';
+        const seller = x?.seller_display_name ? String(x.seller_display_name) : '匿名';
         const price = Number(x?.price);
         const amountText = Number.isFinite(price) ? `${price} BOB 币` : '-';
-        const originalAmount = Number(x?.original_amount);
-        const originalText = Number.isFinite(originalAmount) ? `${originalAmount} BOB 币` : '-';
-        const refText = fmtPriceRange(x?.price_min, x?.price_max);
-        const refRangeText = refText === '-' ? '无参考区间' : `参考价 ${refText} BOB 币`;
         const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
         const canBuy = x?.can_buy === true || x?.can_buy === 1;
         const disabled = !marketOpen || !canBuy;
-        const actionText = !marketOpen ? '暂停中' : (canBuy ? '立即购买' : '我的挂单');
-        return (`
-          <article class="marketItem marketListingItem" data-market-listing="${escapeHtml(listingId)}">` +
+        const actionText = !marketOpen ? '暂停中' : (canBuy ? '购买' : '我的');
+        const imageUrl = x?.product_image_url || '';
+        const note = x?.seller_note || '';
+        return (
+          `<article class="marketItem marketListingItem" data-market-listing="${escapeHtml(listingId)}">` +
+          `  <div class="marketItemMedia"><div class="imgFallback"></div>${imageUrl ? `<img class="marketItemImage" src="${escapeHtml(imageUrl)}" alt="" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />` : ''}</div>` +
           `  <div class="marketItemMeta">` +
-          `    <div class="marketItemTop">` +
-          `      <div class="marketName">${escapeHtml(productName || exchangeId || '订单')}</div>` +
-          `      <div class="marketPrice"><span>售价</span><strong>${escapeHtml(amountText)}</strong></div>` +
-          `    </div>` +
-          `    <div class="marketInfoRow"><span>卖家</span><b>${escapeHtml(seller)}</b></div>` +
-          `    <div class="marketInfoRow"><span>订单原价</span><b>${escapeHtml(originalText)}</b><em>${escapeHtml(refRangeText)}</em></div>` +
+          `    <div class="marketName">${escapeHtml(productName || exchangeId || '商品')}</div>` +
+          `    <div class="marketPrice">${escapeHtml(amountText)}</div>` +
+          `    <div class="marketSeller">卖家：${escapeHtml(seller)}</div>` +
+          (note ? `    <div class="marketItemNote">"${escapeHtml(note)}"</div>` : '') +
           `  </div>` +
           `  <button class="marketPrimary secondary" type="button" data-market-buy="${escapeHtml(listingId)}" ${disabled ? 'disabled' : ''}>${actionText}</button>` +
           `</article>`
@@ -2415,111 +2830,77 @@
   }
 
   function renderMarketMine(data) {
-    const list = document.getElementById('marketSellableOrders');
-    if (!list) return;
     const mine = data && typeof data === 'object' ? data : { sellable_orders: [], my_listings: [] };
-    const sellableRows = Array.isArray(mine.sellable_orders) ? mine.sellable_orders : [];
     const listingRows = Array.isArray(mine.my_listings) ? mine.my_listings : [];
+    const sellableRows = Array.isArray(mine.sellable_orders) ? mine.sellable_orders : [];
     const marketOpen = marketIsOpen(state.marketMine);
 
-    const totalSellable = sellableRows.length;
-    const visibleCount = Math.min(
-      totalSellable,
-      Math.max(0, Number(state.marketSellableVisibleCount) || 0),
-    );
-    const visibleSellableRows = sellableRows.slice(0, visibleCount);
-    const sellableList = !totalSellable
-      ? '<div class="marketEmpty">暂无可上架订单</div>'
-      : !visibleCount
-        ? (
-          `<div class="marketDisclosure">` +
-          `  <div>` +
-          `    <div class="marketDisclosureTitle">有 ${totalSellable} 个未核销订单可上架</div>` +
-          `    <div class="marketDisclosureHint">订单页打开核销码后，也可以直接选择上架。</div>` +
-          `  </div>` +
-          `  <button class="secondary" type="button" data-market-show-sellable>查看订单</button>` +
-          `</div>`
-        )
-        : visibleSellableRows
-        .map((x) => {
-          const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
-          const name = x?.product_name ? String(x.product_name) : '-';
-          const amount = Number(x?.original_amount);
-          const amountText = Number.isFinite(amount) ? `${amount} BOB 币` : '-';
-          const createdAt = fmtTs(x?.created_at);
-          const refText = fmtPriceRange(x?.price_min, x?.price_max);
-          const refLabel = refText === '-' ? '未配置参考价' : `参考价：${refText} BOB 币`;
-          const disabled = !marketOpen;
-          const actionText = marketOpen ? '上架' : '暂停中';
-          return (
-            `<article class="marketItem marketSellableItem" data-market-sellable-order="${escapeHtml(exchangeId)}">` +
-            `  <div class="marketItemMeta">` +
-            `    <div class="marketName">${escapeHtml(name)}</div>` +
-            `    <div class="marketInfoRow"><span>订单金额</span><b>${escapeHtml(amountText)}</b></div>` +
-            `    <div class="marketInfoRow"><span>参考价格</span><em>${escapeHtml(refLabel)}</em></div>` +
-            `    <div class="marketTime">创建于 ${escapeHtml(createdAt)}</div>` +
-            `  </div>` +
-            `  <button class="marketPrimary secondary" type="button" data-market-list="${escapeHtml(exchangeId)}" ${disabled ? 'disabled' : ''}>${actionText}</button>` +
-            `</article>`
-          );
-        }).join('') +
-          (visibleCount < totalSellable
-            ? `<button class="marketDisclosureMore secondary" type="button" data-market-show-sellable>再显示 ${Math.min(3, totalSellable - visibleCount)} 个订单</button>`
-            : `<button class="marketDisclosureMore secondary" type="button" data-market-hide-sellable>收起可上架订单</button>`);
+    // Update pick button text
+    const pickBtn = document.getElementById('btnMarketPickSellable');
+    if (pickBtn) {
+      if (!sellableRows.length) {
+        pickBtn.textContent = '暂无可上架商品';
+        pickBtn.disabled = true;
+      } else {
+        pickBtn.textContent = `选择商品上架（${sellableRows.length}）`;
+        pickBtn.disabled = !marketOpen;
+      }
+    }
 
     const myListingsNode = document.getElementById('marketMyListings');
     if (!myListingsNode) return;
 
-    list.innerHTML = sellableList;
+    const activeRows = listingRows.filter((x) => String(x?.status || '') === 'active');
+    const historyRows = listingRows.filter((x) => String(x?.status || '') !== 'active');
+    setText('marketActiveTitle', `上架中（${activeRows.length}）`);
 
-    const listingCards = listingRows
-      .map((x) => {
-        const listingId = x?.listing_id ? String(x.listing_id) : '';
-        const productName = x?.product_name ? String(x.product_name) : '-';
-        const amount = Number(x?.original_amount);
-        const amountText = Number.isFinite(amount) ? `${amount} BOB 币` : '-';
-        const status = x?.status ? String(x.status) : 'unknown';
-        const buyer = x?.buyer_display_name ? String(x.buyer_display_name) : '';
-        const statusText = status === 'active'
-          ? '上架中'
-          : status === 'sold'
-            ? '已成交'
-            : status === 'cancelled'
-              ? '已取消'
-              : `状态：${status}`;
-        const rangeText = fmtPriceRange(x?.price_min, x?.price_max);
-        const rangeDisplay = rangeText === '-' ? '未配置参考价' : `${rangeText} BOB 币`;
-        const createdAt = fmtTs(x?.created_at);
-        const soldAt = fmtTs(x?.sold_at);
-        const canceledAt = fmtTs(x?.cancelled_at);
-        const buyerText = buyer ? `买家：${buyer}` : '';
-        const timeText = status === 'sold'
-          ? (soldAt ? `成交时间：${escapeHtml(soldAt)}` : '成交时间：-')
-          : (status === 'cancelled'
-            ? (canceledAt ? `取消时间：${escapeHtml(canceledAt)}` : '取消时间：-')
-            : `创建时间：${escapeHtml(createdAt)}`);
-        const canCancel = status === 'active';
-        const cancelDisabled = !marketOpen;
-        return (
-          `<article class="marketItem marketMineItem" data-market-my-listing="${escapeHtml(listingId)}">` +
-          `  <div class="marketItemMeta">` +
-          `    <div class="marketItemTop">` +
-          `      <div class="marketName">${escapeHtml(productName)}</div>` +
-          `      <span class="marketState marketState-${escapeHtml(status)}">${escapeHtml(statusText)}</span>` +
-          `    </div>` +
-          `    <div class="marketInfoRow"><span>订单金额</span><b>${escapeHtml(amountText)}</b><em>参考价 ${escapeHtml(rangeDisplay)}</em></div>` +
-          `    <div class="marketMeta">${buyerText ? escapeHtml(buyerText) : escapeHtml(timeText)}</div>` +
-          (buyerText ? `    <div class="marketTime">${escapeHtml(timeText)}</div>` : '') +
-          `  </div>` +
-          (canCancel
-            ? `  <button class="marketPrimary secondary" type="button" data-market-cancel="${escapeHtml(listingId)}" ${cancelDisabled ? 'disabled' : ''}>${cancelDisabled ? '暂停中' : '取消'}</button>`
-            : '') +
-          `</article>`
-        );
-      })
-      .join('');
+    function buildListingCard(x) {
+      const listingId = x?.listing_id ? String(x.listing_id) : '';
+      const productName = x?.product_name ? String(x.product_name) : '-';
+      const price = Number(x?.price);
+      const priceText = Number.isFinite(price) ? `${price} BOB` : '-';
+      const createdAt = x?.created_at ? fmtTs(x.created_at) : '';
+      const status = x?.status ? String(x.status) : 'unknown';
+      const statusText = status === 'active'
+        ? '上架中'
+        : status === 'sold'
+          ? '已成交'
+          : status === 'cancelled'
+            ? '已取消'
+            : status;
+      const canCancel = status === 'active';
+      const cancelDisabled = !marketOpen;
+      return (
+        `<article class="marketItem marketMineItem" data-market-my-listing="${escapeHtml(listingId)}">` +
+        `  <div class="marketMineInfo">` +
+        `    <div class="marketName">${escapeHtml(productName)}</div>` +
+        `    <div class="marketMineSub">` +
+        (createdAt ? `      <span class="marketMineTime">${escapeHtml(createdAt)}</span>` : '') +
+        `      <span class="marketState marketState-${escapeHtml(status)}">${escapeHtml(statusText)}</span>` +
+        `    </div>` +
+        `  </div>` +
+        `  <div class="marketMineActions">` +
+        `    <div class="marketMinePrice">${escapeHtml(priceText)}</div>` +
+        (canCancel
+          ? `    <div class="marketMineControls"><button class="marketPrimary secondary" type="button" data-market-edit="${escapeHtml(listingId)}" ${cancelDisabled ? 'disabled' : ''}>编辑</button><button class="marketPrimary secondary" type="button" data-market-cancel="${escapeHtml(listingId)}" ${cancelDisabled ? 'disabled' : ''}>${cancelDisabled ? '暂停中' : '取消'}</button></div>`
+          : '') +
+        `  </div>` +
+        `</article>`
+      );
+    }
 
-    myListingsNode.innerHTML = listingCards || '<div class="marketEmpty">暂无挂单</div>';
+    const activeCards = activeRows.map(buildListingCard).join('');
+    const historyCards = historyRows.map(buildListingCard).join('');
+
+    let html = '';
+    if (activeCards) {
+      html += activeCards;
+    }
+    if (historyCards) {
+      html += `<details class="marketHistoryFold"><summary class="marketHistorySummary">历史记录（${historyRows.length}）</summary>${historyCards}</details>`;
+    }
+
+    myListingsNode.innerHTML = html || '<div class="marketEmpty">暂无挂出的商品</div>';
   }
 
   function renderOrders(rows) {
@@ -2534,11 +2915,14 @@
       .map((x) => {
         const name = x?.product_name ? String(x.product_name) : '';
         const pid = x?.product_id ? String(x.product_id) : '';
-        const ts = fmtTs(x?.created_at);
+        const ts = fmtDate(x?.created_at);
         const exchangeId = x?.exchange_id ? String(x.exchange_id) : '';
         const status = x?.status ? String(x.status) : '';
-        const isPending = status !== 'fulfilled';
-        const pill = isPending ? '<span class="pill pillOk">待核销</span>' : '<span class="pill pillBad">已核销</span>';
+        const isListed = status === 'listed' || x?.is_listed === true || Number(x?.is_listed || 0) === 1;
+        const isPending = status === 'pending' && !isListed;
+        const pill = isListed
+          ? '<span class="pill pillListed">挂单中</span>'
+          : (isPending ? '<span class="pill pillOk">待核销</span>' : '<span class="pill pillBad">已核销</span>');
         const title = name || pid || '-';
 
         const clickableClass = isPending ? ' orderClickable' : '';
@@ -2546,10 +2930,8 @@
         return (
           `<div class="item${clickableClass}"${dataAttr}>` +
           `<div class="orderTop">` +
-          `<div>` +
           `<div class="orderTitle">${pill} <span style="margin-left:8px;">${escapeHtml(title)}</span></div>` +
           `<div class="orderMeta mono">${escapeHtml(ts)}</div>` +
-          `</div>` +
           `</div>` +
           `</div>`
         );
@@ -2945,15 +3327,13 @@
     if (errBox) errBox.textContent = '';
 
     const listingsBox = document.getElementById('marketListings');
-    const sellableBox = document.getElementById('marketSellableOrders');
     const myListingsBox = document.getElementById('marketMyListings');
 
     if ((!state.marketListings || state.marketListings.length === 0) && listingsBox) {
-      listingsBox.innerHTML = '<div class="marketLoading">正在加载市场数据…</div>';
+      listingsBox.innerHTML = '<div class="marketLoading">正在加载…</div>';
     }
-    if ((!state.marketMine?.sellable_orders?.length && !state.marketMine?.my_listings?.length) && sellableBox && myListingsBox) {
-      sellableBox.innerHTML = '<div class="marketLoading">正在加载可上架订单…</div>';
-      myListingsBox.innerHTML = '<div class="marketLoading">正在加载挂单…</div>';
+    if ((!state.marketMine?.my_listings?.length) && myListingsBox) {
+      myListingsBox.innerHTML = '<div class="marketLoading">正在加载…</div>';
     }
 
     try {
@@ -2997,13 +3377,6 @@
         market_open: mineData?.market_open ?? listResp.data?.market_open ?? false,
       };
 
-      const isOpen = marketIsOpen(state.marketMine);
-      setText('marketOpenStatus', isOpen ? '交易中' : '市场暂停');
-      const statusBox = document.getElementById('marketOpenStatus');
-      if (statusBox) {
-        statusBox.classList.toggle('marketStatusOpen', isOpen);
-        statusBox.classList.toggle('marketStatusClosed', !isOpen);
-      }
       setText('marketErr', '');
       renderMarketListings(state.marketListings);
       renderMarketMine(state.marketMine);
@@ -3127,10 +3500,10 @@
     const renderImage = (name, imageUrl) => {
       const safeName = escapeHtml(name || '-');
       const safeImage = imageUrl ? escapeHtml(String(imageUrl)) : '';
-      if (safeImage) {
-        return `<img src="${safeImage}" alt="${safeName}" />`;
-      }
-      return '<div class="popularProductPlaceholder">暂无图</div>';
+      return '<div class="imgFallback"></div>' +
+        (safeImage
+          ? `<img src="${safeImage}" alt="${safeName}" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />`
+          : '');
     };
 
     let html = '<div class="popularBoard">';
@@ -3420,9 +3793,8 @@
 
   async function loadAll() {
     const seq = ++state.reqSeq;
-    const [me, products, ledger, orders, opening, redPacket, charityProjects] = await Promise.all([
+    const [me, ledger, orders, opening, redPacket, charityProjects] = await Promise.all([
       loadMe(seq),
-      loadProducts(seq, { force: true }),
       loadLedger(seq),
       loadOrders(seq),
       loadMallOpening(seq),
@@ -3432,7 +3804,6 @@
 
     if (isStale(seq)) return;
     state.me = me;
-    state.products = products;
     state.ledger = ledger;
     state.orders = orders;
     state.opening = opening;
@@ -3441,7 +3812,14 @@
 
     // ledger 里的 mall_buy 显示要借助 orders 的 product_name
     renderLedger(state.ledger);
-    renderProductsWithFilterAndOrder(state.products);
+
+    // 仅在商城开放或 easter 解锁时才加载商品（节省流量）
+    if (isMallOpen(state.opening) || isMallEasterUnlocked()) {
+      const products = await loadProducts(seq, { force: true });
+      if (isStale(seq)) return;
+      state.products = products;
+      renderProductsWithFilterAndOrder(state.products);
+    }
   }
 
   function findMarketListing(listingId) {
@@ -3474,9 +3852,12 @@
     const seller = row?.seller_display_name ? String(row.seller_display_name) : '匿名用户';
     const price = Number(row?.price);
     const priceText = Number.isFinite(price) ? `${price}` : '-';
-    if (!window.confirm(`确认购买以下订单？\n商品：${productName}\n售卖价：${priceText} BOB\n卖家：${seller}`)) {
-      return;
-    }
+    const confirmed = await showConfirmDialog({
+      title: '确认购买',
+      message: `商品：${productName}\n售价：${priceText} BOB\n卖家：${seller}`,
+      confirmText: '确认购买',
+    });
+    if (!confirmed) return;
 
     const resp = await postJson('/mall/market/buy', { listing_id: listingId });
     if (!resp?.data?.ok) {
@@ -3494,6 +3875,198 @@
     ]);
   }
 
+  // ===== Market listing modal (multi-select + price) =====
+  let _marketListStep = 'pick'; // 'pick' | 'price' | 'edit'
+  let _marketListSelected = []; // exchange_id[]
+  let _marketEditListingId = '';
+
+  function openMarketPickModal() {
+    if (!state.marketMine) {
+      loadMarketData().then(openMarketPickModal);
+      return;
+    }
+    if (!marketIsOpen(state.marketMine)) {
+      showNotice('交易市场已暂停，当前不可上架', 'error');
+      return;
+    }
+    const sellable = Array.isArray(state.marketMine?.sellable_orders) ? state.marketMine.sellable_orders : [];
+    if (!sellable.length) {
+      showNotice('你暂时没有可上架的商品', 'error');
+      return;
+    }
+
+    _marketListStep = 'pick';
+    _marketListSelected = [];
+    setText('marketListModalTitle', '选择要上架的商品');
+    setText('marketListModalSub', '可多选，选好后统一设定价格。');
+    setText('marketListErr', '');
+    setHidden('marketListPriceSection', true);
+    document.getElementById('btnMarketListConfirm').textContent = '下一步';
+
+    const list = document.getElementById('marketPickList');
+    list.innerHTML = sellable.map((x) => {
+      const exchangeId = x?.exchange_id || '';
+      const name = x?.product_name || '商品';
+      const imageUrl = x?.product_image_url || '';
+      const remark = x?.product_remark || '';
+      const amount = Number(x?.original_amount);
+      const priceText = Number.isFinite(amount) && amount > 0 ? `商城价 ${amount} BOB 币` : '';
+      const createdAt = fmtTs(x?.created_at);
+      const timeText = createdAt ? `获得于 ${createdAt}` : '';
+      return (
+        `<div class="marketPickItem" data-pick-id="${escapeHtml(exchangeId)}">` +
+        `  <div class="marketPickCheck"><svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M2 6l3 3 5-5"/></svg></div>` +
+        `  <div class="marketPickMediaWrap"><div class="imgFallback"></div>${imageUrl ? `<img class="marketPickImage" src="${escapeHtml(imageUrl)}" alt="" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />` : ''}</div>` +
+        `  <div class="marketPickInfo">` +
+        `    <div class="marketPickName">${escapeHtml(name)}</div>` +
+        (remark ? `    <div class="marketPickRemark">${escapeHtml(remark)}</div>` : '') +
+        (priceText ? `    <div class="marketPickPrice">${escapeHtml(priceText)}</div>` : '') +
+        (timeText ? `    <div class="marketPickPrice">${escapeHtml(timeText)}</div>` : '') +
+        `  </div>` +
+        `</div>`
+      );
+    }).join('');
+
+    setHidden('marketPickList', false);
+    setHidden('marketListModal', false);
+  }
+
+  function toggleMarketPickItem(el) {
+    const id = el?.getAttribute('data-pick-id');
+    if (!id) return;
+    el.classList.toggle('selected');
+    if (el.classList.contains('selected')) {
+      if (!_marketListSelected.includes(id)) _marketListSelected.push(id);
+    } else {
+      _marketListSelected = _marketListSelected.filter((x) => x !== id);
+    }
+  }
+
+  function closeMarketListModal() {
+    setHidden('marketListModal', true);
+    _marketListStep = 'pick';
+    _marketListSelected = [];
+    _marketEditListingId = '';
+  }
+
+  function openMarketEditModal(listingId) {
+    const listings = Array.isArray(state.marketMine?.my_listings) ? state.marketMine.my_listings : [];
+    const row = listings.find((x) => String(x?.listing_id || '') === String(listingId));
+    if (!row || String(row?.status || '') !== 'active') {
+      showNotice('该挂单当前不可编辑', 'error');
+      return;
+    }
+    if (!marketIsOpen(state.marketMine)) {
+      showNotice('交易市场已暂停，当前不可编辑', 'error');
+      return;
+    }
+
+    _marketListStep = 'edit';
+    _marketListSelected = [];
+    _marketEditListingId = String(listingId);
+    setText('marketListModalTitle', `编辑：${row?.product_name || '商品'}`);
+    setText('marketListModalSub', '修改挂单价格或卖家说明。');
+    setText('marketListErr', '');
+    setHidden('marketPickList', true);
+    setHidden('marketListPriceSection', false);
+    const hintEl = document.getElementById('marketListPriceHint');
+    if (hintEl) {
+      hintEl.textContent = '保存后，在售商品会立即更新。';
+      hintEl.style.display = '';
+    }
+    document.getElementById('marketListPrice').value = String(Number(row?.price) || '');
+    document.getElementById('marketListNote').value = row?.seller_note ? String(row.seller_note) : '';
+    document.getElementById('btnMarketListConfirm').textContent = '保存修改';
+    setHidden('marketListModal', false);
+  }
+
+  async function handleMarketListConfirm() {
+    if (_marketListStep === 'pick') {
+      if (!_marketListSelected.length) {
+        setText('marketListErr', '请至少选择一个商品');
+        return;
+      }
+      setText('marketListErr', '');
+      _marketListStep = 'price';
+      setText('marketListModalTitle', `上架 ${_marketListSelected.length} 个商品`);
+      setText('marketListModalSub', '为选中的商品设定统一价格。');
+      setHidden('marketPickList', true);
+      setHidden('marketListPriceSection', false);
+      document.getElementById('marketListPrice').value = '';
+      document.getElementById('marketListNote').value = '';
+      document.getElementById('btnMarketListConfirm').textContent = '确认上架';
+
+      // Build price hint from selected items (deduplicated by product name)
+      const sellable = Array.isArray(state.marketMine?.sellable_orders) ? state.marketMine.sellable_orders : [];
+      const selectedRows = _marketListSelected.map((id) => sellable.find((x) => String(x?.exchange_id || '') === id)).filter(Boolean);
+      const seen = new Set();
+      const hints = [];
+      selectedRows.forEach((r) => {
+        const pName = r?.product_name || '';
+        if (seen.has(pName)) return;
+        seen.add(pName);
+        const amt = Number(r?.original_amount);
+        const ref = fmtPriceRange(r?.price_min, r?.price_max);
+        if (Number.isFinite(amt) && amt > 0) hints.push(`${pName}：商城价 ${amt} BOB 币${ref !== '-' ? `，参考价 ${ref}` : ''}`);
+        else if (ref !== '-') hints.push(`${pName}：参考价 ${ref} BOB 币`);
+      });
+      const hintEl = document.getElementById('marketListPriceHint');
+      if (hintEl) {
+        hintEl.textContent = hints.length ? hints.join('；') : '';
+        hintEl.style.display = hints.length ? '' : 'none';
+      }
+      return;
+    }
+
+    // step === 'price'
+    const priceInput = document.getElementById('marketListPrice');
+    const noteInput = document.getElementById('marketListNote');
+    const price = Number(priceInput.value.trim());
+    const note = noteInput.value.trim();
+
+    if (!Number.isFinite(price) || !Number.isInteger(price) || price <= 0) {
+      setText('marketListErr', '价格需为正整数');
+      return;
+    }
+    setText('marketListErr', '');
+
+    if (_marketListStep === 'edit') {
+      const listingId = _marketEditListingId;
+      const resp = await postJson('/mall/market/update', { listing_id: listingId, price, note: note || undefined });
+      if (!resp?.data?.ok) {
+        const msg = humanizeMarketError(resp?.data?.error || resp?.status || '', resp?.status);
+        setText('marketListErr', msg);
+        return;
+      }
+      closeMarketListModal();
+      showNotice('挂单已更新', 'success');
+      await loadMarketData();
+      return;
+    }
+
+    let successCount = 0;
+    let lastError = '';
+    const selectedCount = _marketListSelected.length;
+    for (const exchangeId of _marketListSelected) {
+      const resp = await postJson('/mall/market/list', { exchange_id: exchangeId, price, note: note || undefined });
+      if (resp?.data?.ok) {
+        successCount++;
+      } else {
+        lastError = humanizeMarketError(resp?.data?.error || resp?.status || '', resp?.status);
+      }
+    }
+
+    closeMarketListModal();
+    if (successCount > 0) {
+      showNotice(`已成功上架 ${successCount} 个商品`, 'success');
+    }
+    if (lastError && successCount < selectedCount) {
+      showNotice(lastError, 'error');
+    }
+    await Promise.all([loadMarketData(), loadOrders(), loadMe()]);
+  }
+
+  // Single item listing (from QR modal)
   async function listMarketOrder(exchangeId) {
     if (!exchangeId) {
       showNotice('订单缺失，无法上架', 'error');
@@ -3507,37 +4080,37 @@
       return;
     }
 
+    // Pre-select this one item and open the modal at price step
     const row = findSellableOrder(exchangeId);
-    const productName = row?.product_name ? String(row.product_name) : '订单';
+    if (!row) {
+      showNotice('该商品不可上架', 'error');
+      return;
+    }
+
+    _marketListStep = 'price';
+    _marketListSelected = [exchangeId];
+
+    const name = row?.product_name || '商品';
     const amount = Number(row?.original_amount);
-    const amountText = Number.isFinite(amount) ? `${amount} BOB 币` : '-';
-    const priceRange = fmtPriceRange(row?.price_min, row?.price_max);
-    const priceHint = priceRange === '-' ? '' : `参考价：${priceRange} BOB 币`;
-    const input = window.prompt(`上架订单：${productName}\n订单金额：${amountText}${priceHint ? `\n${priceHint}` : ''}\n\n请输入上架价格（正整数）`);
-    if (input === null) return;
+    const ref = fmtPriceRange(row?.price_min, row?.price_max);
+    let hint = '';
+    if (Number.isFinite(amount) && amount > 0) hint = `商城价 ${amount} BOB 币${ref !== '-' ? `，参考价 ${ref} BOB 币` : ''}`;
+    else if (ref !== '-') hint = `参考价 ${ref} BOB 币`;
 
-    const price = Number(input.trim());
-    if (!Number.isFinite(price) || !Number.isInteger(price) || price <= 0) {
-      showNotice('上架价格需为正整数', 'error');
-      return;
+    setText('marketListModalTitle', `上架：${name}`);
+    setText('marketListModalSub', '设定价格后其他同事可以购买。');
+    setText('marketListErr', '');
+    setHidden('marketPickList', true);
+    setHidden('marketListPriceSection', false);
+    const hintEl = document.getElementById('marketListPriceHint');
+    if (hintEl) {
+      hintEl.textContent = hint;
+      hintEl.style.display = hint ? '' : 'none';
     }
-
-    const resp = await postJson('/mall/market/list', { exchange_id: exchangeId, price });
-    if (!resp?.data?.ok) {
-      const msg = humanizeMarketError(resp?.data?.error || resp?.status || '', resp?.status);
-      showNotice(msg, 'error');
-      return;
-    }
-
-    showNotice('已成功上架到交易市场', 'success');
-    if (state.qrModalExchangeId === String(exchangeId)) {
-      closeQrModal();
-    }
-    await Promise.all([
-      loadMarketData(),
-      loadOrders(),
-      loadMe(),
-    ]);
+    document.getElementById('marketListPrice').value = '';
+    document.getElementById('marketListNote').value = '';
+    document.getElementById('btnMarketListConfirm').textContent = '确认上架';
+    setHidden('marketListModal', false);
   }
 
   async function cancelMarketListing(listingId) {
@@ -3545,7 +4118,13 @@
       showNotice('挂单缺失，无法取消', 'error');
       return;
     }
-    if (!window.confirm('确认取消该挂单吗？')) return;
+    const confirmed = await showConfirmDialog({
+      title: '取消挂单',
+      message: '确认取消该挂单吗？取消后商品将回到你的持有列表。',
+      confirmText: '确认取消',
+      danger: true,
+    });
+    if (!confirmed) return;
 
     const resp = await postJson('/mall/market/cancel', { listing_id: listingId });
     if (!resp?.data?.ok) {
@@ -3653,6 +4232,10 @@
       if (state.opening) {
         applyMallOverlay(state.opening);
       }
+      // 解锁后加载商品
+      const products = await loadProducts(undefined, { force: true });
+      state.products = products;
+      renderProductsWithFilterAndOrder(state.products);
     } finally {
       state.mallEasterUnlockInFlight = false;
     }
@@ -3769,6 +4352,8 @@
 
           setUserIdentity(name, auth.data?.avatar);
           syncMeIdentity({ userid, name });
+          bindAnnouncementGate();
+          await waitForAnnouncementAccess();
           document.getElementById('btnRefresh').disabled = false;
           document.getElementById('btnRefresh').onclick = () => refreshBalanceAndLedger();
           const btnTransfer = document.getElementById('btnTransfer');
@@ -3855,6 +4440,61 @@
               openCartModal();
             };
           }
+          const btnProductsSearch = document.getElementById('btnProductsSearch');
+          if (btnProductsSearch) {
+            btnProductsSearch.onclick = () => {
+              openProductSearchModal();
+            };
+          }
+          const productSearchModal = document.getElementById('productSearchModal');
+          if (productSearchModal) {
+            productSearchModal.addEventListener('click', (ev) => {
+              if (ev?.target?.id === 'productSearchModal') {
+                closeProductSearchModal();
+              }
+            });
+          }
+          const btnProductSearchClose = document.getElementById('btnProductSearchClose');
+          if (btnProductSearchClose) btnProductSearchClose.addEventListener('click', closeProductSearchModal);
+          const productSearchInput = document.getElementById('productSearchInput');
+          if (productSearchInput) {
+            productSearchInput.addEventListener('input', () => {
+              state.productSearchKeyword = String(productSearchInput.value || '');
+              renderProductSearchBody();
+            });
+          }
+          const btnProductSearchClear = document.getElementById('btnProductSearchClear');
+          if (btnProductSearchClear) {
+            btnProductSearchClear.addEventListener('click', () => {
+              state.productSearchKeyword = '';
+              if (productSearchInput) {
+                productSearchInput.value = '';
+                try { productSearchInput.focus(); } catch (_e) { /* noop */ }
+              }
+              renderProductSearchBody();
+            });
+          }
+          const productSearchBody = document.getElementById('productSearchBody');
+          if (productSearchBody) {
+            productSearchBody.addEventListener('click', (ev) => {
+              const target = ev?.target;
+              const row = target?.closest ? target.closest('[data-search-product-id]') : null;
+              const pid = row?.getAttribute ? row.getAttribute('data-search-product-id') : '';
+              if (!pid) return;
+              if (isCartViewLocked()) {
+                showNotice('商城未到下单时间', 'error');
+                return;
+              }
+              const product = (state.products || []).find((x) => String(x?.product_id || '') === String(pid));
+              if (!product) {
+                showNotice('商品已不可购买', 'error');
+                return;
+              }
+              closeProductSearchModal();
+              openConfirmModal(product);
+            });
+          }
+
           updateCartViewButton();
           syncCartViewButtonState();
 
@@ -3884,11 +4524,13 @@
           document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
               ensureMallRealtime();
+              refreshAnnouncementAccessState();
             }
           });
 
           window.addEventListener('focus', () => {
             ensureMallRealtime();
+            refreshAnnouncementAccessState();
           });
 
           window.addEventListener('pagehide', () => {
@@ -4235,49 +4877,53 @@
             });
           }
 
-          const marketSellableOrders = document.getElementById('marketSellableOrders');
-          if (marketSellableOrders) {
-            marketSellableOrders.addEventListener('click', (ev) => {
-              const btn = ev?.target?.closest ? ev.target.closest('[data-market-list]') : null;
-              const exchangeId = btn?.getAttribute ? btn.getAttribute('data-market-list') : '';
-              if (!exchangeId) {
-                const showMore = ev?.target?.closest ? ev.target.closest('[data-market-show-sellable]') : null;
-                if (showMore) {
-                  const total = Array.isArray(state.marketMine?.sellable_orders)
-                    ? state.marketMine.sellable_orders.length
-                    : 0;
-                  const current = Math.max(0, Number(state.marketSellableVisibleCount) || 0);
-                  state.marketSellableVisibleCount = Math.min(
-                    total,
-                    current ? current + 3 : 3,
-                  );
-                  renderMarketMine(state.marketMine);
-                  return;
-                }
-                const hideAll = ev?.target?.closest ? ev.target.closest('[data-market-hide-sellable]') : null;
-                if (hideAll) {
-                  state.marketSellableVisibleCount = 0;
-                  renderMarketMine(state.marketMine);
-                }
-                return;
-              }
-              ev.preventDefault();
-              ev.stopPropagation();
-              listMarketOrder(exchangeId);
-            });
-          }
+          // "选择商品上架" button
+          document.getElementById('btnMarketPickSellable')?.addEventListener('click', openMarketPickModal);
+
+          // Pick list item click (toggle selection)
+          document.getElementById('marketPickList')?.addEventListener('click', (ev) => {
+            const item = ev?.target?.closest ? ev.target.closest('[data-pick-id]') : null;
+            if (item) toggleMarketPickItem(item);
+          });
 
           const marketMyListings = document.getElementById('marketMyListings');
           if (marketMyListings) {
             marketMyListings.addEventListener('click', (ev) => {
-              const btn = ev?.target?.closest ? ev.target.closest('[data-market-cancel]') : null;
-              const listingId = btn?.getAttribute ? btn.getAttribute('data-market-cancel') : '';
+              const editBtn = ev?.target?.closest ? ev.target.closest('[data-market-edit]') : null;
+              const editListingId = editBtn?.getAttribute ? editBtn.getAttribute('data-market-edit') : '';
+              if (editListingId) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                openMarketEditModal(editListingId);
+                return;
+              }
+
+              const cancelBtn = ev?.target?.closest ? ev.target.closest('[data-market-cancel]') : null;
+              const listingId = cancelBtn?.getAttribute ? cancelBtn.getAttribute('data-market-cancel') : '';
               if (!listingId) return;
               ev.preventDefault();
               ev.stopPropagation();
               cancelMarketListing(listingId);
             });
           }
+
+          // Market sub-tab 切换
+          const marketSubnav = document.getElementById('marketSubnav');
+          if (marketSubnav) {
+            marketSubnav.addEventListener('click', (ev) => {
+              const btn = ev?.target?.closest ? ev.target.closest('[data-market-tab]') : null;
+              if (!btn) return;
+              const tab = btn.getAttribute('data-market-tab');
+              marketSubnav.querySelectorAll('.segBtn').forEach((b) => b.classList.toggle('active', b === btn));
+              setHidden('marketPanelBuy', tab !== 'buy');
+              setHidden('marketPanelSell', tab !== 'sell');
+            });
+          }
+
+          // Market list modal events
+          document.getElementById('btnMarketListClose')?.addEventListener('click', closeMarketListModal);
+          document.getElementById('btnMarketListCancel')?.addEventListener('click', closeMarketListModal);
+          document.getElementById('btnMarketListConfirm')?.addEventListener('click', handleMarketListConfirm);
 
           document.getElementById('orders').addEventListener('click', (ev) => {
             const target = ev?.target;
@@ -4300,6 +4946,7 @@
                 productTitle: row?.product_name ? String(row.product_name) : String(row?.product_id || ''),
                 amountText: row?.redeem_source === 'cdk' ? '' : (row?.bob_amount !== null && row?.bob_amount !== undefined ? `${row.bob_amount} BOB 币` : ''),
                 balanceText: '',
+                createdAt: row?.created_at ?? null,
                 cdkInfoAvailable: row?.cdk_info_available === true || Number(row?.cdk_info_available || 0) === 1,
                 marketListAvailable: true,
                 refundAvailable: row?.redeem_source !== 'cdk',

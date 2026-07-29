@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
+import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS mall_order_listings (
   buyer_userid TEXT,
   buyer_name_snapshot TEXT,
   price BIGINT NOT NULL,
+  seller_note TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
@@ -206,10 +208,45 @@ CREATE TABLE IF NOT EXISTS content_announcements (
   sort INTEGER NOT NULL DEFAULT 0,
   is_enabled INTEGER NOT NULL DEFAULT 1,
   publish_at BIGINT,
+  show_fullscreen INTEGER NOT NULL DEFAULT 0 CHECK (show_fullscreen IN (0, 1)),
+  requires_acknowledgement INTEGER NOT NULL DEFAULT 0 CHECK (requires_acknowledgement IN (0, 1)),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  content_hash TEXT NOT NULL DEFAULT '',
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
-  updated_at BIGINT NOT NULL DEFAULT (${nowExpr})
+  updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  CHECK (requires_acknowledgement = 0 OR show_fullscreen = 1)
 );
 CREATE INDEX IF NOT EXISTS idx_content_announcements_enabled_publish ON content_announcements(is_enabled, publish_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS content_announcement_revisions (
+  id BIGSERIAL PRIMARY KEY,
+  announcement_id BIGINT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  requires_acknowledgement INTEGER NOT NULL DEFAULT 0 CHECK (requires_acknowledgement IN (0, 1)),
+  content_hash TEXT NOT NULL CHECK (char_length(content_hash) = 64),
+  created_by TEXT,
+  created_name TEXT,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (announcement_id) REFERENCES content_announcements(id) ON DELETE CASCADE,
+  UNIQUE (announcement_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_content_announcement_revisions_announcement ON content_announcement_revisions(announcement_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS content_announcement_acknowledgements (
+  id BIGSERIAL PRIMARY KEY,
+  userid TEXT NOT NULL,
+  announcement_id BIGINT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  content_hash TEXT NOT NULL CHECK (char_length(content_hash) = 64),
+  action TEXT NOT NULL CHECK (action IN ('acknowledged', 'dismissed')),
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE,
+  FOREIGN KEY (announcement_id) REFERENCES content_announcements(id) ON DELETE CASCADE,
+  UNIQUE (userid, announcement_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_content_announcement_ack_announcement ON content_announcement_acknowledgements(announcement_id, revision);
 
 CREATE TABLE IF NOT EXISTS user_feedback (
   id BIGSERIAL PRIMARY KEY,
@@ -678,6 +715,65 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS extension TEXT");
   await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS hired_date BIGINT");
   await db.exec("ALTER TABLE user_dingtalk_profiles ADD COLUMN IF NOT EXISTS leader_in_dept TEXT");
+  await db.exec("ALTER TABLE mall_order_listings ADD COLUMN IF NOT EXISTS seller_note TEXT");
+  await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS show_fullscreen INTEGER NOT NULL DEFAULT 0");
+  await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS requires_acknowledgement INTEGER NOT NULL DEFAULT 0");
+  await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1");
+  await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT ''");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_content_announcements_access ON content_announcements(is_enabled, requires_acknowledgement, show_fullscreen, publish_at)");
+  const announcementsMissingHash = await db.all(
+    `SELECT id, title, content, requires_acknowledgement, revision, created_at
+       FROM content_announcements
+      WHERE content_hash IS NULL OR char_length(content_hash) <> 64`,
+  );
+  for (const announcement of announcementsMissingHash || []) {
+    const contentHash = computeAnnouncementContentHash({
+      title: announcement.title,
+      content: announcement.content,
+      requiresAcknowledgement: Number(announcement.requires_acknowledgement || 0) === 1,
+    });
+    await db.run(
+      `UPDATE content_announcements
+          SET content_hash = ?, revision = CASE WHEN revision < 1 THEN 1 ELSE revision END
+        WHERE id = ?`,
+      [contentHash, announcement.id],
+    );
+  }
+  await db.exec(`
+    INSERT INTO content_announcement_revisions(
+      announcement_id, revision, title, content, requires_acknowledgement,
+      content_hash, created_at
+    )
+    SELECT id, revision, title, content, requires_acknowledgement,
+           content_hash, created_at
+      FROM content_announcements
+    ON CONFLICT(announcement_id, revision) DO NOTHING
+  `);
+  await db.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_fullscreen') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_fullscreen CHECK (show_fullscreen IN (0, 1));
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_acknowledgement') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_acknowledgement CHECK (requires_acknowledgement IN (0, 1));
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_revision') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_revision CHECK (revision >= 1);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_hash') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_hash CHECK (char_length(content_hash) = 64);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_ack_fullscreen') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_ack_fullscreen
+          CHECK (requires_acknowledgement = 0 OR show_fullscreen = 1);
+      END IF;
+    END $$;
+  `);
   await ensureAdminRoles(db);
   // 历史 bob_tokens.token 明文清空（仅保留 hash）；新 Token 创建时本就写 null。
   try {
