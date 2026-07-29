@@ -12,6 +12,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-bob}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       TZ: Asia/Shanghai
+    command: ["postgres", "-c", "bob.environment=development"]
     ports:
       - "127.0.0.1:5432:5432"
     volumes:

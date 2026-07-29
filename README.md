@@ -232,7 +232,7 @@ npm run dev:session -- admin
 npm run dev:session -- web
 ```
 
-该脚本不修改任何认证逻辑，直接调用项目自身的签名函数并使用本地 `.env` 的会话密钥；在 `NODE_ENV=production` 或 `PG_HOST` 非本地地址时拒绝执行。可追加 `userid` 参数指定用户。
+该脚本不修改任何认证逻辑，直接调用项目自身的签名函数并使用本地 `.env` 的会话密钥。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`）；脚本会在只读事务中核对实际数据库名与本地 PostgreSQL 的 `bob.environment=development` 标记，全部通过后才允许初始化数据库。可追加 `userid` 参数指定用户。
 
 ### 6. 访问入口
 

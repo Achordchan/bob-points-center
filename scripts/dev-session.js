@@ -13,6 +13,7 @@
  *   node scripts/dev-session.js admin <userid>   # 指定 userid
  */
 import 'dotenv/config';
+import { Client } from 'pg';
 import { loadConfig } from '../src/config.js';
 import { initDb } from '../src/db/init.js';
 import { createSessionToken } from '../src/services/adminSession.js';
@@ -32,14 +33,57 @@ if (KIND !== 'admin' && KIND !== 'web') {
 }
 
 const cfg = loadConfig();
-const db = await initDb(cfg);
+const expectedDatabase = String(process.env.DEV_SESSION_DATABASE || '').trim();
+const configuredDatabase = String(process.env.PG_DATABASE || '').trim();
+const host = String(cfg.db?.host || '').trim();
 
-// 保险：确认连的不是生产库
-const host = String(cfg.db?.host || '');
 if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
   console.error(`拒绝执行：PG_HOST=${host} 不是本地地址。`);
   process.exit(1);
 }
+if (!configuredDatabase || !expectedDatabase || configuredDatabase !== expectedDatabase) {
+  console.error('拒绝执行：必须显式配置相同的 PG_DATABASE 与 DEV_SESSION_DATABASE。');
+  process.exit(1);
+}
+
+const preflight = new Client({
+  host: cfg.db.host,
+  port: Number(cfg.db.port || 5432),
+  database: cfg.db.database,
+  user: cfg.db.user,
+  password: cfg.db.password,
+  ssl: cfg.db.ssl ? { rejectUnauthorized: false } : undefined,
+  connectionTimeoutMillis: 5000,
+  application_name: 'bob-dev-session-preflight',
+});
+try {
+  await preflight.connect();
+  await preflight.query('BEGIN READ ONLY');
+  const result = await preflight.query(
+    "SELECT current_database() AS database, current_setting('bob.environment', true) AS environment",
+  );
+  const identity = result.rows?.[0] || {};
+  if (String(identity.database || '') !== expectedDatabase) {
+    throw new Error(`实际数据库 ${identity.database || '未知'} 与预期 ${expectedDatabase} 不一致`);
+  }
+  if (String(identity.environment || '').trim().toLowerCase() !== 'development') {
+    throw new Error('目标 PostgreSQL 未设置 bob.environment=development');
+  }
+  await preflight.query('ROLLBACK');
+} catch (err) {
+  console.error(`拒绝执行：开发数据库身份校验失败：${String(err?.message || err)}`);
+  process.exitCode = 1;
+  try {
+    await preflight.query('ROLLBACK');
+  } catch {
+    // 连接或事务尚未建立
+  }
+  await preflight.end().catch(() => {});
+  process.exit();
+}
+await preflight.end();
+
+const db = await initDb(cfg);
 
 let userid = WANT_USERID;
 let name = '';

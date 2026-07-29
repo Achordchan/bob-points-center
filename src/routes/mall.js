@@ -1230,7 +1230,7 @@ export function mallRouter() {
       );
       const listingRows = await db.all(
         `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot,
-                l.buyer_userid, l.buyer_name_snapshot, l.price, l.status, l.created_at, l.sold_at, l.cancelled_at,
+                l.buyer_userid, l.buyer_name_snapshot, l.price, l.seller_note, l.status, l.created_at, l.sold_at, l.cancelled_at,
                 r.product_id, r.product_name, r.bob_amount
            FROM mall_order_listings l
            LEFT JOIN redeems r ON r.exchange_id = l.exchange_id
