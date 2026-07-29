@@ -131,6 +131,15 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
       throw new Error('payload mismatch');
     }
 
+    // 已上架到交易市场的订单不允许核销
+    const activeListing = await db.get(
+      "SELECT listing_id FROM mall_order_listings WHERE exchange_id = ? AND status = 'active' LIMIT 1",
+      [String(exchangeId)],
+    );
+    if (activeListing) {
+      throw new Error('order listed on market');
+    }
+
     const updated = await db.run(
       `UPDATE redeems
           SET fulfilled_at = unixepoch(), fulfilled_by = ?, fulfilled_name = ?
@@ -151,22 +160,14 @@ export async function confirmRedeemInTx(db, { exchangeId, userid, productId, pro
     if (!Number(updated?.changes || 0)) {
       throw new Error('payload mismatch');
     }
-    const cancelledListing = await db.get(
-      `UPDATE mall_order_listings
-          SET status = 'cancelled', cancelled_at = unixepoch(), updated_at = unixepoch()
-        WHERE exchange_id = ?
-          AND status = 'active'
-        RETURNING listing_id`,
-      [String(exchangeId)],
-    );
     const row = await db.get('SELECT balance FROM accounts WHERE userid = ?', [String(userid)]);
     return {
       ok: true,
       userid: String(userid),
       balance: Number(row?.balance ?? 0),
       exchange_id: String(exchangeId),
-      market_listing_cancelled: Boolean(cancelledListing?.listing_id),
-      market_listing_id: cancelledListing?.listing_id ? String(cancelledListing.listing_id) : '',
+      market_listing_cancelled: false,
+      market_listing_id: '',
     };
   }
 

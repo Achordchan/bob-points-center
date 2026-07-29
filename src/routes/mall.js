@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { requireBobToken } from '../middleware/requireBobToken.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { createRedeemOrderInTx } from '../services/redeemService.js';
 import { ensureAccount, listLedgerRecords, transferBob } from '../services/ledgerService.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
@@ -17,6 +18,10 @@ import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
 import { createQrRenderPath } from '../services/qrImageService.js';
 import { getSiteVisibilitySettings } from '../services/systemSettings.js';
+import {
+  buildAnnouncementAccessState,
+  recordAnnouncementAction,
+} from '../services/announcementAccessService.js';
 
 const mallEasterTokens = new Map();
 function normalizeLimitRound(value) {
@@ -254,12 +259,15 @@ function normalizeMarketListing(row = {}, currentUserid = '') {
     exchange_id: String(row?.exchange_id || ''),
     product_id: String(row?.product_id || ''),
     product_name: String(row?.product_name || ''),
-    original_amount: Number(row?.bob_amount ?? 0),
+    original_amount: Number(row?.product_price ?? row?.bob_amount ?? 0),
     price: Number(row?.price ?? 0),
     seller_userid: sellerUserid,
     seller_display_name: resolveDisplayName(row?.seller_name_snapshot || row?.seller_name, sellerUserid),
     buyer_userid: row?.buyer_userid ? String(row.buyer_userid) : '',
     buyer_display_name: row?.buyer_userid ? buyerName : '',
+    seller_note: row?.seller_note ? String(row.seller_note) : '',
+    product_image_url: row?.product_image_url ? String(row.product_image_url) : '',
+    product_remark: row?.product_remark ? String(row.product_remark) : '',
     status: String(row?.status || ''),
     created_at: row?.created_at ?? null,
     sold_at: row?.sold_at ?? null,
@@ -532,7 +540,57 @@ export function mallRouter() {
     }
   });
 
-  router.get('/me', requireWebSession(), async (req, res) => {
+  router.get('/access-state', requireWebSession(), async (req, res) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const state = await buildAnnouncementAccessState(
+        req.app.locals.db,
+        String(req.webSession.userid || ''),
+      );
+      return res.json(state);
+    } catch (err) {
+      return res.status(503).json({
+        error: 'announcement_access_unavailable',
+        message: '暂时无法确认公告签署状态，请稍后重试。',
+        detail: String(err?.message || err),
+      });
+    }
+  });
+
+  router.post('/announcements/:id/acknowledge', requireWebSession(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = String(req.webSession.userid || '');
+    try {
+      const result = await db.transaction(async (tx) => recordAnnouncementAction(tx, {
+        userid,
+        announcementId: req.params.id,
+        revision: req.body?.revision,
+        contentHash: req.body?.content_hash,
+        action: req.body?.action,
+      }));
+      const state = await buildAnnouncementAccessState(db, userid);
+      publishMallRealtimeEvent('announcement_access_changed', {
+        userid,
+        announcement_id: result.id,
+        revision: result.revision,
+        reason: result.action,
+      });
+      return res.json({ ...state, acknowledgement: result });
+    } catch (err) {
+      const code = String(err?.code || '');
+      if (code === 'announcement_not_found') return res.status(404).json({ error: code });
+      if (code === 'announcement_revision_conflict') {
+        return res.status(409).json({ error: code, current: err.current || null });
+      }
+      if (code === 'announcement_not_active') return res.status(409).json({ error: code });
+      if (code.startsWith('invalid_') || code === 'announcement_acknowledgement_required') {
+        return res.status(400).json({ error: code, message: String(err?.message || err) });
+      }
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/me', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -549,7 +607,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/users', requireWebSession(), async (req, res) => {
+  router.get('/users', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const keyword = req.query.keyword ? String(req.query.keyword).trim() : '';
     const limitRaw = toOptionalInt(req.query?.limit);
@@ -582,7 +640,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/rich-board', requireWebSession(), async (req, res) => {
+  router.get('/rich-board', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const limit = Math.min(100, Math.max(1, toOptionalInt(req.query?.limit) || 50));
     try {
@@ -608,7 +666,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/popular-products', requireWebSession(), async (req, res) => {
+  router.get('/popular-products', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const limit = Math.min(50, Math.max(1, toOptionalInt(req.query?.limit) || 20));
     try {
@@ -638,7 +696,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/more/faq', requireWebSession(), async (req, res) => {
+  router.get('/more/faq', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const limit = Math.min(100, Math.max(1, toOptionalInt(req.query?.limit) || 50));
     try {
@@ -657,14 +715,15 @@ export function mallRouter() {
     }
   });
 
-  router.get('/more/announcements', requireWebSession(), async (req, res) => {
+  router.get('/more/announcements', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const limit = Math.min(50, Math.max(1, toOptionalInt(req.query?.limit) || 20));
     try {
       res.setHeader('Cache-Control', 'no-store');
       const now = nowSec();
       const rows = await db.all(
-        `SELECT id, title, content, level, publish_at, updated_at
+        `SELECT id, title, content, level, publish_at, show_fullscreen,
+                requires_acknowledgement, revision, content_hash, updated_at
          FROM content_announcements
          WHERE is_enabled = 1
            AND (publish_at IS NULL OR publish_at <= ?)
@@ -678,7 +737,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/more/version', requireWebSession(), async (req, res) => {
+  router.get('/more/version', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -697,7 +756,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/more/stats', requireWebSession(), async (req, res) => {
+  router.get('/more/stats', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -735,7 +794,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/more/feedback/mine', requireWebSession(), async (req, res) => {
+  router.get('/more/feedback/mine', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -759,7 +818,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/more/feedback', requireWebSession(), async (req, res) => {
+  router.post('/more/feedback', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -798,7 +857,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/more/feedback/:id/messages', requireWebSession(), async (req, res) => {
+  router.post('/more/feedback/:id/messages', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -830,7 +889,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/red-packet/status', requireWebSession(), async (req, res) => {
+  router.get('/red-packet/status', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -872,7 +931,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/red-packet/claim', requireWebSession(), async (req, res) => {
+  router.post('/red-packet/claim', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -931,7 +990,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/opening', requireWebSession(), async (req, res) => {
+  router.get('/opening', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -942,7 +1001,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/easter/unlock', requireWebSession(), async (req, res) => {
+  router.post('/easter/unlock', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -963,7 +1022,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/ledger', requireWebSession(), async (req, res) => {
+  router.get('/ledger', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -983,7 +1042,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/products', requireWebSession(), async (req, res) => {
+  router.get('/products', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     try {
@@ -1002,7 +1061,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/products/version', requireWebSession(), async (req, res) => {
+  router.get('/products/version', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -1019,7 +1078,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/charity/projects', requireWebSession(), async (req, res) => {
+  router.get('/charity/projects', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -1030,7 +1089,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/charity/project', requireWebSession(), async (req, res) => {
+  router.get('/charity/project', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
@@ -1043,7 +1102,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/charity/contribute', requireWebSession(), async (req, res) => {
+  router.post('/charity/contribute', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const cfg = req.app.locals.cfg;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
@@ -1107,7 +1166,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/market/listings', requireWebSession(), async (req, res) => {
+  router.get('/market/listings', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -1121,12 +1180,14 @@ export function mallRouter() {
         return res.json({ ok: true, market_open: false, data: [] });
       }
       const rows = await db.all(
-        `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot, l.price, l.status, l.created_at,
+        `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot, l.price, l.status, l.created_at, l.seller_note,
                 r.product_id, r.product_name, r.bob_amount,
-                COALESCE(u.name, '') AS seller_name
+                COALESCE(u.name, '') AS seller_name,
+                p.image_url AS product_image_url, p.remark AS product_remark, p.bob_amount AS product_price
            FROM mall_order_listings l
           JOIN redeems r ON r.exchange_id = l.exchange_id
            LEFT JOIN users u ON u.userid = l.seller_userid
+           LEFT JOIN mall_products p ON p.product_id = r.product_id
           WHERE l.status = 'active'
             AND r.fulfilled_at IS NULL
             AND r.userid = l.seller_userid
@@ -1141,7 +1202,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/market/mine', requireWebSession(), async (req, res) => {
+  router.get('/market/mine', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -1152,11 +1213,13 @@ export function mallRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const marketOpen = await getMarketOpen(db);
       const sellableRows = await db.all(
-        `SELECT r.exchange_id, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at, r.userid
+        `SELECT r.exchange_id, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at, r.userid,
+                p.image_url AS product_image_url, p.remark AS product_remark, p.bob_amount AS product_price
            FROM redeems r
            LEFT JOIN mall_order_listings active_l
              ON active_l.exchange_id = r.exchange_id
             AND active_l.status = 'active'
+           LEFT JOIN mall_products p ON p.product_id = r.product_id
           WHERE r.userid = ?
             AND r.fulfilled_at IS NULL
             AND (r.exchange_id LIKE 'MALL_%' OR r.exchange_id LIKE 'CDK_%')
@@ -1167,7 +1230,7 @@ export function mallRouter() {
       );
       const listingRows = await db.all(
         `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot,
-                l.buyer_userid, l.buyer_name_snapshot, l.price, l.status, l.created_at, l.sold_at, l.cancelled_at,
+                l.buyer_userid, l.buyer_name_snapshot, l.price, l.seller_note, l.status, l.created_at, l.sold_at, l.cancelled_at,
                 r.product_id, r.product_name, r.bob_amount
            FROM mall_order_listings l
            LEFT JOIN redeems r ON r.exchange_id = l.exchange_id
@@ -1183,7 +1246,9 @@ export function mallRouter() {
           exchange_id: String(row?.exchange_id || ''),
           product_id: String(row?.product_id || ''),
           product_name: String(row?.product_name || ''),
-          original_amount: Number(row?.bob_amount ?? 0),
+          original_amount: Number(row?.product_price ?? row?.bob_amount ?? 0),
+          product_image_url: row?.product_image_url ? String(row.product_image_url) : '',
+          product_remark: row?.product_remark ? String(row.product_remark) : '',
           status: 'pending',
           created_at: row?.created_at ?? null,
         })),
@@ -1194,12 +1259,13 @@ export function mallRouter() {
     }
   });
 
-  router.post('/market/list', requireWebSession(), async (req, res) => {
+  router.post('/market/list', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name).trim() : '';
     const exchangeId = req.body?.exchange_id ? String(req.body.exchange_id).trim() : '';
     const price = toInt(req.body?.price);
+    const sellerNote = req.body?.note ? String(req.body.note).trim().slice(0, 200) : '';
     if (!userid) {
       return res.status(401).json({ error: 'unauthorized' });
     }
@@ -1241,9 +1307,9 @@ export function mallRouter() {
         );
         if (active) throw new Error('already listed');
         await tx.run(
-          `INSERT INTO mall_order_listings(listing_id, exchange_id, seller_userid, seller_name_snapshot, price, status)
-           VALUES(?, ?, ?, ?, ?, 'active')`,
-          [listingId, exchangeId, userid, name || null, price],
+          `INSERT INTO mall_order_listings(listing_id, exchange_id, seller_userid, seller_name_snapshot, price, seller_note, status)
+           VALUES(?, ?, ?, ?, ?, ?, 'active')`,
+          [listingId, exchangeId, userid, name || null, price, sellerNote || null],
         );
         return await tx.get(
           `SELECT l.*, r.product_id, r.product_name, r.bob_amount
@@ -1266,7 +1332,61 @@ export function mallRouter() {
     }
   });
 
-  router.post('/market/cancel', requireWebSession(), async (req, res) => {
+  router.post('/market/update', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const listingId = req.body?.listing_id ? String(req.body.listing_id).trim() : '';
+    const price = toInt(req.body?.price);
+    const sellerNote = req.body?.note ? String(req.body.note).trim().slice(0, 200) : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    if (!listingId) {
+      return res.status(400).json({ error: 'missing listing_id' });
+    }
+    if (price === null || price <= 0 || !Number.isSafeInteger(price)) {
+      return res.status(400).json({ error: 'invalid price' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      if (!await getMarketOpen(db)) {
+        return res.status(403).json({ error: 'mall_open' });
+      }
+      const row = await db.transaction(async (tx) => {
+        const opening = await tx.get('SELECT * FROM mall_opening_schedule WHERE id = 1 FOR UPDATE');
+        if (isMallOpenRow(opening)) throw new Error('mall_open');
+        const listing = await tx.get(
+          'SELECT * FROM mall_order_listings WHERE listing_id = ? FOR UPDATE',
+          [listingId],
+        );
+        if (!listing || String(listing.seller_userid || '') !== userid) throw new Error('listing not found');
+        if (String(listing.status || '') !== 'active') throw new Error('listing not active');
+        await tx.run(
+          'UPDATE mall_order_listings SET price = ?, seller_note = ?, updated_at = unixepoch() WHERE listing_id = ?',
+          [price, sellerNote || null, listingId],
+        );
+        return await tx.get(
+          `SELECT l.*, r.product_id, r.product_name, r.bob_amount
+             FROM mall_order_listings l
+             JOIN redeems r ON r.exchange_id = l.exchange_id
+            WHERE l.listing_id = ?
+            LIMIT 1`,
+          [listingId],
+        );
+      });
+      publishMallRealtimeEvent('market_changed', { listing_id: listingId, exchange_id: row?.exchange_id || '' });
+      return res.json({ ok: true, data: normalizeMarketListing(row, userid) });
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (message === 'mall_open') return res.status(403).json({ error: message });
+      if (message === 'listing not found') return res.status(404).json({ error: message });
+      if (message === 'listing not active') return res.status(409).json({ error: message });
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  router.post('/market/cancel', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const listingId = req.body?.listing_id ? String(req.body.listing_id).trim() : '';
@@ -1309,7 +1429,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/market/buy', requireWebSession(), async (req, res) => {
+  router.post('/market/buy', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const buyerUserid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const buyerName = req.webSession?.name ? String(req.webSession.name).trim() : '';
@@ -1437,7 +1557,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/orders', requireWebSession(), async (req, res) => {
+  router.get('/orders', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -1451,9 +1571,12 @@ export function mallRouter() {
       const rows = await db.all(
         `SELECT r.exchange_id, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
                 CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
-                CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS cdk_info_available
+                CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS cdk_info_available,
+                CASE WHEN active_l.listing_id IS NOT NULL THEN 1 ELSE 0 END AS is_listed
            FROM redeems r
            LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
+           LEFT JOIN mall_order_listings active_l
+             ON active_l.exchange_id = r.exchange_id AND active_l.status = 'active'
           WHERE r.userid = ? AND (r.exchange_id LIKE 'MALL_%' OR r.exchange_id LIKE 'CDK_%')
           ORDER BY r.created_at DESC
           LIMIT ?`,
@@ -1466,12 +1589,26 @@ export function mallRouter() {
         const pending = fulfilledAt === null || fulfilledAt === undefined;
         const redeemSource = x?.redeem_source ? String(x.redeem_source) : 'purchase';
         const cdkInfoAvailable = Number(x?.cdk_info_available || 0) === 1;
+        const isListed = Number(x?.is_listed || 0) === 1;
         if (!pending) {
           return {
             ...x,
             redeem_source: redeemSource,
             cdk_info_available: cdkInfoAvailable,
+            is_listed: false,
             status: 'fulfilled',
+            encoded: null,
+            qr_image_url: null,
+          };
+        }
+        // 已上架到交易市场的订单：不生成二维码
+        if (isListed) {
+          return {
+            ...x,
+            redeem_source: redeemSource,
+            cdk_info_available: cdkInfoAvailable,
+            is_listed: true,
+            status: 'listed',
             encoded: null,
             qr_image_url: null,
           };
@@ -1491,6 +1628,7 @@ export function mallRouter() {
             ...x,
             redeem_source: redeemSource,
             cdk_info_available: cdkInfoAvailable,
+            is_listed: false,
             status: 'pending',
             encoded: qr.encoded,
             qr_image_url: qr.qr_image_url,
@@ -1500,6 +1638,7 @@ export function mallRouter() {
             ...x,
             redeem_source: redeemSource,
             cdk_info_available: cdkInfoAvailable,
+            is_listed: false,
             status: 'pending',
             encoded: null,
             qr_image_url: null,
@@ -1514,7 +1653,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/cdk/preview', requireWebSession(), async (req, res) => {
+  router.post('/cdk/preview', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -1540,7 +1679,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/cdk/redeem', requireWebSession(), async (req, res) => {
+  router.post('/cdk/redeem', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     const name = req.webSession?.name ? String(req.webSession.name) : '';
@@ -1590,7 +1729,7 @@ export function mallRouter() {
     }
   });
 
-  router.get('/cdk/info', requireWebSession(), async (req, res) => {
+  router.get('/cdk/info', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
     if (!userid) {
@@ -1609,7 +1748,7 @@ export function mallRouter() {
     }
   });
 
-  router.post('/buy', requireWebSession(), async (req, res) => {
+  router.post('/buy', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const db = req.app.locals.db;
     const cfg = req.app?.locals?.cfg;
     const userid = req.webSession?.userid ? String(req.webSession.userid) : '';

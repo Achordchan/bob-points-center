@@ -686,10 +686,10 @@
                 <button id="btnExportFull" type="button" class="secondary" disabled>导出全量备份（含用户数据）</button>
               </div>
               <div class="help">
-                <b>设置备份</b>：包含系统设置、商品、公益项目、商城开闭场、FAQ、公告、版本信息等配置，<b>不含</b>用户账户、账本、订单、日志和打卡记录。<br>
-                <b>设置备份包含表</b>：<code>system_settings</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>mall_opening_schedule</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>system_versions</code>。<br>
-                <b>全量备份</b>：包含全部核心业务数据，含用户、余额、账本、订单、CDK、公益助力、打卡奖励记录、红包、反馈、系统日志、令牌等，文件较大。<br>
-                <b>全量备份包含表</b>：<code>users</code>、<code>accounts</code>、<code>bob_tokens</code>、<code>ledger</code>、<code>redeems</code>、<code>mall_order_listings</code>、<code>redeem_cdks</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>charity_contributions</code>、<code>attendance_reward_records</code>、<code>mall_opening_schedule</code>、<code>red_packet_activity</code>、<code>red_packet_items</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>system_versions</code>、<code>user_feedback</code>、<code>audit_logs</code>、<code>system_settings</code>。
+                <b>设置备份</b>：包含系统设置、商品、公益项目、商城开闭场、FAQ、公告正文及修订快照、版本信息等配置，<b>不含</b>逐用户公告确认、用户账户、账本、订单、日志和打卡记录。<br>
+                <b>设置备份包含表</b>：<code>system_settings</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>mall_opening_schedule</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>content_announcement_revisions</code>、<code>system_versions</code>、<code>admin_roles</code>。<br>
+                <b>全量备份</b>：包含全部核心业务数据，含用户、公告确认记录、余额、账本、订单、CDK、公益助力、打卡奖励记录、红包、反馈、系统日志、令牌等，文件较大。<br>
+                <b>全量备份包含表</b>：<code>users</code>、<code>accounts</code>、<code>bob_tokens</code>、<code>ledger</code>、<code>redeems</code>、<code>mall_order_listings</code>、<code>redeem_cdks</code>、<code>mall_products</code>、<code>charity_projects</code>、<code>charity_contributions</code>、<code>attendance_reward_records</code>、<code>mall_opening_schedule</code>、<code>red_packet_activity</code>、<code>red_packet_items</code>、<code>content_faq</code>、<code>content_announcements</code>、<code>content_announcement_revisions</code>、<code>content_announcement_acknowledgements</code>、<code>system_versions</code>、<code>user_feedback</code>、<code>user_feedback_messages</code>、<code>audit_logs</code>、<code>admin_roles</code>、<code>admin_user_roles</code>、<code>system_settings</code>。
               </div>
             </div>
           </div>

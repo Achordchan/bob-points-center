@@ -2,11 +2,16 @@
 import { requireAdminSession } from '../../middleware/requireAdminSession.js';
 import { sanitizeRichHtml } from '../../utils/sanitizeHtml.js';
 import {
+  announcementRequiresNewRevision,
+  computeAnnouncementContentHash,
+} from '../../services/announcementAccessService.js';
+import {
   attachFeedbackMessages,
   getAdminSessionPayload,
   isTruthyFlag,
   normalizeAnnouncementLevel,
   normalizeFeedbackStatus,
+  publishAnnouncementAccessChanged,
   publishMoreChanged,
   runInTransaction,
   toOptionalInt,
@@ -87,7 +92,9 @@ export function registerAdminContentRoutes(router) {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const rows = await db.all(
-        `SELECT id, title, content, level, sort, is_enabled, publish_at, created_at, updated_at
+        `SELECT id, title, content, level, sort, is_enabled, publish_at,
+                show_fullscreen, requires_acknowledgement, revision, content_hash,
+                created_at, updated_at
          FROM content_announcements
          ORDER BY COALESCE(publish_at, created_at) DESC, sort ASC, id DESC
          LIMIT ?`,
@@ -108,28 +115,93 @@ export function registerAdminContentRoutes(router) {
     const sort = toOptionalInt(req.body?.sort) ?? 0;
     const isEnabled = isTruthyFlag(req.body?.is_enabled) ? 1 : 0;
     const publishAt = toOptionalInt(req.body?.publish_at);
+    const requiresAcknowledgement = isTruthyFlag(req.body?.requires_acknowledgement) ? 1 : 0;
+    const showFullscreen = requiresAcknowledgement || isTruthyFlag(req.body?.show_fullscreen) ? 1 : 0;
     if (!title) return res.status(400).json({ error: 'missing title' });
     if (!content) return res.status(400).json({ error: 'missing content' });
     try {
       res.setHeader('Cache-Control', 'no-store');
-      if (id) {
-        const r = await db.run(
-          `UPDATE content_announcements
-           SET title = ?, content = ?, level = ?, sort = ?, is_enabled = ?, publish_at = ?, updated_at = unixepoch()
-           WHERE id = ?`,
-          [title, content, level, sort, isEnabled, publishAt, id],
+      const admin = (await getAdminSessionPayload(req)) || {};
+      const actorId = admin?.userid ? String(admin.userid) : '';
+      const actorName = admin?.name ? String(admin.name) : '';
+      const saved = await runInTransaction(db, async (tx) => {
+        if (id) {
+          const previous = await tx.get(
+            `SELECT id, title, content, requires_acknowledgement, revision, content_hash
+               FROM content_announcements
+              WHERE id = ?
+              FOR UPDATE`,
+            [id],
+          );
+          if (!previous) return null;
+          const revisionChanged = announcementRequiresNewRevision(previous, {
+            title,
+            content,
+            requires_acknowledgement: requiresAcknowledgement,
+          });
+          const revision = revisionChanged ? Number(previous.revision || 1) + 1 : Number(previous.revision || 1);
+          const contentHash = revisionChanged
+            ? computeAnnouncementContentHash({ title, content, requiresAcknowledgement: requiresAcknowledgement === 1 })
+            : String(previous.content_hash || '');
+          await tx.run(
+            `UPDATE content_announcements
+                SET title = ?, content = ?, level = ?, sort = ?, is_enabled = ?, publish_at = ?,
+                    show_fullscreen = ?, requires_acknowledgement = ?, revision = ?, content_hash = ?,
+                    updated_at = unixepoch()
+              WHERE id = ?`,
+            [title, content, level, sort, isEnabled, publishAt, showFullscreen,
+              requiresAcknowledgement, revision, contentHash, id],
+          );
+          if (revisionChanged) {
+            await tx.run(
+              `INSERT INTO content_announcement_revisions(
+                 announcement_id, revision, title, content, requires_acknowledgement,
+                 content_hash, created_by, created_name, created_at
+               ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+              [id, revision, title, content, requiresAcknowledgement, contentHash, actorId, actorName],
+            );
+          }
+          return { id, revision, content_hash: contentHash };
+        }
+        const revision = 1;
+        const contentHash = computeAnnouncementContentHash({
+          title,
+          content,
+          requiresAcknowledgement: requiresAcknowledgement === 1,
+        });
+        const inserted = await tx.run(
+          `INSERT INTO content_announcements(
+             title, content, level, sort, is_enabled, publish_at, show_fullscreen,
+             requires_acknowledgement, revision, content_hash, created_at, updated_at
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
+          [title, content, level, sort, isEnabled, publishAt, showFullscreen,
+            requiresAcknowledgement, revision, contentHash],
         );
-        if (!r?.changes) return res.status(400).json({ error: 'announcement not found' });
-        publishMoreChanged('announcements');
-        return res.json({ ok: true, id });
-      }
-      const r = await db.run(
-        `INSERT INTO content_announcements(title, content, level, sort, is_enabled, publish_at, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
-        [title, content, level, sort, isEnabled, publishAt],
-      );
+        const announcementId = Number(inserted?.lastID || 0);
+        await tx.run(
+          `INSERT INTO content_announcement_revisions(
+             announcement_id, revision, title, content, requires_acknowledgement,
+             content_hash, created_by, created_name, created_at
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+          [announcementId, revision, title, content, requiresAcknowledgement, contentHash, actorId, actorName],
+        );
+        return { id: announcementId, revision, content_hash: contentHash };
+      });
+      if (!saved) return res.status(400).json({ error: 'announcement not found' });
+      req.auditLogPayload = {
+        announcement_id: saved.id,
+        revision: saved.revision,
+        content_hash: saved.content_hash,
+        show_fullscreen: showFullscreen,
+        requires_acknowledgement: requiresAcknowledgement,
+      };
       publishMoreChanged('announcements');
-      return res.json({ ok: true, id: Number(r?.lastID || 0) });
+      publishAnnouncementAccessChanged({
+        announcement_id: saved.id,
+        revision: saved.revision,
+        reason: id ? 'updated' : 'created',
+      });
+      return res.json({ ok: true, ...saved });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -144,6 +216,7 @@ export function registerAdminContentRoutes(router) {
       const r = await db.run('DELETE FROM content_announcements WHERE id = ?', [id]);
       if (!r?.changes) return res.status(400).json({ error: 'announcement not found' });
       publishMoreChanged('announcements');
+      publishAnnouncementAccessChanged({ announcement_id: id, reason: 'deleted' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

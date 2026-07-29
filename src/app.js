@@ -143,9 +143,9 @@ export function createApp({ db, cfg } = {}) {
       attendance_checkin: ({ data, headers }) => handleCheckinEvent(db, cfg, { data, headers }),
       'attendance:CHECKIN': ({ data, headers }) => handleCheckinEvent(db, cfg, { data, headers }),
       // 通配符兜底：打印所有未命中的事件，便于排查
-      '*': ({ topic, data }) => {
+      '*': ({ topic, data, headers }) => {
         // eslint-disable-next-line no-console
-        console.log(`[DingtalkStream] 未处理事件 topic="${topic}" data=${typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)}`);
+        console.log(`[DingtalkStream] 未处理事件 topic="${topic}" headers=${JSON.stringify(headers||{}).slice(0,300)} data=${typeof data === 'string' ? data.slice(0, 500) : JSON.stringify(data).slice(0, 500)}`);
       },
     });
     startAttendanceRewardReconcileScheduler({ db, cfg });

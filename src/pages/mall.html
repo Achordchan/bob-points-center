@@ -14,6 +14,28 @@
         <div class="siteGateMessage" id="siteGateMessage">系统维护中，请稍后再试。</div>
       </div>
     </section>
+    <section class="announcementGate hidden" id="announcementGate" role="dialog" aria-modal="true" aria-labelledby="announcementGateTitle" aria-describedby="announcementGateContent">
+      <div class="announcementGateCard">
+        <div class="announcementGateHeader">
+          <div>
+            <div class="announcementGateEyebrow" id="announcementGateProgress">重要公告</div>
+            <h1 class="announcementGateTitle" id="announcementGateTitle">公告</h1>
+          </div>
+          <span class="announcementGateRevision" id="announcementGateRevision">v1</span>
+        </div>
+        <div class="announcementGateMeta" id="announcementGateMeta"></div>
+        <div class="announcementGateContent" id="announcementGateContent"></div>
+        <label class="announcementGateConsent hidden" id="announcementGateConsent">
+          <input type="checkbox" id="announcementGateCheckbox" />
+          <span>我已阅读并理解以上内容，同意遵守相关规则。</span>
+        </label>
+        <div class="announcementGateError hidden" id="announcementGateError" role="alert"></div>
+        <div class="announcementGateActions">
+          <button class="secondary hidden" id="announcementGateDismiss" type="button">知道了</button>
+          <button class="buyBtn" id="announcementGateConfirm" type="button" disabled>确认并继续</button>
+        </div>
+      </div>
+    </section>
     <div class="wrap">
       <header class="topbar">
         <div class="topSlotLeft" aria-hidden="true"></div>
@@ -93,12 +115,18 @@
           <div class="sectionHead shopHead">
             <div class="shopActions" id="shopActions">
               <button class="iconBtn shopRefresh" id="btnProductsRefresh" disabled type="button" aria-label="刷新商品">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M21 12a9 9 0 1 1-2.64-6.36" />
                   <path d="M21 3v6h-6" />
                 </svg>
               </button>
-              <button class="secondary" id="btnCartView" disabled type="button">查看购物车（0）</button>
+              <button class="iconBtn shopSearchBtn" id="btnProductsSearch" type="button" aria-label="搜索商品">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M20 20l-3.6-3.6" />
+                </svg>
+              </button>
+              <button class="secondary" id="btnCartView" disabled type="button">购物车（0）</button>
               <div class="shopFilter" id="shopFilter">
                 <label class="shopFilterLabel" id="shopFilterTrigger" for="shopFilterSelect">筛选</label>
                 <select id="shopFilterSelect" class="shopFilterSelect" aria-label="商品筛选">
@@ -193,61 +221,51 @@
         </div>
       </div>
     </div>
-          <div class="shopProductsWrap" id="shopProductsWrap">
-            <div class="mallOverlay hidden" id="mallOverlay">
-              <div class="mallOverlayCard">
-                <div class="mallOverlayTitle">商城未到下单时间</div>
-                <div class="mallOverlaySub" id="mallNextOpenLabel">下一次开启时间</div>
-                <div class="mallOverlayTime" id="mallNextOpenAt">-</div>
-                <div class="mallOverlayCountdown" id="mallCountdown">--:--:--</div>
-                <div class="mallOverlayHint">请耐心等待商城开启</div>
-              </div>
+          <div class="mallOverlay hidden" id="mallOverlay">
+            <div class="mallOverlayCard">
+              <div class="mallOverlayTitle">商城未到下单时间</div>
+              <div class="mallOverlaySub" id="mallNextOpenLabel">下一次开启时间</div>
+              <div class="mallOverlayTime" id="mallNextOpenAt">-</div>
+              <div class="mallOverlayCountdown" id="mallCountdown">--:--:--</div>
+              <div class="mallOverlayHint">请耐心等待商城开启</div>
+              <div class="mallOverlayCharity">等待期间，不妨看看上方的公益项目，用 BOB 币做点好事 ↑</div>
             </div>
+          </div>
+          <div class="shopProductsWrap hidden" id="shopProductsWrap">
             <div class="gridProducts" id="products"></div>
             <div class="error" id="productsErr"></div>
           </div>
         </section>
 
         <section class="tab hidden" id="tabMarket">
-          <div class="marketHero card glass">
-            <div>
-              <div class="sectionTitle">交易市场</div>
-              <div class="marketIntro">商城关闭期间，可自由交易未核销订单。</div>
+          <div class="sectionHead">
+            <div class="sectionTitle">交易市场</div>
+            <div class="help">同事之间自由买卖未使用的商品</div>
+          </div>
+
+          <div class="marketSubnav" id="marketSubnav">
+            <button class="segBtn active" type="button" data-market-tab="buy">在售商品</button>
+            <button class="segBtn" type="button" data-market-tab="sell">我的出售</button>
+          </div>
+
+          <section class="marketPanel card glass" id="marketPanelBuy">
+            <div class="marketList" id="marketListings"></div>
+          </section>
+
+          <section class="marketPanel card glass hidden" id="marketPanelSell">
+            <div class="marketSellToolbar">
+              <div class="marketSellIntro">
+                <div class="marketSellTitle">上架出售</div>
+                <div class="marketSellHint">选择持有商品并设定售价</div>
+              </div>
+              <button class="secondary marketPickButton" id="btnMarketPickSellable" type="button">选择商品上架</button>
             </div>
-            <div class="marketStatus" id="marketOpenStatus">正在同步市场状态…</div>
-          </div>
-
-          <div class="marketGrid">
-            <section class="marketPanel card glass marketPanelWide">
-              <div class="marketPanelHead">
-                <div>
-                  <div class="sectionTitle">市场列表</div>
-                  <div class="help">浏览当前可购买的订单。</div>
-                </div>
-              </div>
-              <div class="marketList" id="marketListings"></div>
-            </section>
-
-            <section class="marketPanel card glass">
-              <div class="marketPanelHead">
-                <div>
-                  <div class="sectionTitle">可上架订单</div>
-                  <div class="help">仅展示属于你的未核销订单。</div>
-                </div>
-              </div>
-              <div class="marketList" id="marketSellableOrders"></div>
-            </section>
-
-            <section class="marketPanel card glass">
-              <div class="marketPanelHead">
-                <div>
-                  <div class="sectionTitle">我的挂单</div>
-                  <div class="help">可查看成交记录或取消未成交挂单。</div>
-                </div>
-              </div>
+            <div class="marketSellSection marketActiveSection">
+              <div class="marketSellTitle" id="marketActiveTitle">上架中（0）</div>
               <div class="marketList" id="marketMyListings"></div>
-            </section>
-          </div>
+            </div>
+          </section>
+
           <div class="error" id="marketErr"></div>
         </section>
 
@@ -391,6 +409,7 @@
           <div class="mono" id="qrProduct"></div>
           <div class="mono" id="qrAmount"></div>
           <div class="mono" id="qrBalance"></div>
+          <div class="mono" id="qrCreatedAt"></div>
           <div class="mono" id="qrExchangeId"></div>
           <div class="mono" id="qrEncoded"></div>
         </div>
@@ -426,7 +445,7 @@
         <div class="modalTop">
           <div>
             <div class="modalTitle">订单详情</div>
-            <div class="modalSub">已核销订单信息</div>
+            <div class="modalSub" id="orderDetailSub">订单信息</div>
           </div>
           <button class="iconBtn" id="btnOrderDetailClose" type="button" aria-label="关闭">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -454,7 +473,7 @@
           </div>
           <div class="confirmLine">
             <div class="muted">状态</div>
-            <div class="confirmValue"><span class="pill pillBad">已核销</span></div>
+            <div class="confirmValue" id="orderDetailStatus"><span class="pill pillBad">已核销</span></div>
           </div>
         </div>
         <div class="row modalActions" style="margin-top: 12px;">
@@ -748,6 +767,73 @@
         <div class="row modalActions" style="margin-top: 12px;">
           <button class="secondary" id="btnCartClear" type="button">清空购物车</button>
           <button class="buyBtn" id="btnCartCheckout" type="button">批量下单</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="productSearchModal">
+      <div class="modalBox productSearchBox">
+        <div class="modalTop">
+          <div>
+            <div class="modalTitle">搜索商品</div>
+            <div class="modalSub">输入关键词查商品，点结果直接下单。</div>
+          </div>
+          <button class="iconBtn" id="btnProductSearchClose" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="productSearchBar">
+          <input id="productSearchInput" class="productSearchInput" type="search" autocomplete="off" placeholder="商品名称 / 备注关键词" />
+          <button class="iconBtn productSearchClear hidden" id="btnProductSearchClear" type="button" aria-label="清空关键词">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="productSearchBody" id="productSearchBody"></div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="marketListModal">
+      <div class="modalBox marketListBox">
+        <div class="modalTop">
+          <div>
+            <div class="modalTitle" id="marketListModalTitle">选择要上架的商品</div>
+            <div class="modalSub" id="marketListModalSub">可多选，选好后统一设定价格。</div>
+          </div>
+          <button class="iconBtn" id="btnMarketListClose" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="marketPickList" id="marketPickList"></div>
+        <div class="marketListPriceSection hidden" id="marketListPriceSection">
+          <div class="marketListPriceHint" id="marketListPriceHint"></div>
+          <div class="confirmBody">
+            <div class="confirmLine">
+              <div class="muted">上架价格</div>
+              <div class="confirmValue">
+                <input id="marketListPrice" type="number" min="1" step="1" placeholder="输入价格（正整数）" />
+              </div>
+            </div>
+            <div class="confirmLine">
+              <div class="muted">卖家说明</div>
+              <div class="confirmValue">
+                <input id="marketListNote" type="text" maxlength="200" placeholder="可选，如：九成新、已拆封等" />
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="error" id="marketListErr"></div>
+        <div class="row modalActions" style="margin-top: 12px;">
+          <button class="secondary" id="btnMarketListCancel" type="button">取消</button>
+          <button class="buyBtn" id="btnMarketListConfirm" type="button">下一步</button>
         </div>
       </div>
     </div>

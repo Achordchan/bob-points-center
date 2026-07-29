@@ -5,6 +5,7 @@ import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { parseCookies } from '../services/adminSession.js';
 import { verifyWebSessionToken } from '../services/webSession.js';
 import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
@@ -43,12 +44,22 @@ export function ledgerRouter() {
     }
   }
 
+  async function enforceAnnouncementAccessForWebSession(req, res) {
+    if (!req.webSession?.userid) return true;
+    let allowed = false;
+    await requireAnnouncementAccess()(req, res, () => { allowed = true; });
+    return allowed;
+  }
+
   // 前台仅查自己；内部 API 用 bob_token 指定 userid。禁止匿名/伪造查询主体。
   async function resolveQueryUserid(req, res) {
     await attachOptionalWebSession(req);
     const db = req.app.locals.db;
     const sessionUser = req.webSession?.userid ? String(req.webSession.userid).trim() : '';
-    if (sessionUser) return sessionUser;
+    if (sessionUser) {
+      if (!(await enforceAnnouncementAccessForWebSession(req, res))) return null;
+      return sessionUser;
+    }
 
     // 禁止 ?bob_token=；仅 Header（GET 不使用 body）
     const token = extractBobToken(req, { allowBody: false });
@@ -95,7 +106,7 @@ export function ledgerRouter() {
     }
   });
 
-  router.post('/transfer', requireWebSession(), async (req, res) => {
+  router.post('/transfer', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
     const session = req.webSession || {};
     const fromUserid = session?.userid ? String(session.userid).trim() : '';
     const fromName = session?.name ? String(session.name).trim() : '';
