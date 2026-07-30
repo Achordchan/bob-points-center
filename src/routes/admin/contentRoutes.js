@@ -3,6 +3,8 @@ import { requireAdminSession } from '../../middleware/requireAdminSession.js';
 import { sanitizeRichHtml } from '../../utils/sanitizeHtml.js';
 import {
   announcementRequiresNewRevision,
+  assertAnnouncementEditVersionMatches,
+  assertAnnouncementRevisionMatches,
   computeAnnouncementContentHash,
 } from '../../services/announcementAccessService.js';
 import {
@@ -93,7 +95,7 @@ export function registerAdminContentRoutes(router) {
       res.setHeader('Cache-Control', 'no-store');
       const rows = await db.all(
         `SELECT id, title, content, level, sort, is_enabled, publish_at,
-                show_fullscreen, requires_acknowledgement, revision, content_hash,
+                show_fullscreen, requires_acknowledgement, revision, content_hash, edit_version,
                 created_at, updated_at
          FROM content_announcements
          ORDER BY COALESCE(publish_at, created_at) DESC, sort ASC, id DESC
@@ -117,8 +119,20 @@ export function registerAdminContentRoutes(router) {
     const publishAt = toOptionalInt(req.body?.publish_at);
     const requiresAcknowledgement = isTruthyFlag(req.body?.requires_acknowledgement) ? 1 : 0;
     const showFullscreen = requiresAcknowledgement || isTruthyFlag(req.body?.show_fullscreen) ? 1 : 0;
+    const expectedRevision = id ? Number(req.body?.revision) : null;
+    const expectedContentHash = id ? String(req.body?.content_hash || '').trim().toLowerCase() : '';
+    const expectedEditVersion = id ? Number(req.body?.edit_version) : null;
     if (!title) return res.status(400).json({ error: 'missing title' });
     if (!content) return res.status(400).json({ error: 'missing content' });
+    if (id && (!Number.isInteger(expectedRevision) || expectedRevision <= 0)) {
+      return res.status(400).json({ error: 'invalid_announcement_revision' });
+    }
+    if (id && !/^[a-f0-9]{64}$/.test(expectedContentHash)) {
+      return res.status(400).json({ error: 'invalid_announcement_content_hash' });
+    }
+    if (id && (!Number.isInteger(expectedEditVersion) || expectedEditVersion <= 0)) {
+      return res.status(400).json({ error: 'invalid_announcement_edit_version' });
+    }
     try {
       res.setHeader('Cache-Control', 'no-store');
       const admin = (await getAdminSessionPayload(req)) || {};
@@ -127,13 +141,15 @@ export function registerAdminContentRoutes(router) {
       const saved = await runInTransaction(db, async (tx) => {
         if (id) {
           const previous = await tx.get(
-            `SELECT id, title, content, requires_acknowledgement, revision, content_hash
+            `SELECT id, title, content, requires_acknowledgement, revision, content_hash, edit_version
                FROM content_announcements
               WHERE id = ?
               FOR UPDATE`,
             [id],
           );
           if (!previous) return null;
+          assertAnnouncementEditVersionMatches(previous, expectedEditVersion);
+          assertAnnouncementRevisionMatches(previous, expectedRevision, expectedContentHash);
           const revisionChanged = announcementRequiresNewRevision(previous, {
             title,
             content,
@@ -143,15 +159,26 @@ export function registerAdminContentRoutes(router) {
           const contentHash = revisionChanged
             ? computeAnnouncementContentHash({ title, content, requiresAcknowledgement: requiresAcknowledgement === 1 })
             : String(previous.content_hash || '');
-          await tx.run(
+          const updated = await tx.get(
             `UPDATE content_announcements
                 SET title = ?, content = ?, level = ?, sort = ?, is_enabled = ?, publish_at = ?,
                     show_fullscreen = ?, requires_acknowledgement = ?, revision = ?, content_hash = ?,
-                    updated_at = unixepoch()
-              WHERE id = ?`,
+                    edit_version = edit_version + 1, updated_at = unixepoch()
+              WHERE id = ? AND edit_version = ?
+              RETURNING edit_version`,
             [title, content, level, sort, isEnabled, publishAt, showFullscreen,
-              requiresAcknowledgement, revision, contentHash, id],
+              requiresAcknowledgement, revision, contentHash, id, expectedEditVersion],
           );
+          if (!updated) {
+            const err = new Error('announcement revision conflict');
+            err.code = 'announcement_revision_conflict';
+            err.current = {
+              revision: Number(previous.revision || 1),
+              content_hash: String(previous.content_hash || ''),
+              edit_version: Number(previous.edit_version || 1),
+            };
+            throw err;
+          }
           if (revisionChanged) {
             await tx.run(
               `INSERT INTO content_announcement_revisions(
@@ -161,7 +188,12 @@ export function registerAdminContentRoutes(router) {
               [id, revision, title, content, requiresAcknowledgement, contentHash, actorId, actorName],
             );
           }
-          return { id, revision, content_hash: contentHash };
+          return {
+            id,
+            revision,
+            content_hash: contentHash,
+            edit_version: Number(updated.edit_version),
+          };
         }
         const revision = 1;
         const contentHash = computeAnnouncementContentHash({
@@ -169,15 +201,16 @@ export function registerAdminContentRoutes(router) {
           content,
           requiresAcknowledgement: requiresAcknowledgement === 1,
         });
-        const inserted = await tx.run(
+        const inserted = await tx.get(
           `INSERT INTO content_announcements(
              title, content, level, sort, is_enabled, publish_at, show_fullscreen,
              requires_acknowledgement, revision, content_hash, created_at, updated_at
-           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())
+           RETURNING id, edit_version`,
           [title, content, level, sort, isEnabled, publishAt, showFullscreen,
             requiresAcknowledgement, revision, contentHash],
         );
-        const announcementId = Number(inserted?.lastID || 0);
+        const announcementId = Number(inserted?.id || 0);
         await tx.run(
           `INSERT INTO content_announcement_revisions(
              announcement_id, revision, title, content, requires_acknowledgement,
@@ -185,13 +218,19 @@ export function registerAdminContentRoutes(router) {
            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
           [announcementId, revision, title, content, requiresAcknowledgement, contentHash, actorId, actorName],
         );
-        return { id: announcementId, revision, content_hash: contentHash };
+        return {
+          id: announcementId,
+          revision,
+          content_hash: contentHash,
+          edit_version: Number(inserted.edit_version || 1),
+        };
       });
       if (!saved) return res.status(400).json({ error: 'announcement not found' });
       req.auditLogPayload = {
         announcement_id: saved.id,
         revision: saved.revision,
         content_hash: saved.content_hash,
+        edit_version: saved.edit_version,
         show_fullscreen: showFullscreen,
         requires_acknowledgement: requiresAcknowledgement,
       };
@@ -203,6 +242,14 @@ export function registerAdminContentRoutes(router) {
       });
       return res.json({ ok: true, ...saved });
     } catch (err) {
+      if (err?.code === 'announcement_revision_conflict') {
+        return res.status(409).json({ error: err.code, current: err.current });
+      }
+      if (err?.code === 'invalid_announcement_revision'
+        || err?.code === 'invalid_announcement_content_hash'
+        || err?.code === 'invalid_announcement_edit_version') {
+        return res.status(400).json({ error: err.code });
+      }
       return res.status(500).json({ error: String(err?.message || err) });
     }
   });

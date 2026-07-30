@@ -26,6 +26,65 @@ test('备份文件名允许秒级与随机后缀', () => {
   assert.equal(re.test('evil.json'), false);
 });
 
+test('普通设置备份不含确认，自动恢复点包含并精确恢复确认', () => {
+  const settingsTablesBlock = backupRoutesSource.match(
+    /const SETTINGS_TABLES = \[[\s\S]*?\n  \];/,
+  )?.[0] || '';
+  const recoveryTablesBlock = backupRoutesSource.match(
+    /const SETTINGS_RECOVERY_TABLES = \[[\s\S]*?\n  \];/,
+  )?.[0] || '';
+  assert.doesNotMatch(settingsTablesBlock, /content_announcement_acknowledgements/);
+  assert.match(recoveryTablesBlock, /\.\.\.SETTINGS_TABLES/);
+  assert.match(recoveryTablesBlock, /content_announcement_acknowledgements/);
+  assert.match(backupRoutesSource, /isSettingsRecoveryPoint && backupVersion !== 2/);
+  assert.match(backupRoutesSource, /isSettingsRecoveryPoint && mode !== 'overwrite'/);
+  assert.match(
+    backupRoutesSource,
+    /isSettingsRecoveryPoint[\s\S]*?SETTINGS_RECOVERY_TABLES[\s\S]*?SETTINGS_TABLES/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /if \(isSettingsRecoveryPoint\) \{[\s\S]*?DELETE FROM content_announcement_acknowledgements/,
+  );
+});
+
+test('自动恢复点使用一致性快照并保持公告恢复顺序', () => {
+  assert.match(
+    backupRoutesSource,
+    /SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /const snapshotData = await dumpTablesConsistently\([\s\S]*?tablesToSnapshot[\s\S]*?keepSecrets: true/,
+  );
+  const announcements = backupRoutesSource.indexOf('// content_faq / content_announcements / system_versions');
+  const revisions = backupRoutesSource.indexOf('// content_announcement_revisions');
+  const acknowledgements = backupRoutesSource.indexOf('// content_announcement_acknowledgements');
+  assert.ok(announcements >= 0 && revisions > announcements && acknowledgements > revisions);
+});
+
+test('公告导入恢复编辑版本并拒绝重复修订键', () => {
+  assert.match(
+    backupRoutesSource,
+    /content_hash, edit_version,[\s\S]*?edit_version=excluded\.edit_version/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /row\.edit_version === undefined \|\| row\.edit_version === null \? 1 : Number\(row\.edit_version\)/,
+  );
+  assert.match(backupRoutesSource, /edit_version 必须为正整数/);
+  const commonEditVersionGuard = backupRoutesSource.indexOf(
+    "announcements.forEach((row, index) => {\n        if (row?.edit_version === undefined",
+  );
+  const versionTwoGuard = backupRoutesSource.indexOf('if (backupVersion === 2)');
+  assert.ok(commonEditVersionGuard >= 0 && commonEditVersionGuard < versionTwoGuard);
+  assert.match(backupRoutesSource, /const seenAnnouncementRevisionKeys = new Set\(\)/);
+  assert.match(
+    backupRoutesSource,
+    /seenAnnouncementRevisionKeys\.has\(revisionKey\)[\s\S]*?announcement_id\/revision 重复[\s\S]*?else \{[\s\S]*?announcementRevisionHashes\.set/,
+  );
+});
+
 test('设置覆盖按公告 ID 原位恢复，避免级联清空有效确认', () => {
   assert.match(
     backupRoutesSource,

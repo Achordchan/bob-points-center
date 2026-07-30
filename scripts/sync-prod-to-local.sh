@@ -2,7 +2,7 @@
 # 将生产数据库同步到本地开发库。
 #
 # 单向：生产 → 本地。脚本对生产库只执行 pg_dump（只读），
-# 任何写操作只会落在本地容器上；目标不是 localhost 时直接拒绝执行。
+# 任何写操作只会落在经过多重身份校验的本地 Compose PostgreSQL 容器。
 #
 # 前置条件：
 #   1. 数据库隧道已开：npm run db:tunnel
@@ -23,7 +23,6 @@ PROD_DB="${PROD_PG_DATABASE:-bob}"
 PROD_USER="${PROD_PG_USER:-bob}"
 
 # --- 本地（写入目标） ---
-LOCAL_CONTAINER="${LOCAL_PG_CONTAINER:-bob-postgres}"
 LOCAL_DB="${LOCAL_PG_DATABASE:-bob}"
 LOCAL_USER="${LOCAL_PG_USER:-bob}"
 
@@ -32,58 +31,94 @@ DUMP_FILE="${DUMP_DIR}/prod-$(date +%Y%m%d-%H%M%S).dump"
 
 die() { echo "错误：$*" >&2; exit 1; }
 
-# --- 安全闸门：确认写入目标是本地容器 ---
+is_local_docker_endpoint() {
+  [[ "$1" == unix:///* ]]
+}
+
 if [[ "${PROD_HOST}" != "127.0.0.1" && "${PROD_HOST}" != "localhost" ]]; then
   die "PROD_PG_HOST 必须是隧道本地端点（127.0.0.1），当前为 ${PROD_HOST}。本脚本不允许直连远程库。"
 fi
-if ! docker inspect "${LOCAL_CONTAINER}" >/dev/null 2>&1; then
-  die "找不到本地容器 ${LOCAL_CONTAINER}。请先运行：docker compose up -d postgres"
+if [[ ! "${LOCAL_DB}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  die "LOCAL_PG_DATABASE 不是合法的 PostgreSQL 标识符。"
 fi
-LOCAL_PORT_BINDING="$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}{{end}}{{end}}' "${LOCAL_CONTAINER}" 2>/dev/null || true)"
-if [[ "${LOCAL_PORT_BINDING}" != *"127.0.0.1"* ]]; then
-  die "本地容器端口未绑定到 127.0.0.1，拒绝执行以避免误写远端。实际绑定：${LOCAL_PORT_BINDING:-未知}"
+if [[ ! "${LOCAL_USER}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  die "LOCAL_PG_USER 不是合法的 PostgreSQL 标识符。"
 fi
+command -v docker >/dev/null 2>&1 || die "未找到 docker 命令。"
+docker compose version >/dev/null 2>&1 || die "当前 Docker 未提供 compose 插件。"
+
+# DOCKER_CONTEXT 优先于 DOCKER_HOST；但任一显式值指向远程 endpoint 都直接拒绝，避免环境污染。
+if [[ -n "${DOCKER_HOST:-}" ]] && ! is_local_docker_endpoint "${DOCKER_HOST}"; then
+  die "DOCKER_HOST 指向非本地 Unix socket：${DOCKER_HOST}。拒绝操作远程 Docker daemon。"
+fi
+
+ACTIVE_CONTEXT="${DOCKER_CONTEXT:-$(docker context show 2>/dev/null || true)}"
+[[ -n "${ACTIVE_CONTEXT}" ]] || die "无法确定当前 Docker Context。"
+CONTEXT_ENDPOINT="$(docker context inspect --format '{{ .Endpoints.docker.Host }}' "${ACTIVE_CONTEXT}" 2>/dev/null || true)"
+[[ -n "${CONTEXT_ENDPOINT}" ]] || die "无法解析 Docker Context ${ACTIVE_CONTEXT} 的 endpoint。"
+is_local_docker_endpoint "${CONTEXT_ENDPOINT}" \
+  || die "Docker Context ${ACTIVE_CONTEXT} 指向非本地 endpoint：${CONTEXT_ENDPOINT}。"
+
+COMPOSE_CONTAINER_IDS="$(docker compose ps -q postgres 2>/dev/null || true)"
+[[ -n "${COMPOSE_CONTAINER_IDS//[[:space:]]/}" ]] \
+  || die "找不到 Compose postgres 服务容器。请先运行：docker compose up -d postgres"
+CONTAINER_COUNT="$(printf '%s\n' "${COMPOSE_CONTAINER_IDS}" | grep -cve '^[[:space:]]*$')"
+[[ "${CONTAINER_COUNT}" == "1" ]] || die "Compose postgres 服务必须且只能对应一个容器，当前为 ${CONTAINER_COUNT} 个。"
+LOCAL_CONTAINER_ID="$(printf '%s\n' "${COMPOSE_CONTAINER_IDS}" | grep -ve '^[[:space:]]*$')"
+
+CONTAINER_IDENTITY="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}|{{ index .Config.Labels "bob.environment" }}|{{ .State.Running }}' "${LOCAL_CONTAINER_ID}" 2>/dev/null || true)"
+[[ "${CONTAINER_IDENTITY}" == "postgres|development|true" ]] \
+  || die "Compose 容器身份校验失败，期望 postgres|development|true，实际为 ${CONTAINER_IDENTITY:-未知}。"
+LOCAL_PORT_BINDING="$(docker inspect --format '{{range (index .NetworkSettings.Ports "5432/tcp")}}{{.HostIp}}:{{.HostPort}}{{end}}' "${LOCAL_CONTAINER_ID}" 2>/dev/null || true)"
+[[ "${LOCAL_PORT_BINDING}" == 127.0.0.1:* ]] \
+  || die "本地 PostgreSQL 端口未唯一绑定到 127.0.0.1，实际绑定：${LOCAL_PORT_BINDING:-未知}。"
+
+DB_IDENTITY="$(docker exec "${LOCAL_CONTAINER_ID}" psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -tA -F '|' -c \
+  "SELECT current_database(), current_setting('bob.environment', true)" 2>/dev/null || true)"
+[[ "${DB_IDENTITY}" == "${LOCAL_DB}|development" ]] \
+  || die "本地数据库身份校验失败，期望 ${LOCAL_DB}|development，实际为 ${DB_IDENTITY:-未知}。"
 
 : "${PROD_PG_PASSWORD:?请通过环境变量提供生产库密码，例如 PROD_PG_PASSWORD='xxx' bash scripts/sync-prod-to-local.sh}"
 
-# --- 校验隧道连通与凭据 ---
 echo "[1/6] 校验生产库连接 ${PROD_HOST}:${PROD_PORT}/${PROD_DB} …"
-docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER}" \
+docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER_ID}" \
   psql -h host.docker.internal -p "${PROD_PORT}" -U "${PROD_USER}" -d "${PROD_DB}" \
   -tAc "SELECT 'connected to ' || current_database() || ' @ ' || current_setting('server_version')" \
   || die "无法连接生产库。请确认隧道已开（npm run db:tunnel）且 PROD_PG_PASSWORD 正确。"
 
-# --- 导出（对生产库只读） ---
 echo "[2/6] 导出生产数据（只读，custom 格式）…"
 mkdir -p "${DUMP_DIR}"
-docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER}" \
+docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER_ID}" \
   pg_dump -h host.docker.internal -p "${PROD_PORT}" -U "${PROD_USER}" -d "${PROD_DB}" \
   --format=custom --no-owner --no-privileges \
   > "${DUMP_FILE}"
 DUMP_SIZE="$(du -h "${DUMP_FILE}" | cut -f1)"
 echo "      已导出：${DUMP_FILE}（${DUMP_SIZE}）"
 
-# --- 记录来源行数，供导入后核对 ---
 echo "[3/6] 记录来源行数 …"
-SRC_COUNTS="$(docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER}" \
+SRC_COUNTS="$(docker exec -e PGPASSWORD="${PROD_PG_PASSWORD}" "${LOCAL_CONTAINER_ID}" \
   psql -h host.docker.internal -p "${PROD_PORT}" -U "${PROD_USER}" -d "${PROD_DB}" -tAF$'\t' -c \
   "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname")"
 
-# --- 重建本地 schema ---
-echo "[4/6] 重置本地库 ${LOCAL_DB} 的 public schema …"
-docker exec "${LOCAL_CONTAINER}" psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -q -c \
-  "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO ${LOCAL_USER}; GRANT ALL ON SCHEMA public TO public;"
+echo "[4/6] 在单个事务中重置并恢复本地库 ${LOCAL_DB} …"
+{
+  printf '%s\n' 'BEGIN;'
+  printf '%s\n' 'DROP SCHEMA public CASCADE;'
+  printf '%s\n' 'CREATE SCHEMA public AUTHORIZATION CURRENT_USER;'
+  if ! docker exec -i "${LOCAL_CONTAINER_ID}" \
+    pg_restore --no-owner --no-privileges --file=- < "${DUMP_FILE}"; then
+    echo "错误：无法解析生产备份，恢复事务将回滚。" >&2
+    exit 1
+  fi
+  printf '%s\n' 'COMMIT;'
+} | docker exec -i "${LOCAL_CONTAINER_ID}" \
+  psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -v ON_ERROR_STOP=1 -q
 
-# --- 导入本地 ---
-echo "[5/6] 导入本地库 …"
-docker exec -i "${LOCAL_CONTAINER}" \
-  pg_restore -U "${LOCAL_USER}" -d "${LOCAL_DB}" --no-owner --no-privileges --single-transaction \
-  < "${DUMP_FILE}"
+echo "[5/6] 本地事务已提交 …"
 
-# --- 核对 ---
 echo "[6/6] 核对行数 …"
-docker exec "${LOCAL_CONTAINER}" psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -q -c "ANALYZE;" >/dev/null
-DST_COUNTS="$(docker exec "${LOCAL_CONTAINER}" \
+docker exec "${LOCAL_CONTAINER_ID}" psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -q -c "ANALYZE;" >/dev/null
+DST_COUNTS="$(docker exec "${LOCAL_CONTAINER_ID}" \
   psql -U "${LOCAL_USER}" -d "${LOCAL_DB}" -tAF$'\t' -c \
   "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname")"
 
@@ -109,5 +144,5 @@ if (( MISMATCH )); then
 else
   echo "同步完成，所有表行数一致。"
 fi
-echo "本地连接：postgresql://${LOCAL_USER}@127.0.0.1:5432/${LOCAL_DB}"
+echo "本地连接：postgresql://${LOCAL_USER}@${LOCAL_PORT_BINDING}/${LOCAL_DB}"
 echo "dump 文件保留在 ${DUMP_FILE}（.tmp/ 已被 .gitignore 排除）"

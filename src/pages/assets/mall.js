@@ -55,7 +55,8 @@
     opening: null,
     countdownTimer: null,
     closeCountdownTimer: null,
-    openingRefreshInFlight: false,
+    openingRefreshPromise: null,
+    openingRefreshPending: false,
     noticeTimer: null,
     redPacket: null,
     redPacketTimer: null,
@@ -1227,7 +1228,7 @@
         }
       });
       scheduleRealtimeTask('opening', async () => {
-        await loadMallOpening();
+        await refreshOpeningOnce();
       }, 20);
       return;
     }
@@ -1675,20 +1676,32 @@
     return `${h}:${m}:${s}`;
   }
 
-  async function refreshOpeningOnce() {
-    if (state.openingRefreshInFlight) return;
-    state.openingRefreshInFlight = true;
-    try {
-      await loadMallOpening();
-      // 商城刚开放且尚未加载过商品时，触发加载
-      if (isMallOpen(state.opening) && (!state.products || state.products.length === 0)) {
-        const products = await loadProducts(undefined, { force: true });
-        state.products = products;
-        renderProductsWithFilterAndOrder(state.products);
+  function refreshOpeningOnce() {
+    state.openingRefreshPending = true;
+    if (state.openingRefreshPromise) return state.openingRefreshPromise;
+
+    let request;
+    request = (async () => {
+      while (state.openingRefreshPending) {
+        state.openingRefreshPending = false;
+        try {
+          await loadMallOpening();
+          if (isMallOpen(state.opening) && (!state.products || state.products.length === 0)) {
+            const products = await loadProducts(undefined, { force: true });
+            state.products = products;
+            renderProductsWithFilterAndOrder(state.products);
+          }
+        } catch (err) {
+          if (!state.openingRefreshPending) throw err;
+        }
       }
-    } finally {
-      state.openingRefreshInFlight = false;
-    }
+    })().finally(() => {
+      if (state.openingRefreshPromise === request) {
+        state.openingRefreshPromise = null;
+      }
+    });
+    state.openingRefreshPromise = request;
+    return request;
   }
 
   function applyMallOverlay(row) {
@@ -1736,7 +1749,7 @@
       if (countdownBox) countdownBox.textContent = formatCountdown(diff);
       if (diff <= 0) {
         clearCountdown();
-        refreshOpeningOnce();
+        void refreshOpeningOnce().catch(() => {});
       }
     };
     tick();
@@ -1777,7 +1790,7 @@
       value.textContent = formatCountdown(diff);
       if (diff <= 0) {
         clearCloseCountdown();
-        refreshOpeningOnce();
+        void refreshOpeningOnce().catch(() => {});
       }
     };
     tick();

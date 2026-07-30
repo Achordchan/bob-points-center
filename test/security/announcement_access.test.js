@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   announcementRequiresNewRevision,
+  assertAnnouncementEditVersionMatches,
+  assertAnnouncementRevisionMatches,
   buildAnnouncementAccessState,
   computeAnnouncementContentHash,
   recordAnnouncementAction,
@@ -28,6 +30,38 @@ test('只有标题、正文和要求确认语义生成新修订', () => {
   assert.equal(announcementRequiresNewRevision(previous, { ...previous, title: '公告 2' }), true);
   assert.equal(announcementRequiresNewRevision(previous, { ...previous, content: '新正文' }), true);
   assert.equal(announcementRequiresNewRevision(previous, { ...previous, requires_acknowledgement: 0 }), true);
+});
+
+test('公告内容 token 一致时通过，不一致时返回当前修订', () => {
+  const row = { revision: 4, content_hash: 'e'.repeat(64), edit_version: 7 };
+  assert.deepEqual(
+    assertAnnouncementRevisionMatches(row, 4, 'e'.repeat(64)),
+    { revision: 4, content_hash: 'e'.repeat(64) },
+  );
+  assert.throws(
+    () => assertAnnouncementRevisionMatches(row, 3, 'd'.repeat(64)),
+    (err) => err.code === 'announcement_revision_conflict'
+      && err.current.revision === 4
+      && err.current.content_hash === 'e'.repeat(64),
+  );
+});
+
+test('公告编辑版本保护 metadata-only 更新', () => {
+  const row = { revision: 4, content_hash: 'e'.repeat(64), edit_version: 7 };
+  assert.equal(assertAnnouncementEditVersionMatches(row, 7), 7);
+  assert.throws(
+    () => assertAnnouncementEditVersionMatches(row, 6),
+    (err) => err.code === 'announcement_revision_conflict'
+      && err.current.revision === 4
+      && err.current.content_hash === 'e'.repeat(64)
+      && err.current.edit_version === 7,
+  );
+  for (const invalid of [undefined, null, '', 0, -1, 1.5, 'bad']) {
+    assert.throws(
+      () => assertAnnouncementEditVersionMatches(row, invalid),
+      (err) => err.code === 'invalid_announcement_edit_version',
+    );
+  }
 });
 
 test('访问状态按待处理项判断阻断并返回未来检查时间', async () => {

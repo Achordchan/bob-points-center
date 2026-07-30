@@ -49,7 +49,7 @@ function normalizeVersion(value) {
  * 从 DB 刷新进程内 sessionGlobalVersion（节流 2s）。
  * 多实例各自刷新，修改 system_settings 后最多约 2s 生效。
  */
-export async function refreshSessionGlobalVersion(db, cfg, { force = false } = {}) {
+export async function refreshSessionGlobalVersion(db, cfg, { force = false, throwOnError = false } = {}) {
   if (!db || !cfg) return normalizeVersion(cfg?.sessionGlobalVersion);
   const now = Date.now();
   if (!force && now - lastSessionVersionRefreshAt < 2000) {
@@ -62,7 +62,8 @@ export async function refreshSessionGlobalVersion(db, cfg, { force = false } = {
       cfg.sessionGlobalVersion = normalizeVersion(row?.value);
       lastSessionVersionRefreshAt = Date.now();
       return cfg.sessionGlobalVersion;
-    } catch {
+    } catch (err) {
+      if (throwOnError) throw err;
       return normalizeVersion(cfg.sessionGlobalVersion);
     } finally {
       sessionVersionRefreshPromise = null;

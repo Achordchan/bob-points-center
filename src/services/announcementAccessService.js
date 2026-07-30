@@ -112,6 +112,56 @@ export async function hasPendingRequiredAnnouncement(db, userid, now = Math.floo
   return Boolean(row);
 }
 
+export function assertAnnouncementRevisionMatches(row, revision, contentHash) {
+  const requestedRevision = Number(revision);
+  const requestedHash = String(contentHash || '').trim().toLowerCase();
+  if (!Number.isInteger(requestedRevision) || requestedRevision <= 0) {
+    const err = new Error('invalid announcement revision');
+    err.code = 'invalid_announcement_revision';
+    throw err;
+  }
+  if (!/^[a-f0-9]{64}$/.test(requestedHash)) {
+    const err = new Error('invalid announcement content hash');
+    err.code = 'invalid_announcement_content_hash';
+    throw err;
+  }
+  if (Number(row?.revision) !== requestedRevision
+    || String(row?.content_hash || '').toLowerCase() !== requestedHash) {
+    const err = new Error('announcement revision conflict');
+    err.code = 'announcement_revision_conflict';
+    err.current = {
+      revision: Number(row?.revision || 1),
+      content_hash: String(row?.content_hash || ''),
+    };
+    const currentEditVersion = Number(row?.edit_version);
+    if (Number.isInteger(currentEditVersion) && currentEditVersion > 0) {
+      err.current.edit_version = currentEditVersion;
+    }
+    throw err;
+  }
+  return { revision: requestedRevision, content_hash: requestedHash };
+}
+
+export function assertAnnouncementEditVersionMatches(row, editVersion) {
+  const requestedEditVersion = Number(editVersion);
+  if (!Number.isInteger(requestedEditVersion) || requestedEditVersion <= 0) {
+    const err = new Error('invalid announcement edit version');
+    err.code = 'invalid_announcement_edit_version';
+    throw err;
+  }
+  if (Number(row?.edit_version) !== requestedEditVersion) {
+    const err = new Error('announcement revision conflict');
+    err.code = 'announcement_revision_conflict';
+    err.current = {
+      revision: Number(row?.revision || 1),
+      content_hash: String(row?.content_hash || ''),
+      edit_version: Number(row?.edit_version || 1),
+    };
+    throw err;
+  }
+  return requestedEditVersion;
+}
+
 export async function recordAnnouncementAction(db, {
   userid,
   announcementId,
@@ -160,15 +210,7 @@ export async function recordAnnouncementAction(db, {
     err.code = 'announcement_not_active';
     throw err;
   }
-  if (Number(row.revision) !== requestedRevision || String(row.content_hash || '').toLowerCase() !== requestedHash) {
-    const err = new Error('announcement revision conflict');
-    err.code = 'announcement_revision_conflict';
-    err.current = {
-      revision: Number(row.revision || 1),
-      content_hash: String(row.content_hash || ''),
-    };
-    throw err;
-  }
+  assertAnnouncementRevisionMatches(row, requestedRevision, requestedHash);
   if (Number(row.requires_acknowledgement || 0) === 1 && requestedAction !== 'acknowledged') {
     const err = new Error('announcement acknowledgement required');
     err.code = 'announcement_acknowledgement_required';

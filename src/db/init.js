@@ -212,6 +212,7 @@ CREATE TABLE IF NOT EXISTS content_announcements (
   requires_acknowledgement INTEGER NOT NULL DEFAULT 0 CHECK (requires_acknowledgement IN (0, 1)),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
   content_hash TEXT NOT NULL DEFAULT '',
+  edit_version INTEGER NOT NULL DEFAULT 1 CHECK (edit_version >= 1),
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   CHECK (requires_acknowledgement = 0 OR show_fullscreen = 1)
@@ -720,6 +721,7 @@ export async function initDb(input) {
   await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS requires_acknowledgement INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT ''");
+  await db.exec("ALTER TABLE content_announcements ADD COLUMN IF NOT EXISTS edit_version INTEGER NOT NULL DEFAULT 1");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_content_announcements_access ON content_announcements(is_enabled, requires_acknowledgement, show_fullscreen, publish_at)");
   const announcementsMissingHash = await db.all(
     `SELECT id, title, content, requires_acknowledgement, revision, created_at
@@ -766,6 +768,10 @@ export async function initDb(input) {
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_hash') THEN
         ALTER TABLE content_announcements
           ADD CONSTRAINT chk_content_announcements_hash CHECK (char_length(content_hash) = 64);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_edit_version') THEN
+        ALTER TABLE content_announcements
+          ADD CONSTRAINT chk_content_announcements_edit_version CHECK (edit_version >= 1);
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_content_announcements_ack_fullscreen') THEN
         ALTER TABLE content_announcements
