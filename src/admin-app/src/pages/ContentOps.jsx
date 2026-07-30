@@ -102,8 +102,10 @@ function Announcements({ canEdit, canDelete }) {
       await load();
     } catch (err) {
       if (err?.status === 409 && err?.code === 'announcement_revision_conflict') {
-        await load();
-        message.error(err.message);
+        setEditing(null);
+        form.resetFields();
+        await load().catch((loadErr) => message.error(loadErr.message));
+        message.error('公告已被其他管理员更新，编辑窗口已关闭，请基于最新内容重新编辑');
         return;
       }
       throw err;

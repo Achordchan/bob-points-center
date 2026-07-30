@@ -14,6 +14,8 @@ const mallAssetPath = fileURLToPath(new URL('../../src/pages/assets/mall.js', im
 const mallAssetSource = readFileSync(mallAssetPath, 'utf8');
 const syncScriptPath = fileURLToPath(new URL('../../scripts/sync-prod-to-local.sh', import.meta.url));
 const syncScriptSource = readFileSync(syncScriptPath, 'utf8');
+const contentOpsPath = fileURLToPath(new URL('../../src/admin-app/src/pages/ContentOps.jsx', import.meta.url));
+const contentOpsSource = readFileSync(contentOpsPath, 'utf8');
 
 test('开发会话在初始化前以只读方式验证数据库身份', () => {
   const preflightIndex = devSessionSource.indexOf("await preflight.query('BEGIN READ ONLY')");
@@ -155,6 +157,18 @@ test('商城开放刷新在失败期间收到事件时继续补跑', async () =>
   await assert.rejects(terminal, /最终失败/);
   assert.equal(state.openingRefreshPromise, null);
   assert.equal(state.openingRefreshPending, false);
+});
+
+test('公告版本冲突关闭旧编辑器后再刷新列表', () => {
+  const conflictHandler = contentOpsSource.match(
+    /if \(err\?\.status === 409 && err\?\.code === 'announcement_revision_conflict'\) \{[\s\S]*?return;/,
+  )?.[0] || '';
+  assert.ok(conflictHandler);
+  const closeIndex = conflictHandler.indexOf('setEditing(null)');
+  const resetIndex = conflictHandler.indexOf('form.resetFields()');
+  const loadIndex = conflictHandler.indexOf('await load()');
+  assert.ok(closeIndex >= 0 && resetIndex > closeIndex && loadIndex > resetIndex);
+  assert.match(conflictHandler, /编辑窗口已关闭，请基于最新内容重新编辑/);
 });
 
 test('生成后的 OpenAPI 描述备份导出和公告编辑版本', () => {
