@@ -196,7 +196,7 @@ npm run db:tunnel        # 另开终端保持隧道
 PROD_PG_PASSWORD='<生产库密码>' npm run db:sync-from-prod
 ```
 
-该脚本对生产库只执行 `pg_dump`（只读），写入仅落在本地容器；目标非本地地址时直接拒绝执行，导入后逐表核对行数。
+该脚本对生产库只执行 `pg_dump`（只读），写入仅落在本地 Compose 容器。执行前会确认当前 Docker endpoint 是本机 `unix://` socket，并核对 Compose service label、`bob.environment=development` label、loopback 端口绑定、目标数据库名及 PostgreSQL `bob.environment=development` GUC；任一身份无法证明时都会在连接生产库和执行本地恢复前拒绝操作。恢复时，`DROP SCHEMA public CASCADE`、重建 schema 和全部 restore SQL 由同一个 `psql` 事务执行；archive 解析或任一 SQL 失败都会回滚并保留同步前的本地数据库，也不会向 `PUBLIC` 授予 schema 创建权限。事务成功提交后才执行 `ANALYZE` 和行数核对，后两者不属于恢复事务，失败时不会自动撤销已经成功恢复的数据。
 
 > **结构变更不随数据同步传播。** `src/db/init.js` 在服务启动时对所连接的数据库执行 DDL，因此本地新增的表或字段只有在代码经 git 推送并重启生产服务后才会到达生产端。所有 DDL 必须写成幂等语句（`CREATE TABLE IF NOT EXISTS`、`ADD COLUMN IF NOT EXISTS`），否则重复启动会失败。
 
@@ -232,7 +232,7 @@ npm run dev:session -- admin
 npm run dev:session -- web
 ```
 
-该脚本不修改任何认证逻辑，直接调用项目自身的签名函数并使用本地 `.env` 的会话密钥。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`）；脚本会在只读事务中核对实际数据库名与本地 PostgreSQL 的 `bob.environment=development` 标记，全部通过后才允许初始化数据库。可追加 `userid` 参数指定用户。
+该脚本不修改任何认证逻辑，直接调用项目自身的签名函数。仅允许在明确的 `NODE_ENV=development` 下使用，入口仅接受 loopback 地址或 HTTPS 的 `dev.bob.baymaxgroup.com`。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`），并将 `SESSION_SALT` 与仅供本地使用的 `DEV_SESSION_SALT` 设为相同且不少于 32 个字符；`ADMIN_SESSION_SECRET` 和 `WEB_SESSION_SECRET` 也必须分别显式配置、不少于 32 个字符且互不相同。脚本会先以只读事务核对实际数据库名与 PostgreSQL `bob.environment=development` 标记，再从数据库刷新当前全局会话版本，全部通过后才允许查询用户并签发 Token。生产环境不要配置 `DEV_SESSION_SALT`。可追加 `userid` 参数指定用户。
 
 ### 6. 访问入口
 
@@ -297,7 +297,9 @@ npm run admin:dev
 | `ADMIN_SESSION_SECRET` | **必填** | 管理端会话签名密钥 |
 | `WEB_SESSION_SECRET` | **必填，且不得与上一项相同** | 员工端会话签名密钥。生产禁止回退到管理端密钥 |
 | `QR_SIGN_SECRET` | 建议配置 | 核销二维码签名密钥 |
-| `SESSION_SALT` | 空 | 可选的会话轮换盐，为稳定配置而非启动随机值 |
+| `SESSION_SALT` | 空 | 会话轮换盐；运行 `dev:session` 时必须与 `DEV_SESSION_SALT` 相同且不少于 32 个字符 |
+| `DEV_SESSION_SALT` | 生产不要配置 | 仅本地 `dev:session` 的开发环境见证，必须与本地 `SESSION_SALT` 相同 |
+| `DEV_SESSION_DATABASE` | 生产不要配置 | 仅本地 `dev:session` 使用，必须与本地 `PG_DATABASE` 相同 |
 | `ADMIN_FALLBACK_USERID` | 空 | 追加到超管名单的兜底 userid |
 | `ADMIN_FALLBACK_NAME` | 空 | 兜底超管显示名 |
 

@@ -36,6 +36,11 @@ export function registerAdminBackupRoutes(router) {
     'admin_roles',
   ];
 
+  const SETTINGS_RECOVERY_TABLES = [
+    ...SETTINGS_TABLES,
+    'content_announcement_acknowledgements',
+  ];
+
   // 全量表：包含用户数据（顺序决定导入顺序，users 必须最先）
   const FULL_TABLES = [
     'users',
@@ -66,19 +71,11 @@ export function registerAdminBackupRoutes(router) {
   ];
 
   async function dumpTable(db, tableName) {
-    // 查询失败必须抛错，禁止静默返回 []，否则损坏备份会被当成“空表成功”。
     try {
-      const rows = await db.all(`SELECT * FROM ${tableName} ORDER BY id ASC`, []);
+      const rows = await db.all(`SELECT * FROM ${tableName}`, []);
       return Array.isArray(rows) ? rows : [];
-    } catch (errOrder) {
-      // 无 id 列的表（如 system_settings、mall_opening_schedule）
-      try {
-        const rows = await db.all(`SELECT * FROM ${tableName}`, []);
-        return Array.isArray(rows) ? rows : [];
-      } catch (errPlain) {
-        const msg = String(errPlain?.message || errOrder?.message || errPlain || errOrder);
-        throw new Error(`导出表 ${tableName} 失败: ${msg}`);
-      }
+    } catch (err) {
+      throw new Error(`导出表 ${tableName} 失败: ${String(err?.message || err)}`);
     }
   }
 
@@ -231,6 +228,18 @@ export function registerAdminBackupRoutes(router) {
     return JSON.stringify(incoming);
   }
 
+  async function dumpTablesConsistently(db, tables, { keepSecrets = false } = {}) {
+    return runInTransaction(db, async (tx) => {
+      await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY', []);
+      const data = {};
+      for (const tableName of tables) {
+        // eslint-disable-next-line no-await-in-loop
+        data[tableName] = redactBackupSecrets(tableName, await dumpTable(tx, tableName), { keepSecrets });
+      }
+      return data;
+    });
+  }
+
   // GET /admin/backup/export?mode=settings|full
   router.get('/backup/export', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
@@ -242,11 +251,7 @@ export function registerAdminBackupRoutes(router) {
         return res.status(403).json({ error: '全量备份仅超级管理员可导出' });
       }
       res.setHeader('Cache-Control', 'no-store');
-      const data = {};
-      for (const t of tables) {
-        // eslint-disable-next-line no-await-in-loop
-        data[t] = redactBackupSecrets(t, await dumpTable(db, t));
-      }
+      const data = await dumpTablesConsistently(db, tables);
       const now = new Date();
       const filename = buildBackupFilename(mode);
       const payload = {
@@ -358,12 +363,24 @@ export function registerAdminBackupRoutes(router) {
     }
 
     const backupMode = backup._meta?.mode === 'full' ? 'full' : 'settings';
+    const isSettingsRecoveryPoint = backupMode === 'settings'
+      && backup._meta?.purpose === 'pre_import_recovery_point';
+    if (isSettingsRecoveryPoint && backupVersion !== 2) {
+      return res.status(400).json({ error: '设置自动恢复点必须使用备份版本 2' });
+    }
+    if (isSettingsRecoveryPoint && mode !== 'overwrite') {
+      return res.status(400).json({ error: '设置自动恢复点仅允许覆盖导入' });
+    }
     const backupData = backup.data;
     const v1ExcludedTables = new Set([
       'content_announcement_revisions',
       'content_announcement_acknowledgements',
     ]);
-    const modeTables = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
+    const modeTables = backupMode === 'full'
+      ? FULL_TABLES
+      : isSettingsRecoveryPoint
+        ? SETTINGS_RECOVERY_TABLES
+        : SETTINGS_TABLES;
     const versionTables = backupVersion === 1
       ? modeTables.filter((name) => !v1ExcludedTables.has(name))
       : modeTables;
@@ -475,8 +492,16 @@ export function registerAdminBackupRoutes(router) {
       }
 
       const announcements = requireArray('content_announcements') || [];
+      announcements.forEach((row, index) => {
+        if (row?.edit_version === undefined || row?.edit_version === null) return;
+        const editVersion = Number(row.edit_version);
+        if (!Number.isSafeInteger(editVersion) || editVersion <= 0) {
+          pushPreflight('content_announcements', index, 'edit_version 必须为正整数');
+        }
+      });
       const announcementIds = new Set(announcements.map((row) => Number(row?.id)).filter(Number.isSafeInteger));
       const announcementRevisionHashes = new Map();
+      const seenAnnouncementRevisionKeys = new Set();
       const revisions = requireArray('content_announcement_revisions') || [];
       revisions.forEach((row, index) => {
         const announcementId = Number(row?.announcement_id);
@@ -501,10 +526,19 @@ export function registerAdminBackupRoutes(router) {
         if (!announcementIds.has(announcementId)) {
           pushPreflight('content_announcement_revisions', index, '找不到关联公告');
         }
-        announcementRevisionHashes.set(`${announcementId}:${revision}`, {
-          hash: expectedHash,
-          requiresAcknowledgement: Number(row?.requires_acknowledgement || 0) === 1,
-        });
+        if (Number.isSafeInteger(announcementId) && announcementId > 0
+          && Number.isSafeInteger(revision) && revision > 0) {
+          const revisionKey = `${announcementId}:${revision}`;
+          if (seenAnnouncementRevisionKeys.has(revisionKey)) {
+            pushPreflight('content_announcement_revisions', index, 'announcement_id/revision 重复');
+          } else {
+            seenAnnouncementRevisionKeys.add(revisionKey);
+            announcementRevisionHashes.set(revisionKey, {
+              hash: expectedHash,
+              requiresAcknowledgement: Number(row?.requires_acknowledgement || 0) === 1,
+            });
+          }
+        }
       });
 
       if (backupVersion === 2) {
@@ -535,13 +569,50 @@ export function registerAdminBackupRoutes(router) {
         });
       }
 
-      if (backupMode === 'full') {
-        const users = requireArray('users') || [];
-        const userIds = new Set(users.map((row) => String(row?.userid || '')).filter(Boolean));
-        users.forEach((row, index) => {
-          if (!row?.userid) pushPreflight('users', index, '缺少 userid');
+      if (backupMode === 'full' || isSettingsRecoveryPoint) {
+        const users = backupMode === 'full' ? (requireArray('users') || []) : [];
+        const currentUsers = isSettingsRecoveryPoint
+          ? await db.all('SELECT userid FROM users', [])
+          : users;
+        const userIds = new Set(currentUsers.map((row) => String(row?.userid || '')).filter(Boolean));
+        if (backupMode === 'full') {
+          users.forEach((row, index) => {
+            if (!row?.userid) pushPreflight('users', index, '缺少 userid');
+          });
+        }
+        const acknowledgements = requireArray('content_announcement_acknowledgements') || [];
+        acknowledgements.forEach((row, index) => {
+          const announcementId = Number(row?.announcement_id);
+          const revision = Number(row?.revision);
+          const action = String(row?.action || '');
+          if (!row?.userid) pushPreflight('content_announcement_acknowledgements', index, '缺少 userid');
+          if (row?.userid && !userIds.has(String(row.userid))) {
+            pushPreflight('content_announcement_acknowledgements', index, '找不到关联用户');
+          }
+          if (!Number.isSafeInteger(announcementId) || announcementId <= 0) {
+            pushPreflight('content_announcement_acknowledgements', index, 'announcement_id 无效');
+          }
+          if (!Number.isSafeInteger(revision) || revision <= 0) {
+            pushPreflight('content_announcement_acknowledgements', index, 'revision 无效');
+          }
+          if (!/^[a-f0-9]{64}$/i.test(String(row?.content_hash || ''))) {
+            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 必须为 64 位十六进制');
+          }
+          if (!['acknowledged', 'dismissed'].includes(action)) {
+            pushPreflight('content_announcement_acknowledgements', index, 'action 无效');
+          }
+          const revisionSnapshot = announcementRevisionHashes.get(`${announcementId}:${revision}`);
+          if (!revisionSnapshot) {
+            pushPreflight('content_announcement_acknowledgements', index, '找不到关联公告修订');
+          } else if (revisionSnapshot.hash !== String(row?.content_hash || '').toLowerCase()) {
+            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 与关联修订不匹配');
+          } else if (revisionSnapshot.requiresAcknowledgement && action !== 'acknowledged') {
+            pushPreflight('content_announcement_acknowledgements', index, '强制确认公告不允许 dismissed');
+          }
         });
+      }
 
+      if (backupMode === 'full') {
         const accounts = requireArray('accounts') || [];
         accounts.forEach((row, index) => {
           if (!row?.userid) pushPreflight('accounts', index, '缺少 userid');
@@ -614,37 +685,6 @@ export function registerAdminBackupRoutes(router) {
           }
         });
 
-        const acknowledgements = requireArray('content_announcement_acknowledgements') || [];
-        acknowledgements.forEach((row, index) => {
-          const announcementId = Number(row?.announcement_id);
-          const revision = Number(row?.revision);
-          const action = String(row?.action || '');
-          if (!row?.userid) pushPreflight('content_announcement_acknowledgements', index, '缺少 userid');
-          if (row?.userid && !userIds.has(String(row.userid))) {
-            pushPreflight('content_announcement_acknowledgements', index, '找不到关联用户');
-          }
-          if (!Number.isSafeInteger(announcementId) || announcementId <= 0) {
-            pushPreflight('content_announcement_acknowledgements', index, 'announcement_id 无效');
-          }
-          if (!Number.isSafeInteger(revision) || revision <= 0) {
-            pushPreflight('content_announcement_acknowledgements', index, 'revision 无效');
-          }
-          if (!/^[a-f0-9]{64}$/i.test(String(row?.content_hash || ''))) {
-            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 必须为 64 位十六进制');
-          }
-          if (!['acknowledged', 'dismissed'].includes(action)) {
-            pushPreflight('content_announcement_acknowledgements', index, 'action 无效');
-          }
-          const revisionSnapshot = announcementRevisionHashes.get(`${announcementId}:${revision}`);
-          if (!revisionSnapshot) {
-            pushPreflight('content_announcement_acknowledgements', index, '找不到关联公告修订');
-          } else if (revisionSnapshot.hash !== String(row?.content_hash || '').toLowerCase()) {
-            pushPreflight('content_announcement_acknowledgements', index, 'content_hash 与关联修订不匹配');
-          } else if (revisionSnapshot.requiresAcknowledgement && action !== 'acknowledged') {
-            pushPreflight('content_announcement_acknowledgements', index, '强制确认公告不允许 dismissed');
-          }
-        });
-
         const activities = requireArray('red_packet_activity') || [];
         activities.forEach((row, index) => {
           if (!row?.id) pushPreflight('red_packet_activity', index, '缺少 id');
@@ -680,13 +720,14 @@ export function registerAdminBackupRoutes(router) {
     // 覆盖导入前自动生成恢复点，防止中途失败后无回滚文件。
     let recoveryPoint = null;
     try {
-      const tablesToSnapshot = backupMode === 'full' ? FULL_TABLES : SETTINGS_TABLES;
-      const snapshotData = {};
-      for (const tableName of tablesToSnapshot) {
-        // eslint-disable-next-line no-await-in-loop
-        // 恢复点保留密钥（keepSecrets），与普通导出脱敏分离。
-        snapshotData[tableName] = redactBackupSecrets(tableName, await dumpTable(db, tableName), { keepSecrets: true });
-      }
+      const tablesToSnapshot = backupMode === 'full'
+        ? FULL_TABLES
+        : SETTINGS_RECOVERY_TABLES;
+      const snapshotData = await dumpTablesConsistently(
+        db,
+        tablesToSnapshot,
+        { keepSecrets: true },
+      );
       const stampDate = new Date();
       const recoveryFilename = buildBackupFilename(backupMode);
       const recoveryPayload = {
@@ -1015,23 +1056,24 @@ export function registerAdminBackupRoutes(router) {
             name: 'content_announcements',
             sql: `INSERT INTO content_announcements(
                     id, title, content, level, sort, is_enabled, publish_at,
-                    show_fullscreen, requires_acknowledgement, revision, content_hash,
+                    show_fullscreen, requires_acknowledgement, revision, content_hash, edit_version,
                     created_at, updated_at
                   )
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                   ON CONFLICT(id) DO NOTHING`,
             overwriteSql: `INSERT INTO content_announcements(
                     id, title, content, level, sort, is_enabled, publish_at,
-                    show_fullscreen, requires_acknowledgement, revision, content_hash,
+                    show_fullscreen, requires_acknowledgement, revision, content_hash, edit_version,
                     created_at, updated_at
                   )
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                   ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, content=excluded.content, level=excluded.level,
                     sort=excluded.sort, is_enabled=excluded.is_enabled, publish_at=excluded.publish_at,
                     show_fullscreen=excluded.show_fullscreen,
                     requires_acknowledgement=excluded.requires_acknowledgement,
                     revision=excluded.revision, content_hash=excluded.content_hash,
+                    edit_version=excluded.edit_version,
                     created_at=excluded.created_at, updated_at=excluded.updated_at`,
             params: (row) => {
               const requiresAcknowledgement = backupVersion === 2
@@ -1058,6 +1100,7 @@ export function registerAdminBackupRoutes(router) {
                 requiresAcknowledgement ? 1 : 0,
                 revision,
                 contentHash,
+                row.edit_version === undefined || row.edit_version === null ? 1 : Number(row.edit_version),
                 row.created_at ?? nowTs(),
                 row.updated_at ?? nowTs(),
               ];
@@ -1264,10 +1307,20 @@ export function registerAdminBackupRoutes(router) {
             }
             if (rows) report.users = count;
           }
+        }
 
+        if (backupMode === 'full' || isSettingsRecoveryPoint) {
           // content_announcement_acknowledgements
           {
             const rows = requireArray('content_announcement_acknowledgements') || [];
+            if (isSettingsRecoveryPoint) {
+              await execOrThrow(
+                tx,
+                'DELETE FROM content_announcement_acknowledgements',
+                [],
+                'content_announcement_acknowledgements recovery delete',
+              );
+            }
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
@@ -1316,7 +1369,9 @@ export function registerAdminBackupRoutes(router) {
             }
             report.content_announcement_acknowledgements = count;
           }
+        }
 
+        if (backupMode === 'full') {
           // admin_user_roles
           {
             const rows = requireArray('admin_user_roles') || [];

@@ -81,18 +81,35 @@ function Announcements({ canEdit, canDelete }) {
     });
   };
   const save = async (v) => {
-    await api('/admin/content/announcements/save', {
-      method: 'POST',
-      body: {
-        ...v,
-        id: editing?.id || null,
-        is_enabled: v.is_enabled ? 1 : 0,
-        show_fullscreen: v.show_fullscreen ? 1 : 0,
-        requires_acknowledgement: v.requires_acknowledgement ? 1 : 0,
-        publish_at: toUnix(v.publish_at),
-      },
-    });
-    message.success('公告已保存'); setEditing(null); form.resetFields(); load();
+    try {
+      await api('/admin/content/announcements/save', {
+        method: 'POST',
+        body: {
+          ...v,
+          id: editing?.id || null,
+          revision: editing?.id ? editing.revision : undefined,
+          content_hash: editing?.id ? editing.content_hash : undefined,
+          edit_version: editing?.id ? editing.edit_version : undefined,
+          is_enabled: v.is_enabled ? 1 : 0,
+          show_fullscreen: v.show_fullscreen ? 1 : 0,
+          requires_acknowledgement: v.requires_acknowledgement ? 1 : 0,
+          publish_at: toUnix(v.publish_at),
+        },
+      });
+      message.success('公告已保存');
+      setEditing(null);
+      form.resetFields();
+      await load();
+    } catch (err) {
+      if (err?.status === 409 && err?.code === 'announcement_revision_conflict') {
+        setEditing(null);
+        form.resetFields();
+        await load().catch((loadErr) => message.error(loadErr.message));
+        message.error('公告已被其他管理员更新，编辑窗口已关闭，请基于最新内容重新编辑');
+        return;
+      }
+      throw err;
+    }
   };
   const del = (id) => modal.confirm({ title: '删除公告', okButtonProps: { danger: true }, onOk: async () => { await api('/admin/content/announcements/delete', { method: 'POST', body: { id } }); load(); } });
   const onRequiresAcknowledgementChange = (checked) => {

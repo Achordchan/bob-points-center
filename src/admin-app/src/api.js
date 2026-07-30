@@ -33,6 +33,10 @@ const errorTextMap = {
   'cdk already redeemed': 'CDK 已兑换',
   'redeemed cdk cannot be deleted': '已兑换的 CDK 不能删除',
   'exchange already redeemed': '该订单已核销',
+  announcement_revision_conflict: '公告已被其他管理员更新，请载入最新版本后重试',
+  invalid_announcement_revision: '公告修订版本无效，请重新载入后重试',
+  invalid_announcement_content_hash: '公告内容校验值无效，请重新载入后重试',
+  invalid_announcement_edit_version: '公告编辑版本无效，请重新载入后重试',
   'payload mismatch': '核销内容不匹配',
 };
 
@@ -64,6 +68,14 @@ export function translateErrorMessage(error) {
   return raw;
 }
 
+function createApiError(res, data, fallback) {
+  const error = new Error(translateErrorMessage(data?.error || fallback));
+  error.status = res.status;
+  error.code = data?.error || '';
+  error.data = data;
+  return error;
+}
+
 export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   let body = options.body;
@@ -80,10 +92,10 @@ export async function api(path, options = {}) {
   }
   if (res.status === 401) {
     redirectToAdminLogin();
-    throw new Error(translateErrorMessage(data?.error || 'unauthorized'));
+    throw createApiError(res, data, 'unauthorized');
   }
   if (!res.ok || data?.ok === false || data?.error) {
-    throw new Error(translateErrorMessage(data?.error || `HTTP ${res.status}`));
+    throw createApiError(res, data, `HTTP ${res.status}`);
   }
   return data;
 }

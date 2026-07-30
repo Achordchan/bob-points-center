@@ -124,7 +124,10 @@ function Backup({ canExport, canImport }) {
     try {
       const data = JSON.parse(await file.text());
       if (!data?._meta || !data?.data) throw new Error('无效的备份文件');
-      setImportDetail({ filename: file.name, meta: data._meta, backup: data });
+      const isRecoveryPoint = data._meta?.mode === 'settings'
+        && data._meta?.purpose === 'pre_import_recovery_point';
+      if (isRecoveryPoint) setImportMode('overwrite');
+      setImportDetail({ filename: file.name, meta: data._meta, backup: data, isRecoveryPoint });
       message.success('备份文件已读取');
     } catch (err) {
       setImportDetail(null);
@@ -135,6 +138,7 @@ function Backup({ canExport, canImport }) {
 
   const doImport = async () => {
     if (!importDetail?.backup) return message.warning('请先选择备份文件');
+    const isRecoveryPoint = Boolean(importDetail.isRecoveryPoint);
     const run = async () => {
       setBusy(true);
       try {
@@ -150,9 +154,11 @@ function Backup({ canExport, canImport }) {
     };
     if (importMode === 'overwrite') {
       modal.confirm({
-        title: '确认覆盖导入？',
-        content: '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。',
-        okText: '确认覆盖导入',
+        title: isRecoveryPoint ? '确认恢复自动恢复点？' : '确认覆盖导入？',
+        content: isRecoveryPoint
+          ? '恢复后，公告、修订和用户确认状态将精确回到该恢复点；恢复点之后新增的确认会被撤销。'
+          : '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。',
+        okText: isRecoveryPoint ? '确认恢复' : '确认覆盖导入',
         okButtonProps: { danger: true },
         cancelText: '取消',
         onOk: run,
@@ -222,12 +228,18 @@ function Backup({ canExport, canImport }) {
           <Upload accept=".json,application/json" showUploadList={false} beforeUpload={parseImportFile}>
             <Button>选择备份文件</Button>
           </Upload>
-          <Select value={importMode} onChange={setImportMode} style={{ width: 260 }} options={[{ value: 'merge', label: '合并导入：保留现有数据' }, { value: 'overwrite', label: '覆盖导入：清空后写入' }]} />
+          <Select disabled={Boolean(importDetail?.isRecoveryPoint)} value={importMode} onChange={setImportMode} style={{ width: 260 }} options={[{ value: 'merge', label: '合并导入：保留现有数据' }, { value: 'overwrite', label: '覆盖导入：清空后写入' }]} />
           <Button type="primary" danger={importMode === 'overwrite'} loading={busy} onClick={doImport}>开始导入</Button>
         </Space>
+        {importDetail?.isRecoveryPoint && <Alert
+          type="error"
+          showIcon
+          message="这是导入前自动恢复点，只能覆盖恢复"
+          description="恢复会精确还原公告确认状态，恢复点之后新增的用户确认将被撤销。"
+        />}
         {importDetail && <Descriptions bordered size="small" column={2} items={[
           { key: 'file', label: '文件', children: importDetail.filename },
-          { key: 'mode', label: '备份类型', children: importDetail.meta?.mode === 'full' ? '全量备份' : '设置备份' },
+          { key: 'mode', label: '备份类型', children: importDetail.isRecoveryPoint ? '自动恢复点' : importDetail.meta?.mode === 'full' ? '全量备份' : '设置备份' },
           { key: 'version', label: '备份版本', children: importDetail.meta?.version || '-' },
           { key: 'time', label: '导出时间', children: importDetail.meta?.exportedAt || '-' },
         ]} />}
