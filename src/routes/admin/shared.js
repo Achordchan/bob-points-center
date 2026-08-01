@@ -98,7 +98,7 @@ import {
 
 export function getPackageMeta() {
   try {
-    const raw = readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8');
+    const raw = readFileSync(fileURLToPath(new URL('../../../package.json', import.meta.url)), 'utf8');
     const pkg = JSON.parse(raw);
     return { name: pkg?.name || 'bob', version: pkg?.version || '0.0.0' };
   } catch {

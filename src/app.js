@@ -17,6 +17,14 @@ import { handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './s
 import { getClientIp, safeAppendAuditLog } from './services/auditLogService.js';
 import { clientIpKey, createRateLimiter } from './middleware/rateLimit.js';
 
+export function shouldStartDingtalkStream(cfg) {
+  return Boolean(
+    cfg?.dingtalk?.appKey
+    && cfg?.dingtalk?.appSecret
+    && cfg?.dingtalk?.streamEnabled !== false,
+  );
+}
+
 export function createApp({ db, cfg } = {}) {
   const app = express();
   if (cfg?.trustProxy) {
@@ -82,6 +90,9 @@ export function createApp({ db, cfg } = {}) {
 
   const pagesAssetsRoot = fileURLToPath(new URL('./pages/assets/', import.meta.url));
   app.use('/assets', express.static(pagesAssetsRoot, { maxAge: 0 }));
+  app.get('/favicon.ico', (_req, res) => {
+    res.redirect(302, '/assets/favicon.png');
+  });
   const adminAppRoot = fileURLToPath(new URL('./pages/admin-app-dist/', import.meta.url));
   app.use('/admin-app', express.static(adminAppRoot, { maxAge: 0 }));
 
@@ -134,8 +145,7 @@ export function createApp({ db, cfg } = {}) {
 
   // 钉钉 Stream 长连接：接收考勤打卡事件并发放 BOB 币奖励
   // 仅当钉钉 appKey / appSecret 已配置时才启动
-  const hasStreamConfig = cfg?.dingtalk?.appKey && cfg?.dingtalk?.appSecret;
-  if (hasStreamConfig) {
+  if (shouldStartDingtalkStream(cfg)) {
     startDingtalkStream(cfg, {
       // 钉钉考勤打卡事件（eventType = attendance_check_record）
       attendance_check_record: ({ data, headers }) => handleCheckinEvent(db, cfg, { data, headers }),
@@ -149,6 +159,9 @@ export function createApp({ db, cfg } = {}) {
       },
     });
     startAttendanceRewardReconcileScheduler({ db, cfg });
+  } else if (cfg?.dingtalk?.streamEnabled === false) {
+    // eslint-disable-next-line no-console
+    console.warn('[DingtalkStream] 已通过 DINGTALK_STREAM_ENABLED=false 禁用 Stream 连接');
   } else {
     // eslint-disable-next-line no-console
     console.warn('[DingtalkStream] 未配置 appKey/appSecret，跳过 Stream 连接');

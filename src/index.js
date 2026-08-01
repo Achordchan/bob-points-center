@@ -2,8 +2,10 @@ import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { initDb } from './db/index.js';
 import { applyDingtalkConnectionSettings, getDingtalkConnectionSettings } from './services/systemSettings.js';
+import { configureDnsResultOrder } from './utils/network.js';
 
 async function main() {
+  configureDnsResultOrder();
   const cfg = loadConfig();
   const db = await initDb(cfg);
   const dingtalkSettings = await getDingtalkConnectionSettings(db, cfg);

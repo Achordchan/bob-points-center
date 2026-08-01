@@ -103,6 +103,7 @@ export function loadConfig() {
       agentId: process.env.DINGTALK_AGENT_ID || '',
       robotCode: process.env.DINGTALK_ROBOT_CODE || '',
       robotNotifyEnabled: toBool(process.env.DINGTALK_ROBOT_NOTIFY_ENABLED, true),
+      streamEnabled: toBool(process.env.DINGTALK_STREAM_ENABLED, true),
 
       groupCardNotifyEnabled: toBool(process.env.DINGTALK_GROUP_CARD_NOTIFY_ENABLED, undefined),
       groupOpenConversationId: process.env.DINGTALK_GROUP_OPEN_CONVERSATION_ID || '',

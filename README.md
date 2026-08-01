@@ -275,6 +275,7 @@ npm run admin:dev
 | `COOKIE_SECURE` | 自动判定 | 未显式配置时，`NODE_ENV=production` 或 `SERVER_BASE_URL` 为 HTTPS 即启用 |
 | `TRUST_PROXY` | 自动判定 | 是否信任反向代理的 `X-Forwarded-For` |
 | `SERVER_PUBLIC_IP` | 空 | 管理端系统信息展示用，未配置时回退自动解析 |
+| `DNS_RESULT_ORDER` | `ipv4first` | 外部接口 DNS 地址优先级；钉钉 IP 白名单按 IPv4 配置时保持默认值，需要系统原始顺序时设为 `verbatim` |
 
 ### 数据库
 
@@ -326,8 +327,9 @@ npm run admin:dev
 | `DINGTALK_AGENT_ID` | 应用 AgentId |
 | `DINGTALK_ROBOT_CODE` | 机器人编码 |
 | `DINGTALK_ROBOT_NOTIFY_ENABLED` | 是否启用机器人通知，默认启用 |
+| `DINGTALK_STREAM_ENABLED` | 是否建立 Stream 长连接并运行打卡奖励对账，默认启用；仅测试 OAuth/通知时可设为 `false` |
 
-`DINGTALK_APP_KEY` 与 `DINGTALK_APP_SECRET` 同时配置时才会建立 Stream 长连接并启用打卡奖励；缺失时服务正常启动，仅跳过该能力并输出告警。
+`DINGTALK_APP_KEY` 与 `DINGTALK_APP_SECRET` 同时配置且 `DINGTALK_STREAM_ENABLED=true` 时才会建立 Stream 长连接并启用打卡奖励；缺失凭据或显式关闭时服务正常启动，仅跳过该能力并输出告警。
 
 ### 群卡片通知（可选）
 
@@ -513,7 +515,6 @@ POST /admin/settings/attendance-reward/reconcile
 ## 版本记录
 
 系统版本与更新说明维护在数据库 `system_versions` 表中，员工端「更多 → 版本信息」与管理后台「内容运营」均可查看。初始版本数据由 `src/db/init.js` 写入。
-
 
 
 
