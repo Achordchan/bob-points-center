@@ -23,6 +23,7 @@ const attendanceReasonText = {
   duplicate: '当天已发放，重复打卡不再发放',
   department_not_allowed: '未命中奖励部门',
   department_not_matched: '不在适用部门范围内',
+  before_start_date: '早于奖励生效日期，未发放',
 };
 
 function statusText(map, value) {
@@ -158,9 +159,12 @@ function AttendanceRewards({ dingtalk, me }) {
   const save = async (values) => {
     setSaving(true);
     try {
-      await api('/admin/settings/attendance-reward', { method: 'POST', body: { ...values, departmentMode: mode, departmentIds: mode === 'selected' ? values.departmentIds || [] : [] } });
+      const result = await api('/admin/settings/attendance-reward', { method: 'POST', body: { ...values, departmentMode: mode, departmentIds: mode === 'selected' ? values.departmentIds || [] : [] } });
+      const saved = result.data || {};
+      form.setFieldsValue(saved);
+      setMode(saved.departmentMode || 'all');
       message.success('打卡奖励已保存');
-      await loadAll();
+      await loadStatus(days);
     } catch (err) {
       message.error(err.message || '保存失败');
     } finally {
@@ -226,6 +230,7 @@ function AttendanceRewards({ dingtalk, me }) {
           <Col xs={24} md={8} lg={6}><Form.Item name="enabled" label="启用打卡奖励" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
           <Col xs={24} md={8} lg={6}><Form.Item name="testMode" label="测试模式" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
           <Col xs={24} md={8} lg={6}><Form.Item name="onlyCheckin" label="仅上班打卡" valuePropName="checked"><Switch disabled={!canEdit} /></Form.Item></Col>
+          <Col xs={24} md={8} lg={6}><Form.Item name="startDate" label="生效日期"><Input type="date" readOnly={!canEdit} /></Form.Item></Col>
         </Row>
         <Row gutter={[16, 8]}>
           <Col xs={24} sm={12} lg={6}><Form.Item name="workStartTime" label="上班时间"><Input placeholder="08:30" readOnly={!canEdit} /></Form.Item></Col>

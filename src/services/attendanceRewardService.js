@@ -189,9 +189,20 @@ export function isAttendanceDepartmentAllowed(userProfile, settings) {
   return matched ? { ok: true, skipReason: '' } : { ok: false, skipReason: 'department_not_allowed' };
 }
 
+export function isAttendanceRewardDateActive(settings, workDate) {
+  const startDate = String(settings?.startDate || '').trim();
+  const date = String(workDate || '').trim();
+  if (!startDate) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  return date >= startDate;
+}
+
 export function evaluateAttendanceRewardRecord(settings = {}, record = {}, userProfile = {}) {
   const userid = record?.userId ? String(record.userId).trim() : '';
   const normalized = normalizeAttendanceRecord(record, userProfile?.name || userid);
+  if (!isAttendanceRewardDateActive(settings, normalized.work_date)) {
+    return { ok: true, wouldReward: false, status: 'skipped', reason: 'before_start_date', normalized };
+  }
   const deptEligibility = isAttendanceDepartmentAllowed(userProfile, settings);
   if (!deptEligibility.ok) {
     return { ok: true, wouldReward: false, status: 'skipped', reason: deptEligibility.skipReason, normalized };
@@ -254,6 +265,7 @@ function humanizeSkipMessage(skipReason, normalized, settings = {}) {
   if (skipReason === 'skipped_late') return `打卡晚于 ${settings.workStartTime || '08:30'}（含宽限），跳过奖励${timeSuffix}`;
   if (skipReason === 'max_per_day') return `今日已奖励 1 次，跳过${timeSuffix}`;
   if (skipReason === 'department_not_allowed') return `未命中奖励部门${timeSuffix}`;
+  if (skipReason === 'before_start_date') return `打卡日期早于生效日期 ${settings.startDate || '-'}，跳过奖励${timeSuffix}`;
   if (skipReason === 'missing_check_time') return '缺少打卡时间，跳过奖励';
   return `未满足奖励条件，跳过${timeSuffix}`;
 }
@@ -362,6 +374,10 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
   if (settings?.testMode === true) notifyOnReward = false;
   const userid = record?.userId ? String(record.userId).trim() : '';
   if (!userid) return { ok: false, skipped: true, reason: 'missing_userid' };
+  const preliminary = normalizeAttendanceRecord(record, userid);
+  if (!isAttendanceRewardDateActive(settings, preliminary.work_date)) {
+    return { ok: true, skipped: true, reason: 'before_start_date' };
+  }
   const userProfile = await resolveAttendanceUserProfile(db, cfg, userid);
   const displayName = userProfile.name || '';
   const normalized = normalizeAttendanceRecord(record, displayName || userid);
@@ -672,6 +688,9 @@ export async function reconcileAttendanceRewards(db, cfg, { date, userids, notif
   if (settings.testMode === true) notifyOnReward = false;
 
   const range = getDateRange(date);
+  if (!isAttendanceRewardDateActive(settings, range.date)) {
+    return { ok: true, skipped: true, reason: 'before_start_date', date: range.date };
+  }
   const nowCst = getCurrentCstInfo();
   if (range.date === nowCst.date && nowCst.minutes >= 9 * 60) {
     notifyOnReward = false; // 9 点后补发不推送，只记账

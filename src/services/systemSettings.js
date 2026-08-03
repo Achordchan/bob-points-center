@@ -425,6 +425,7 @@ export async function saveDingtalkConnectionSettings(db, input = {}, cfg = {}) {
 const DEFAULT_ATTENDANCE_REWARD_SETTINGS = {
   enabled: false,
   testMode: false,
+  startDate: '',
   workStartTime: '08:30',
   lateGraceMinutes: 0,
   rewardMin: 1,
@@ -461,6 +462,7 @@ export function normalizeAttendanceRewardSettings(input) {
   return {
     enabled: toBool(src.enabled, def.enabled),
     testMode: toBool(src.testMode, def.testMode),
+    startDate: normalizeDateSetting(src.startDate),
     workStartTime: typeof src.workStartTime === 'string' && /^\d{1,2}:\d{2}$/.test(src.workStartTime.trim())
       ? src.workStartTime.trim()
       : def.workStartTime,
@@ -474,6 +476,13 @@ export function normalizeAttendanceRewardSettings(input) {
     departmentExpandedIds: normalizeDepartmentIds(src.departmentExpandedIds),
     reason: src.reason && String(src.reason).trim() ? String(src.reason).trim() : def.reason,
   };
+}
+
+function normalizeDateSetting(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return '';
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text ? text : '';
 }
 
 export async function getAttendanceRewardSettings(db) {
