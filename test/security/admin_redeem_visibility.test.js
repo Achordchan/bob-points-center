@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   decodeAdminRedeemCursor,
   encodeAdminRedeemCursor,
   publicAdminOrderReference,
   serializeAdminRedeemRow,
 } from '../../src/services/adminRedeemVisibilityService.js';
+
+const adminRouteSource = readFileSync(fileURLToPath(new URL('../../src/routes/admin/index.js', import.meta.url)), 'utf8');
+const ordersPageSource = readFileSync(fileURLToPath(new URL('../../src/admin-app/src/pages/Orders.jsx', import.meta.url)), 'utf8');
 
 const cdkOrder = {
   exchange_id: 'CDK_EXAMPLE',
@@ -55,4 +60,34 @@ test('订单翻页游标不暴露原始 CDK 单号和兑换时间', () => {
     exchangeId: 'CDK_EXAMPLE',
   });
   assert.equal(decodeAdminRedeemCursor(cursor, 'wrong-secret'), null);
+});
+
+test('普通核销队列使用加密的稳定排序游标', () => {
+  const cursor = encodeAdminRedeemCursor({ queueKey: '0123456789abcdef', exchangeId: 'CDK_EXAMPLE' }, 'test-secret');
+  assert.doesNotMatch(cursor, /CDK|0123456789abcdef/);
+  assert.deepEqual(decodeAdminRedeemCursor(cursor, 'test-secret'), {
+    queueKey: '0123456789abcdef',
+    exchangeId: 'CDK_EXAMPLE',
+  });
+});
+
+test('核销操作页面对超级管理员同样使用安全订单视图', () => {
+  const orderHandler = adminRouteSource.slice(
+    adminRouteSource.indexOf("router.get('/orders/:exchangeId'"),
+    adminRouteSource.indexOf("router.post('/redeem/deduct-batch'"),
+  );
+  const pendingHandler = adminRouteSource.slice(
+    adminRouteSource.indexOf("router.get('/redeem/pending'"),
+    adminRouteSource.indexOf("router.post('/redeem/history/clear'"),
+  );
+  const drawerSource = ordersPageSource.slice(
+    ordersPageSource.indexOf('<Drawer title="订单详情"'),
+    ordersPageSource.indexOf('</Drawer>'),
+  );
+
+  assert.match(orderHandler, /order: serializeAdminRedeemRow\(order\)/);
+  assert.doesNotMatch(orderHandler, /isSuperAdmin/);
+  assert.match(pendingHandler, /ORDER BY queue_sort_key ASC/);
+  assert.match(pendingHandler, /serializeAdminRedeemRow\(row\)/);
+  assert.doesNotMatch(drawerSource, /CDK|redeem_source|isSuperAdmin/);
 });

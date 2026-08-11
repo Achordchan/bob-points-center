@@ -199,32 +199,37 @@ function OrderTable({ type, onOpen, reloadKey, me }) {
     }
   };
 
-  const columns = [
-    {
+  const columns = [];
+  if (type === 'history') {
+    columns.push({
       title: '时间',
       render: (_, row) => type === 'history'
         ? formatTs(row.fulfilled_at)
         : (row.redeem_source === 'cdk' ? '-' : formatTs(row.created_at)),
-    },
+    });
+  }
+  columns.push(
     { title: '用户', render: (_, r) => r.name ? `${r.name} (${r.userid})` : r.userid },
     { title: '兑换单号', dataIndex: 'exchange_id', ellipsis: true },
     { title: '商品', dataIndex: 'product_name' },
     { title: '金额', render: (_, r) => amountText(orderAmount(r)) },
-  ];
+  );
   if (type === 'history') columns.push({ title: '核销人', render: (_, r) => verifierText(r) });
-  columns.push({
-    title: '操作',
-    render: (_, r) => r.created_at
-      ? <Button onClick={() => onOpen(r.exchange_id)}>详情</Button>
-      : <Typography.Text type="secondary">-</Typography.Text>,
-  });
+  if (type === 'history') {
+    columns.push({
+      title: '操作',
+      render: (_, r) => r.created_at
+        ? <Button onClick={() => onOpen(r.exchange_id)}>详情</Button>
+        : <Typography.Text type="secondary">-</Typography.Text>,
+    });
+  }
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <Space>
       <Button onClick={() => load()}>刷新</Button>
       {type === 'history' && me?.isSuperAdmin && <Button danger onClick={() => { setClearText(''); setClearOpen(true); }}>危险区：清空历史</Button>}
     </Space>
-    <Table rowKey="exchange_id" loading={loading} dataSource={rows} pagination={localTablePagination('单', 30)} scroll={{ x: type === 'history' ? 1120 : 980 }} columns={columns} />
+    <Table rowKey="exchange_id" loading={loading} dataSource={rows} pagination={localTablePagination('单', 30)} scroll={{ x: type === 'history' ? 1120 : 760 }} columns={columns} />
     {hasMore && <Button block loading={loadingMore} onClick={() => load({ append: true, cursor: nextCursor })}>加载更多</Button>}
     <Modal
       title="危险区：清空已核销历史"
@@ -262,14 +267,6 @@ export default function Orders({ me }) {
         { key: 'user', label: '用户', children: `${detail.order?.name || '-'} (${detail.order?.userid || '-'})` },
         { key: 'product', label: '商品', children: detail.order?.product_name || '-' },
         { key: 'amount', label: '金额', children: amountText(orderAmount(detail.order)) },
-        ...(me?.isSuperAdmin ? [
-          { key: 'source', label: '来源', children: detail.order?.redeem_source === 'cdk' ? 'CDK' : '商城' },
-        ] : []),
-        ...(me?.isSuperAdmin && detail.order?.redeem_source === 'cdk' ? [
-          { key: 'cdkCode', label: 'CDK 码', children: detail.order?.cdk_code || '-' },
-          { key: 'cdkBatch', label: 'CDK 批次', children: detail.order?.batch_id || '-' },
-          { key: 'cdkAmount', label: 'CDK 商品金额', children: amountText(detail.order?.cdk_product_bob_amount) },
-        ] : []),
         ...(detail.order?.created_at ? [
           { key: 'created', label: '下单时间', children: formatTs(detail.order.created_at) },
         ] : []),

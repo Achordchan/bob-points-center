@@ -6,15 +6,21 @@ function cursorKey(secret) {
   return createHash('sha256').update(value).digest();
 }
 
-export function encodeAdminRedeemCursor({ at, exchangeId }, secret) {
+export function encodeAdminRedeemCursor({ at, queueKey, exchangeId }, secret) {
   const timestamp = Number(at);
+  const stableQueueKey = String(queueKey || '').trim();
   const id = String(exchangeId || '').trim();
-  if (!Number.isFinite(timestamp) || timestamp <= 0 || !id) return '';
+  const hasTimestamp = Number.isFinite(timestamp) && timestamp > 0;
+  if ((!hasTimestamp && !stableQueueKey) || !id) return '';
+
+  const payload = { exchangeId: id };
+  if (hasTimestamp) payload.at = Math.floor(timestamp);
+  if (stableQueueKey) payload.queueKey = stableQueueKey;
 
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', cursorKey(secret), iv);
   const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify({ at: Math.floor(timestamp), exchangeId: id }), 'utf8'),
+    cipher.update(JSON.stringify(payload), 'utf8'),
     cipher.final(),
   ]);
   const tag = cipher.getAuthTag();
@@ -34,9 +40,15 @@ export function decodeAdminRedeemCursor(value, secret) {
     decipher.setAuthTag(tag);
     const data = JSON.parse(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8'));
     const at = Number(data?.at);
+    const queueKey = String(data?.queueKey || '').trim();
     const exchangeId = String(data?.exchangeId || '').trim();
-    if (!Number.isFinite(at) || at <= 0 || !exchangeId) return null;
-    return { at: Math.floor(at), exchangeId };
+    const hasTimestamp = Number.isFinite(at) && at > 0;
+    if ((!hasTimestamp && !queueKey) || !exchangeId) return null;
+    return {
+      ...(hasTimestamp ? { at: Math.floor(at) } : {}),
+      ...(queueKey ? { queueKey } : {}),
+      exchangeId,
+    };
   } catch {
     return null;
   }
@@ -53,6 +65,7 @@ export function serializeAdminRedeemRow(row, { isSuperAdmin = false } = {}) {
   if (!row || typeof row !== 'object') return row;
 
   const result = { ...row };
+  delete result.queue_sort_key;
   if (isSuperAdmin) return result;
 
   if (result.redeem_source === 'cdk') {

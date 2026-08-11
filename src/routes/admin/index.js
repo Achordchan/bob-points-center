@@ -1204,9 +1204,7 @@ export function adminRouter() {
           user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 || role ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0, role },
           account: { balance: Number(user.balance || 0), updated_at: user.updated_at },
           ledger,
-          redeems: (redeems || []).map((row) => serializeAdminRedeemRow(row, {
-            isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
-          })),
+          redeems: (redeems || []).map((row) => serializeAdminRedeemRow(row)),
           contributions,
           dingtalk: dingtalkProfile ? {
             ...dingtalkProfile,
@@ -1264,7 +1262,7 @@ export function adminRouter() {
       return res.json({
         ok: true,
         data: {
-          order: serializeAdminRedeemRow(order, { isSuperAdmin: req.adminAccess?.isSuperAdmin === true }),
+          order: serializeAdminRedeemRow(order),
           ledger,
         },
       });
@@ -1378,9 +1376,7 @@ export function adminRouter() {
         exchangeId: last.exchange_id,
       }, cursorSecret) : '';
       const hasMore = rawData.length >= limit && Boolean(nextCursor);
-      const data = rawData.map((row) => serializeAdminRedeemRow(row, {
-        isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
-      }));
+      const data = rawData.map((row) => serializeAdminRedeemRow(row));
 
       return res.json({ ok: true, limit, cursor: cursorRaw, nextCursor, hasMore, data });
     } catch (err) {
@@ -1402,19 +1398,17 @@ export function adminRouter() {
       const params = [];
       if (cursorRaw) {
         const decodedCursor = decodeAdminRedeemCursor(cursorRaw, cursorSecret);
-        const legacyCursor = decodedCursor ? '' : cursorRaw;
-        const idx = legacyCursor.indexOf('|');
-        const at = decodedCursor?.at ?? (idx > 0 ? toInt(legacyCursor.slice(0, idx)) : null);
-        const ex = decodedCursor?.exchangeId ?? (idx > 0 ? legacyCursor.slice(idx + 1) : '');
-        if (at !== null && at > 0 && ex) {
-          whereCursorSql = ' AND (r.created_at < ? OR (r.created_at = ? AND r.exchange_id < ?))';
-          params.push(at, at, String(ex));
+        if (decodedCursor?.queueKey && decodedCursor?.exchangeId) {
+          const queueSortSql = "lower(COALESCE(r.product_name, '')) || chr(31) || lower(COALESCE(u.name, '')) || chr(31) || md5(r.exchange_id)";
+          whereCursorSql = ` AND (${queueSortSql} > ? OR (${queueSortSql} = ? AND r.exchange_id > ?))`;
+          params.push(decodedCursor.queueKey, decodedCursor.queueKey, decodedCursor.exchangeId);
         }
       }
 
       const rows = await db.all(
         `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
                 r.bob_amount, r.fulfilled_at, r.created_at,
+                lower(COALESCE(r.product_name, '')) || chr(31) || lower(COALESCE(u.name, '')) || chr(31) || md5(r.exchange_id) AS queue_sort_key,
                 CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
@@ -1422,21 +1416,19 @@ export function adminRouter() {
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
          WHERE r.fulfilled_at IS NULL
            AND COALESCE(r.product_id, '') NOT IN ('ADMIN_DEDUCT', 'API_DEDUCT')${whereCursorSql}
-         ORDER BY r.created_at DESC, r.exchange_id DESC
+         ORDER BY queue_sort_key ASC, r.exchange_id ASC
          LIMIT ?`,
         [...params, limit],
       );
 
       const rawData = rows || [];
       const last = rawData.length ? rawData[rawData.length - 1] : null;
-      const nextCursor = last && last.created_at ? encodeAdminRedeemCursor({
-        at: last.created_at,
+      const nextCursor = last ? encodeAdminRedeemCursor({
+        queueKey: last.queue_sort_key,
         exchangeId: last.exchange_id,
       }, cursorSecret) : '';
       const hasMore = rawData.length >= limit && Boolean(nextCursor);
-      const data = rawData.map((row) => serializeAdminRedeemRow(row, {
-        isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
-      }));
+      const data = rawData.map((row) => serializeAdminRedeemRow(row));
 
       return res.json({ ok: true, limit, cursor: cursorRaw, nextCursor, hasMore, data });
     } catch (err) {
@@ -2122,7 +2114,7 @@ export function adminRouter() {
         });
       }
 
-      const exchangeId = cdkRow && req.adminAccess?.isSuperAdmin !== true
+      const exchangeId = cdkRow
         ? publicAdminOrderReference(result.exchange_id)
         : result.exchange_id;
       return res.json({ ok: true, userid: result.userid, balance: result.balance, exchange_id: exchangeId });
