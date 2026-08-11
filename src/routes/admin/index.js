@@ -59,6 +59,12 @@ import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcil
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
 import { invalidateMallProductsCache } from '../../services/mallProductsCache.js';
 import {
+  decodeAdminRedeemCursor,
+  encodeAdminRedeemCursor,
+  publicAdminOrderReference,
+  serializeAdminRedeemRow,
+} from '../../services/adminRedeemVisibilityService.js';
+import {
   applyDingtalkConnectionSettings,
   getAttendanceRewardSettings,
   getDingtalkConnectionSettings,
@@ -1198,7 +1204,9 @@ export function adminRouter() {
           user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 || role ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0, role },
           account: { balance: Number(user.balance || 0), updated_at: user.updated_at },
           ledger,
-          redeems,
+          redeems: (redeems || []).map((row) => serializeAdminRedeemRow(row, {
+            isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
+          })),
           contributions,
           dingtalk: dingtalkProfile ? {
             ...dingtalkProfile,
@@ -1253,7 +1261,13 @@ export function adminRouter() {
         'SELECT id, userid, delta, reason, ref_id, created_at FROM ledger WHERE ref_id = ? ORDER BY created_at DESC, id DESC LIMIT 20',
         [exchangeId],
       );
-      return res.json({ ok: true, data: { order, ledger } });
+      return res.json({
+        ok: true,
+        data: {
+          order: serializeAdminRedeemRow(order, { isSuperAdmin: req.adminAccess?.isSuperAdmin === true }),
+          ledger,
+        },
+      });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }
@@ -1309,6 +1323,7 @@ export function adminRouter() {
 
   router.get('/redeem/history', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cursorSecret = adminSessionSigningSecret(req.app?.locals?.cfg);
     const limitRaw = req.query.limit;
     const limit = Math.min(200, Math.max(1, toPositiveInt(limitRaw, 80)));
     const cursorRaw = req.query.cursor ? String(req.query.cursor) : '';
@@ -1318,14 +1333,14 @@ export function adminRouter() {
       let whereCursorSql = '';
       const params = [];
       if (cursorRaw) {
-        const idx = cursorRaw.indexOf('|');
-        if (idx > 0) {
-          const at = toInt(cursorRaw.slice(0, idx));
-          const ex = cursorRaw.slice(idx + 1);
-          if (at !== null && at > 0 && ex) {
-            whereCursorSql = ' AND (r.fulfilled_at < ? OR (r.fulfilled_at = ? AND r.exchange_id < ?))';
-            params.push(at, at, String(ex));
-          }
+        const decodedCursor = decodeAdminRedeemCursor(cursorRaw, cursorSecret);
+        const legacyCursor = decodedCursor ? '' : cursorRaw;
+        const idx = legacyCursor.indexOf('|');
+        const at = decodedCursor?.at ?? (idx > 0 ? toInt(legacyCursor.slice(0, idx)) : null);
+        const ex = decodedCursor?.exchangeId ?? (idx > 0 ? legacyCursor.slice(idx + 1) : '');
+        if (at !== null && at > 0 && ex) {
+          whereCursorSql = ' AND (r.fulfilled_at < ? OR (r.fulfilled_at = ? AND r.exchange_id < ?))';
+          params.push(at, at, String(ex));
         }
       }
 
@@ -1356,10 +1371,16 @@ export function adminRouter() {
         [...params, limit],
       );
 
-      const data = rows || [];
-      const last = data.length ? data[data.length - 1] : null;
-      const nextCursor = last && last.fulfilled_at ? `${Number(last.fulfilled_at)}|${String(last.exchange_id || '')}` : '';
-      const hasMore = data.length >= limit && Boolean(nextCursor);
+      const rawData = rows || [];
+      const last = rawData.length ? rawData[rawData.length - 1] : null;
+      const nextCursor = last && last.fulfilled_at ? encodeAdminRedeemCursor({
+        at: last.fulfilled_at,
+        exchangeId: last.exchange_id,
+      }, cursorSecret) : '';
+      const hasMore = rawData.length >= limit && Boolean(nextCursor);
+      const data = rawData.map((row) => serializeAdminRedeemRow(row, {
+        isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
+      }));
 
       return res.json({ ok: true, limit, cursor: cursorRaw, nextCursor, hasMore, data });
     } catch (err) {
@@ -1369,6 +1390,7 @@ export function adminRouter() {
 
   router.get('/redeem/pending', requireAdminSession(), async (req, res) => {
     const db = req.app?.locals?.db;
+    const cursorSecret = adminSessionSigningSecret(req.app?.locals?.cfg);
     const limitRaw = req.query.limit;
     const limit = Math.min(200, Math.max(1, toPositiveInt(limitRaw, 80)));
     const cursorRaw = req.query.cursor ? String(req.query.cursor) : '';
@@ -1379,14 +1401,14 @@ export function adminRouter() {
       let whereCursorSql = '';
       const params = [];
       if (cursorRaw) {
-        const idx = cursorRaw.indexOf('|');
-        if (idx > 0) {
-          const at = toInt(cursorRaw.slice(0, idx));
-          const ex = cursorRaw.slice(idx + 1);
-          if (at !== null && at > 0 && ex) {
-            whereCursorSql = ' AND (r.created_at < ? OR (r.created_at = ? AND r.exchange_id < ?))';
-            params.push(at, at, String(ex));
-          }
+        const decodedCursor = decodeAdminRedeemCursor(cursorRaw, cursorSecret);
+        const legacyCursor = decodedCursor ? '' : cursorRaw;
+        const idx = legacyCursor.indexOf('|');
+        const at = decodedCursor?.at ?? (idx > 0 ? toInt(legacyCursor.slice(0, idx)) : null);
+        const ex = decodedCursor?.exchangeId ?? (idx > 0 ? legacyCursor.slice(idx + 1) : '');
+        if (at !== null && at > 0 && ex) {
+          whereCursorSql = ' AND (r.created_at < ? OR (r.created_at = ? AND r.exchange_id < ?))';
+          params.push(at, at, String(ex));
         }
       }
 
@@ -1405,10 +1427,16 @@ export function adminRouter() {
         [...params, limit],
       );
 
-      const data = rows || [];
-      const last = data.length ? data[data.length - 1] : null;
-      const nextCursor = last && last.created_at ? `${Number(last.created_at)}|${String(last.exchange_id || '')}` : '';
-      const hasMore = data.length >= limit && Boolean(nextCursor);
+      const rawData = rows || [];
+      const last = rawData.length ? rawData[rawData.length - 1] : null;
+      const nextCursor = last && last.created_at ? encodeAdminRedeemCursor({
+        at: last.created_at,
+        exchangeId: last.exchange_id,
+      }, cursorSecret) : '';
+      const hasMore = rawData.length >= limit && Boolean(nextCursor);
+      const data = rawData.map((row) => serializeAdminRedeemRow(row, {
+        isSuperAdmin: req.adminAccess?.isSuperAdmin === true,
+      }));
 
       return res.json({ ok: true, limit, cursor: cursorRaw, nextCursor, hasMore, data });
     } catch (err) {
@@ -2094,7 +2122,10 @@ export function adminRouter() {
         });
       }
 
-      return res.json({ ok: true, userid: result.userid, balance: result.balance, exchange_id: result.exchange_id });
+      const exchangeId = cdkRow && req.adminAccess?.isSuperAdmin !== true
+        ? publicAdminOrderReference(result.exchange_id)
+        : result.exchange_id;
+      return res.json({ ok: true, userid: result.userid, balance: result.balance, exchange_id: exchangeId });
     } catch (err) {
       const message = String(err?.message || err);
       const status = [

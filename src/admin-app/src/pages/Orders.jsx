@@ -131,7 +131,9 @@ function RedeemCenter({ onRedeemed }) {
           { key: 'user', label: '用户', children: order.name ? `${order.name} (${order.userid})` : (order.userid || payload.userid || '-') },
           { key: 'product', label: '商品', children: payloadProductText(order) },
           { key: 'amount', label: '金额', children: amountText(orderAmount(order)) },
-          { key: 'created', label: '下单时间', children: formatTs(order.created_at) },
+          ...(order.redeem_source !== 'cdk' && order.created_at ? [
+            { key: 'created', label: '下单时间', children: formatTs(order.created_at) },
+          ] : []),
         ]} />
         <Space className="redeem-confirm-actions" wrap>
           <Button onClick={resetScan}>重新扫码</Button>
@@ -141,7 +143,7 @@ function RedeemCenter({ onRedeemed }) {
     </Card>}
     {lastResult && <Card size="small" title="最近核销结果">
       <Descriptions bordered size="small" column={{ xs: 1, md: 2 }} items={[
-        { key: 'exchange', label: '兑换单号', children: lastResult.exchange_id || lastResult.order?.exchange_id || lastResult.payload?.exchange_id || '-' },
+        { key: 'exchange', label: '兑换单号', children: lastResult.order?.exchange_id || lastResult.exchange_id || lastResult.payload?.exchange_id || '-' },
         { key: 'userid', label: '用户', children: lastResult.order?.name ? `${lastResult.order.name} (${lastResult.userid || lastResult.order.userid})` : (lastResult.userid || lastResult.payload?.userid || '-') },
         { key: 'product', label: '商品', children: payloadProductText(lastResult.order || lastResult.payload) },
         { key: 'amount', label: '金额', children: amountText(orderAmount(lastResult.order || lastResult.payload)) },
@@ -198,14 +200,24 @@ function OrderTable({ type, onOpen, reloadKey, me }) {
   };
 
   const columns = [
-    { title: '时间', dataIndex: type === 'history' ? 'fulfilled_at' : 'created_at', render: formatTs },
+    {
+      title: '时间',
+      render: (_, row) => type === 'history'
+        ? formatTs(row.fulfilled_at)
+        : (row.redeem_source === 'cdk' ? '-' : formatTs(row.created_at)),
+    },
     { title: '用户', render: (_, r) => r.name ? `${r.name} (${r.userid})` : r.userid },
     { title: '兑换单号', dataIndex: 'exchange_id', ellipsis: true },
     { title: '商品', dataIndex: 'product_name' },
     { title: '金额', render: (_, r) => amountText(orderAmount(r)) },
   ];
   if (type === 'history') columns.push({ title: '核销人', render: (_, r) => verifierText(r) });
-  columns.push({ title: '操作', render: (_, r) => <Button onClick={() => onOpen(r.exchange_id)}>详情</Button> });
+  columns.push({
+    title: '操作',
+    render: (_, r) => r.created_at
+      ? <Button onClick={() => onOpen(r.exchange_id)}>详情</Button>
+      : <Typography.Text type="secondary">-</Typography.Text>,
+  });
 
   return <Space direction="vertical" style={{ width: '100%' }} size={12}>
     <Space>
@@ -250,13 +262,17 @@ export default function Orders({ me }) {
         { key: 'user', label: '用户', children: `${detail.order?.name || '-'} (${detail.order?.userid || '-'})` },
         { key: 'product', label: '商品', children: detail.order?.product_name || '-' },
         { key: 'amount', label: '金额', children: amountText(orderAmount(detail.order)) },
-        { key: 'source', label: '来源', children: detail.order?.redeem_source === 'cdk' ? 'CDK' : '商城' },
-        ...(detail.order?.redeem_source === 'cdk' ? [
+        ...(me?.isSuperAdmin ? [
+          { key: 'source', label: '来源', children: detail.order?.redeem_source === 'cdk' ? 'CDK' : '商城' },
+        ] : []),
+        ...(me?.isSuperAdmin && detail.order?.redeem_source === 'cdk' ? [
           { key: 'cdkCode', label: 'CDK 码', children: detail.order?.cdk_code || '-' },
           { key: 'cdkBatch', label: 'CDK 批次', children: detail.order?.batch_id || '-' },
           { key: 'cdkAmount', label: 'CDK 商品金额', children: amountText(detail.order?.cdk_product_bob_amount) },
         ] : []),
-        { key: 'created', label: '下单时间', children: formatTs(detail.order?.created_at) },
+        ...(detail.order?.created_at ? [
+          { key: 'created', label: '下单时间', children: formatTs(detail.order.created_at) },
+        ] : []),
         { key: 'fulfilled', label: '核销时间', children: formatTs(detail.order?.fulfilled_at) },
         { key: 'verifier', label: '核销人', children: verifierText(detail.order) },
       ]} />}
