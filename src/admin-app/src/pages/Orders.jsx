@@ -267,9 +267,6 @@ export default function Orders({ me }) {
         { key: 'user', label: '用户', children: `${detail.order?.name || '-'} (${detail.order?.userid || '-'})` },
         { key: 'product', label: '商品', children: detail.order?.product_name || '-' },
         { key: 'amount', label: '金额', children: amountText(orderAmount(detail.order)) },
-        ...(detail.order?.created_at ? [
-          { key: 'created', label: '下单时间', children: formatTs(detail.order.created_at) },
-        ] : []),
         { key: 'fulfilled', label: '核销时间', children: formatTs(detail.order?.fulfilled_at) },
         { key: 'verifier', label: '核销人', children: verifierText(detail.order) },
       ]} />}

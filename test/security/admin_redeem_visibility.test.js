@@ -90,4 +90,5 @@ test('核销操作页面对超级管理员同样使用安全订单视图', () =>
   assert.match(pendingHandler, /ORDER BY queue_sort_key ASC/);
   assert.match(pendingHandler, /serializeAdminRedeemRow\(row\)/);
   assert.doesNotMatch(drawerSource, /CDK|redeem_source|isSuperAdmin/);
+  assert.doesNotMatch(drawerSource, /created_at|下单时间/);
 });
