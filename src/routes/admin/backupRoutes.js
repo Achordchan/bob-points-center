@@ -397,7 +397,10 @@ export function registerAdminBackupRoutes(router) {
     }
 
     // overwrite 必须包含该模式下的完整表集合；缺失表不得被当成空数组后 DELETE。
-    const expectedTables = versionTables;
+    // 例外：拍卖表晚于备份版本号引入，早于该功能的旧全量备份（v1 或拍卖前的 v2）
+    // 都不含这两张表，不能因此拒绝旧备份恢复；缺失时按空处理、不清空库中现有拍卖数据。
+    const optionalFullTables = new Set(['auction_activities', 'auction_bids']);
+    const expectedTables = versionTables.filter((name) => !optionalFullTables.has(name));
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
       if (missingTables.length > 0) {
@@ -1936,6 +1939,22 @@ export function registerAdminBackupRoutes(router) {
           }
 
           // auction（活动为父、出价为子；auction_bids FK→auction_activities）
+          // merge 模式下若活动 ID 与目标库已存在的活动冲突，父行会被 ON CONFLICT DO NOTHING 跳过，
+          // 但备份中该活动的出价（ID 不冲突时）会被插入并挂到目标库里不相关的活动上，
+          // 造成冻结资金/结算状态错乱。合并涉及拍卖资金无法安全对账，故遇到冲突直接拒绝、回滚整个导入。
+          if (mode !== 'overwrite') {
+            const activityRows = requireArray('auction_activities') || [];
+            const ids = [...new Set(activityRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+            if (ids.length) {
+              const rows = await tx.all(
+                `SELECT id FROM auction_activities WHERE id IN (${ids.map(() => '?').join(',')})`,
+                ids,
+              );
+              if (rows.length) {
+                throw new Error(`合并导入存在拍卖活动 ID 冲突（${rows.map((r) => r.id).join(', ')}）：为避免出价挂到不相关活动，已拒绝导入`);
+              }
+            }
+          }
           {
             const activityRowsRaw = requireArray('auction_activities');
             const bidRowsRaw = requireArray('auction_bids');

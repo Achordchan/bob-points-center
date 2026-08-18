@@ -110,3 +110,26 @@ test('设置覆盖仅清理与恢复后修订不匹配的确认', () => {
     /content_announcement_acknowledgements overwrite delete all/,
   );
 });
+
+test('拍卖表纳入全量备份，但不作为旧备份覆盖完整性的必需表', () => {
+  // 导出/导入白名单仍包含两张拍卖表
+  const fullTablesBlock = backupRoutesSource.match(/const FULL_TABLES = \[[\s\S]*?\n  \];/)?.[0] || '';
+  assert.match(fullTablesBlock, /'auction_activities'/);
+  assert.match(fullTablesBlock, /'auction_bids'/);
+  // overwrite 完整性校验把拍卖表视为可选，避免拒绝早于该功能的旧全量备份
+  assert.match(
+    backupRoutesSource,
+    /optionalFullTables = new Set\(\['auction_activities', 'auction_bids'\]\)/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /expectedTables = versionTables\.filter\(\(name\) => !optionalFullTables\.has\(name\)\)/,
+  );
+});
+
+test('merge 导入遇到拍卖活动 ID 冲突时拒绝，防止出价挂到不相关活动', () => {
+  assert.match(
+    backupRoutesSource,
+    /if \(mode !== 'overwrite'\) \{[\s\S]*?SELECT id FROM auction_activities WHERE id IN[\s\S]*?拒绝导入/,
+  );
+});
