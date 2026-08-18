@@ -127,9 +127,20 @@ test('拍卖表纳入全量备份，但不作为旧备份覆盖完整性的必�
   );
 });
 
-test('merge 导入遇到拍卖活动 ID 冲突时拒绝，防止出价挂到不相关活动', () => {
+test('拍卖两张表必须成对导入，只缺其一应被拒绝', () => {
   assert.match(
     backupRoutesSource,
-    /if \(mode !== 'overwrite'\) \{[\s\S]*?SELECT id FROM auction_activities WHERE id IN[\s\S]*?拒绝导入/,
+    /hasAuctionActivities !== hasAuctionBids[\s\S]*?拍卖数据必须成对导入/,
+  );
+});
+
+test('merge 导入遇到拍卖活动或出价 ID 冲突时均拒绝', () => {
+  assert.match(
+    backupRoutesSource,
+    /if \(mode !== 'overwrite'\) \{[\s\S]*?SELECT id FROM auction_activities WHERE id IN[\s\S]*?为避免出价挂到不相关活动，已拒绝导入/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /SELECT id FROM auction_bids WHERE id IN[\s\S]*?为避免结算命中不相关出价，已拒绝导入/,
   );
 });

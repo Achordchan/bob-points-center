@@ -413,6 +413,23 @@ export function registerAdminBackupRoutes(router) {
       }
     }
 
+    // 拍卖两张表必须成对出现：旧备份可以两张都没有（按空处理），
+    // 但只含活动、缺出价（或反之）的残缺备份会恢复出带 current_bid_id/冻结价却无出价记录的活动，
+    // 造成有扣款无可退出价、拍卖无法结算，故拒绝“只缺其一”的备份。
+    if (backupMode === 'full') {
+      const hasAuctionActivities = backupData.auction_activities != null;
+      const hasAuctionBids = backupData.auction_bids != null;
+      if (hasAuctionActivities !== hasAuctionBids) {
+        const missingTable = hasAuctionActivities ? 'auction_bids' : 'auction_activities';
+        await failHistory('失败', { reason: 'incomplete_auction_pair', missingTable, backupMode });
+        return res.status(400).json({
+          error: `拍卖数据必须成对导入，缺失: ${missingTable}`,
+          missingTable,
+          backupMode,
+        });
+      }
+    }
+
     const parseRolePermissions = (value) => {
       if (Array.isArray(value)) return normalizePermissions(value);
       try {
@@ -1939,19 +1956,31 @@ export function registerAdminBackupRoutes(router) {
           }
 
           // auction（活动为父、出价为子；auction_bids FK→auction_activities）
-          // merge 模式下若活动 ID 与目标库已存在的活动冲突，父行会被 ON CONFLICT DO NOTHING 跳过，
-          // 但备份中该活动的出价（ID 不冲突时）会被插入并挂到目标库里不相关的活动上，
-          // 造成冻结资金/结算状态错乱。合并涉及拍卖资金无法安全对账，故遇到冲突直接拒绝、回滚整个导入。
+          // merge 模式下拍卖资金无法安全对账，任何 ID 冲突都直接拒绝、回滚整个导入：
+          // - 活动 ID 冲突：父行会被 ON CONFLICT DO NOTHING 跳过，其出价却挂到目标库不相关活动上；
+          // - 出价 ID 冲突：出价被 DO NOTHING 跳过，而新活动仍保留指向该出价的 current_bid_id，
+          //   结算按 id 查出价时不约束 activity_id，可能把目标库不相关的出价当成获胜者。
           if (mode !== 'overwrite') {
             const activityRows = requireArray('auction_activities') || [];
-            const ids = [...new Set(activityRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
-            if (ids.length) {
+            const activityIds = [...new Set(activityRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+            if (activityIds.length) {
               const rows = await tx.all(
-                `SELECT id FROM auction_activities WHERE id IN (${ids.map(() => '?').join(',')})`,
-                ids,
+                `SELECT id FROM auction_activities WHERE id IN (${activityIds.map(() => '?').join(',')})`,
+                activityIds,
               );
               if (rows.length) {
                 throw new Error(`合并导入存在拍卖活动 ID 冲突（${rows.map((r) => r.id).join(', ')}）：为避免出价挂到不相关活动，已拒绝导入`);
+              }
+            }
+            const bidRows = requireArray('auction_bids') || [];
+            const bidIds = [...new Set(bidRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+            if (bidIds.length) {
+              const rows = await tx.all(
+                `SELECT id FROM auction_bids WHERE id IN (${bidIds.map(() => '?').join(',')})`,
+                bidIds,
+              );
+              if (rows.length) {
+                throw new Error(`合并导入存在拍卖出价 ID 冲突（${rows.map((r) => r.id).join(', ')}）：为避免结算命中不相关出价，已拒绝导入`);
               }
             }
           }
