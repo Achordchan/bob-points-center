@@ -137,7 +137,7 @@ export function hasAdminPermission(access, permission) {
   return Array.isArray(access?.permissions) && access.permissions.includes(permission);
 }
 
-function matchPathPermission(method, path) {
+export function matchPathPermission(method, path) {
   const p = String(path || '');
   const m = String(method || 'GET').toUpperCase();
   if (p.startsWith('/legacy')) return 'super';
@@ -158,7 +158,7 @@ function matchPathPermission(method, path) {
   if (p.startsWith('/red-packet/history/clear') || p.startsWith('/red-packet/history/delete')) return 'super';
   if (p.startsWith('/settings/dingtalk/status')) return 'dashboard:view';
   if (p.startsWith('/settings/dingtalk/departments')) return ['integrations:view', 'activities:view'];
-  if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
+  if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/auction') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
   if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';
   if (p.startsWith('/notify') || p.startsWith('/settings/notify') || p.startsWith('/settings/group-card')) return m === 'GET' ? 'messages:view' : 'messages:edit';
   if (p.startsWith('/content')) {

@@ -105,6 +105,7 @@ import {
 import { registerAdminContentRoutes } from './contentRoutes.js';
 import { registerAdminSettingsRoutes } from './settingsRoutes.js';
 import { registerAdminBackupRoutes } from './backupRoutes.js';
+import { registerAdminAuctionRoutes } from './auctionRoutes.js';
 
 import {
   ADMIN_OAUTH_COOKIE,
@@ -1153,7 +1154,7 @@ export function adminRouter() {
       const ledger = ledgerResult.data || [];
       const redeems = await db.all(
         `SELECT r.exchange_id, r.userid, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
-                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                CASE WHEN r.exchange_id LIKE 'AUCTION_%' THEN 'auction' WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
@@ -1233,7 +1234,7 @@ export function adminRouter() {
                 r.bob_amount, r.fulfilled_at, r.created_at,
                 COALESCE(r.fulfilled_by, audit.actor_id, '') AS fulfilled_by,
                 COALESCE(r.fulfilled_name, audit.actor_name, '') AS fulfilled_name,
-                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                CASE WHEN r.exchange_id LIKE 'AUCTION_%' THEN 'auction' WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount,
                 c.cdk_code, c.batch_id
          FROM redeems r
@@ -1347,7 +1348,7 @@ export function adminRouter() {
                 r.bob_amount, r.fulfilled_at, r.created_at,
                 COALESCE(r.fulfilled_by, audit.actor_id, '') AS fulfilled_by,
                 COALESCE(r.fulfilled_name, audit.actor_name, '') AS fulfilled_name,
-                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                CASE WHEN r.exchange_id LIKE 'AUCTION_%' THEN 'auction' WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
@@ -1409,7 +1410,7 @@ export function adminRouter() {
         `SELECT r.exchange_id, r.userid, COALESCE(u.name, '') AS name, r.product_id, r.product_name,
                 r.bob_amount, r.fulfilled_at, r.created_at,
                 lower(COALESCE(r.product_name, '')) || chr(31) || lower(COALESCE(u.name, '')) || chr(31) || md5(r.exchange_id) AS queue_sort_key,
-                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                CASE WHEN r.exchange_id LIKE 'AUCTION_%' THEN 'auction' WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
                 c.product_bob_amount AS cdk_product_bob_amount
          FROM redeems r
          LEFT JOIN users u ON u.userid = r.userid
@@ -2138,6 +2139,7 @@ export function adminRouter() {
 
   // ── 备份管理 ──────────────────────────────────────────────────────────────
   registerAdminBackupRoutes(router);
+  registerAdminAuctionRoutes(router);
 
   return router;
 }

@@ -28,6 +28,7 @@
 | 余额与流水 | 账户余额、积分收支明细、账户间转账 |
 | 商城兑换 | 商品浏览、库存与限购轮次控制、下单、CDK 兑换 |
 | 交易市场 | 已购订单挂牌转让、购买他人挂牌 |
+| 限时竞拍 | 竞拍大厅实时价格与倒计时、出价冻结与被超出自动退回、竞得自动生成核销二维码订单、我的竞拍与在押金额 |
 | 红包活动 | 倒计时、抢红包、领取记录 |
 | 大富翁榜 | 余额排行榜 |
 | 公益助力 | 公益项目集资、分档助力 |
@@ -41,7 +42,7 @@
 | 用户与账户 | 用户查询、发币/扣币、批量操作、角色分配 |
 | 订单与核销 | 订单查询、扫码核销、核销历史 |
 | 商城与 CDK | 商品 CRUD、图片编辑、限购轮次、CDK 批量生成 |
-| 活动与公益 | 红包活动编排、商城开放时段调度、公益项目管理 |
+| 活动与公益 | 红包活动编排、限时竞拍管理、商城开放时段调度、公益项目管理 |
 | 消息中心 | 钉钉机器人通知、群卡片推送配置 |
 | 内容运营 | 公告、FAQ、版本记录、反馈工单处理 |
 | 系统集成 | 钉钉连接配置、打卡奖励规则、数据备份导入导出 |
@@ -54,6 +55,7 @@
 | 打卡奖励 | 钉钉 Stream 长连接接收 `attendance_check_record` 事件 | 满足规则的上班打卡自动发币并推送通知 |
 | 打卡奖励对账 | 内置定时调度 | 补发漏发奖励，幂等，不会重复发币或重复推送 |
 | 商城开放调度 | 内置定时调度 | 按配置周期自动开放/关闭商城，含开关前提醒推送 |
+| 竞拍结算调度 | 内置定时调度 | 到期竞拍自动结算并通知获胜者、生成领取订单（核销二维码）；结算幂等，读请求保留兜底触发 |
 
 ## 技术栈
 
@@ -115,6 +117,7 @@ Express 应用（src/app.js）
 | 账户间转账 | 按 userid 字典序 `FOR UPDATE` 加锁，避免双向并发死锁 |
 | 红包领取 | 部分唯一索引 `(activity_id, claimed_by) WHERE claimed_by IS NOT NULL`，保证一人一次 |
 | 商城挂牌 | 部分唯一索引 `(exchange_id) WHERE status = 'active'`，保证同一订单仅一个有效挂牌 |
+| 限时竞拍 | 活动行 `FOR UPDATE` 串行化出价；出价即冻结（条件更新防超扣），被超出原额退回；部分唯一索引 `(activity_id) WHERE state = 'held'` 保证每场竞拍至多一条在押出价；结算为惰性条件更新，天然幂等且服务重启安全 |
 | 打卡奖励 | 唯一约束 `(userid, work_date, check_time_ms)`，保证同一次打卡不重复发币 |
 
 ### 目录结构
@@ -224,6 +227,17 @@ lsof -nP -iTCP:8000 -sTCP:LISTEN
 
 员工端与管理端的登录均只有钉钉 OAuth 一条链路，清空钉钉凭据后本地无法完成授权往返。开发期用以下命令签发一张合法会话 Cookie，输出中包含可直接粘贴到浏览器控制台的语句与等价的 `curl` 命令：
 
+本地 `start.sh` 会启用 `http://127.0.0.1:8000/__dev/login`，提供两个普通测试账号和一个本地管理员账号。选择账号后由服务端写入 HttpOnly 会话 Cookie，不请求钉钉授权。该入口默认关闭，仅在 `NODE_ENV=development`、本机数据库、本地 HTTP 地址、开发数据库标记和独立会话密钥全部通过校验时挂载。
+
+手动启用需要在 `.env` 中同时配置（`start.sh` 已包含，但它不入库）：
+
+```bash
+LOCAL_DEV_AUTH_ENABLED=true
+DEV_SESSION_DATABASE=bob   # 必须与 PG_DATABASE 完全相同
+```
+
+并确认本地数据库带有 `bob.environment=development` GUC 标记（Docker Compose 已配置，见 `docker-compose.yml` 的 `command` 参数）。任一条件缺失时 `/__dev/login` 不会挂载（访问返回 404，无其他提示），这是有意的 fail-closed 设计；排查时先逐项核对上述条件。
+
 ```bash
 npm run dev:session -- admin
 ```
@@ -276,6 +290,7 @@ npm run admin:dev
 | `TRUST_PROXY` | 自动判定 | 是否信任反向代理的 `X-Forwarded-For` |
 | `SERVER_PUBLIC_IP` | 空 | 管理端系统信息展示用，未配置时回退自动解析 |
 | `DNS_RESULT_ORDER` | `ipv4first` | 外部接口 DNS 地址优先级；钉钉 IP 白名单按 IPv4 配置时保持默认值，需要系统原始顺序时设为 `verbatim` |
+| `LOCAL_DEV_AUTH_ENABLED` | `false` | 是否启用受限制的本地测试账号免登录入口。还需同时满足：`NODE_ENV=development`、`PG_HOST` 为回环地址、`DEV_SESSION_DATABASE` 与 `PG_DATABASE` 相同、数据库带 `bob.environment=development` GUC 标记、`SERVER_BASE_URL` 为本地 HTTP 地址、两把会话密钥均不少于 32 字符且互不相同。任一条件缺失时入口静默不挂载（fail-closed） |
 
 ### 数据库
 
@@ -361,6 +376,7 @@ npm run admin:dev
 | `mall_products` / `mall_order_listings` | 商品与交易市场挂牌 |
 | `mall_opening_schedule` | 商城开放时段调度状态 |
 | `red_packet_activity` / `red_packet_items` | 红包活动与红包份额 |
+| `auction_activities` / `auction_bids` | 限时竞拍活动与出价（在押/退回/竞得状态流转） |
 | `redeem_cdks` | CDK 兑换码 |
 | `charity_projects` / `charity_contributions` | 公益项目与助力记录 |
 | `attendance_reward_records` | 打卡奖励发放记录，承担幂等去重职责 |
@@ -421,7 +437,7 @@ npm run check
 
 CI 在 push 到 `main` 及所有 Pull Request 上运行上述全部检查并构建管理端（`.github/workflows/ci.yml`）。
 
-`scripts/` 下另有内部压测与核对脚本（红包并发、打卡奖励核对等）。这些脚本会连接真实数据库，需通过显式的环境变量确认目标库后才会执行，使用前请先阅读脚本内的保护逻辑。
+`scripts/` 下另有内部压测与核对脚本（红包并发、竞拍集成、打卡奖励核对等）。这些脚本会连接真实数据库，需通过显式的环境变量确认目标库后才会执行，使用前请先阅读脚本内的保护逻辑。
 
 ## 接口文档
 
@@ -515,6 +531,5 @@ POST /admin/settings/attendance-reward/reconcile
 ## 版本记录
 
 系统版本与更新说明维护在数据库 `system_versions` 表中，员工端「更多 → 版本信息」与管理后台「内容运营」均可查看。初始版本数据由 `src/db/init.js` 写入。
-
 
 

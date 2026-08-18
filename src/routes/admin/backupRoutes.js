@@ -57,6 +57,8 @@ export function registerAdminBackupRoutes(router) {
     'mall_opening_schedule',
     'red_packet_activity',
     'red_packet_items',
+    'auction_activities',
+    'auction_bids',
     'content_faq',
     'content_announcements',
     'content_announcement_revisions',
@@ -395,7 +397,10 @@ export function registerAdminBackupRoutes(router) {
     }
 
     // overwrite 必须包含该模式下的完整表集合；缺失表不得被当成空数组后 DELETE。
-    const expectedTables = versionTables;
+    // 例外：拍卖表晚于备份版本号引入，早于该功能的旧全量备份（v1 或拍卖前的 v2）
+    // 都不含这两张表，不能因此拒绝旧备份恢复；缺失时按空处理、不清空库中现有拍卖数据。
+    const optionalFullTables = new Set(['auction_activities', 'auction_bids']);
+    const expectedTables = versionTables.filter((name) => !optionalFullTables.has(name));
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
       if (missingTables.length > 0) {
@@ -403,6 +408,23 @@ export function registerAdminBackupRoutes(router) {
         return res.status(400).json({
           error: `覆盖导入要求备份包含全部 ${expectedTables.length} 张表，缺失: ${missingTables.join(', ')}`,
           missingTables,
+          backupMode,
+        });
+      }
+    }
+
+    // 拍卖两张表必须成对出现：旧备份可以两张都没有（按空处理），
+    // 但只含活动、缺出价（或反之）的残缺备份会恢复出带 current_bid_id/冻结价却无出价记录的活动，
+    // 造成有扣款无可退出价、拍卖无法结算，故拒绝“只缺其一”的备份。
+    if (backupMode === 'full') {
+      const hasAuctionActivities = backupData.auction_activities != null;
+      const hasAuctionBids = backupData.auction_bids != null;
+      if (hasAuctionActivities !== hasAuctionBids) {
+        const missingTable = hasAuctionActivities ? 'auction_bids' : 'auction_activities';
+        await failHistory('失败', { reason: 'incomplete_auction_pair', missingTable, backupMode });
+        return res.status(400).json({
+          error: `拍卖数据必须成对导入，缺失: ${missingTable}`,
+          missingTable,
           backupMode,
         });
       }
@@ -477,6 +499,57 @@ export function registerAdminBackupRoutes(router) {
       const charityProjects = requireArray('charity_projects') || [];
       charityProjects.forEach((row, index) => {
         if (!row?.project_id) pushPreflight('charity_projects', index, '缺少 project_id');
+      });
+
+      // 拍卖恢复一致性：结算按 bid id 查获胜者但不约束 activity_id，
+      // 故快照里 current_bid_id 必须指向本活动、状态 held 的出价，且 bidder/金额一致；
+      // 出价的 activity_id 也不得悬挂。拒绝损坏/被篡改的快照，避免恢复后错判获胜者。
+      const auctionActivities = requireArray('auction_activities') || [];
+      const auctionBids = requireArray('auction_bids') || [];
+      const auctionBidById = new Map(auctionBids.map((b) => [Number(b?.id), b]));
+      const auctionActivityById = new Map(auctionActivities.map((a) => [Number(a?.id), a]));
+      const auctionActivityIds = new Set(auctionActivities.map((a) => Number(a?.id)).filter(Number.isSafeInteger));
+      auctionActivities.forEach((row, index) => {
+        if (!row?.id) {
+          pushPreflight('auction_activities', index, '缺少 id');
+          return;
+        }
+        if (row.current_bid_id === undefined || row.current_bid_id === null) return;
+        const bid = auctionBidById.get(Number(row.current_bid_id));
+        if (!bid) {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 无对应出价`);
+          return;
+        }
+        if (Number(bid.activity_id) !== Number(row.id)) {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 属于其他活动`);
+        }
+        if (String(bid.state) !== 'held') {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 出价状态非 held`);
+        }
+        if (row.current_bid_userid != null && String(bid.userid) !== String(row.current_bid_userid)) {
+          pushPreflight('auction_activities', index, 'current_bid_userid 与出价不一致');
+        }
+        if (row.current_price != null && Number(bid.amount) !== Number(row.current_price)) {
+          pushPreflight('auction_activities', index, 'current_price 与出价金额不一致');
+        }
+      });
+      auctionBids.forEach((row, index) => {
+        if (!row?.id) {
+          pushPreflight('auction_bids', index, '缺少 id');
+          return;
+        }
+        if (!auctionActivityIds.has(Number(row?.activity_id))) {
+          pushPreflight('auction_bids', index, `activity_id ${row?.activity_id} 无对应活动`);
+        }
+        // 反向不变式：每条 held 出价必须正被其所属活动的 current_bid_id 引用。
+        // 否则恢复后出现「有扣款却无活动指针」的在押出价：结算判定无获胜者、取消不退款，
+        // 且后续任何出价都会撞 idx_auction_bids_held_once（每场至多一条 held）。
+        if (String(row?.state) === 'held') {
+          const activity = auctionActivityById.get(Number(row?.activity_id));
+          if (activity && Number(activity.current_bid_id) !== Number(row?.id)) {
+            pushPreflight('auction_bids', index, `held 出价 ${row?.id} 未被所属活动 current_bid_id 引用`);
+          }
+        }
       });
 
       const mallOpening = requireArray('mall_opening_schedule') || [];
@@ -1263,6 +1336,8 @@ export function registerAdminBackupRoutes(router) {
             if (rows && mode === 'overwrite') {
               const deleteOrder = [
                 'admin_user_roles',
+                'auction_bids',
+                'auction_activities',
                 'audit_logs',
                 'attendance_reward_records',
                 'ledger',
@@ -1929,6 +2004,131 @@ export function registerAdminBackupRoutes(router) {
               markAndThrow('red_packet_items', null, err);
             }
             report.red_packet_items = count;
+          }
+
+          // auction（活动为父、出价为子；auction_bids FK→auction_activities）
+          // merge 模式下拍卖资金无法安全对账，任何 ID 冲突都直接拒绝、回滚整个导入：
+          // - 活动 ID 冲突：父行会被 ON CONFLICT DO NOTHING 跳过，其出价却挂到目标库不相关活动上；
+          // - 出价 ID 冲突：出价被 DO NOTHING 跳过，而新活动仍保留指向该出价的 current_bid_id，
+          //   结算按 id 查出价时不约束 activity_id，可能把目标库不相关的出价当成获胜者。
+          if (mode !== 'overwrite') {
+            const activityRows = requireArray('auction_activities') || [];
+            const activityIds = [...new Set(activityRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+            if (activityIds.length) {
+              const rows = await tx.all(
+                `SELECT id FROM auction_activities WHERE id IN (${activityIds.map(() => '?').join(',')})`,
+                activityIds,
+              );
+              if (rows.length) {
+                throw new Error(`合并导入存在拍卖活动 ID 冲突（${rows.map((r) => r.id).join(', ')}）：为避免出价挂到不相关活动，已拒绝导入`);
+              }
+            }
+            const bidRows = requireArray('auction_bids') || [];
+            const bidIds = [...new Set(bidRows.map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+            if (bidIds.length) {
+              const rows = await tx.all(
+                `SELECT id FROM auction_bids WHERE id IN (${bidIds.map(() => '?').join(',')})`,
+                bidIds,
+              );
+              if (rows.length) {
+                throw new Error(`合并导入存在拍卖出价 ID 冲突（${rows.map((r) => r.id).join(', ')}）：为避免结算命中不相关出价，已拒绝导入`);
+              }
+            }
+          }
+          {
+            const activityRowsRaw = requireArray('auction_activities');
+            const bidRowsRaw = requireArray('auction_bids');
+            if (mode === 'overwrite' && (activityRowsRaw !== null || bidRowsRaw !== null)) {
+              await execOrThrow(tx, 'DELETE FROM auction_bids', [], 'auction_bids overwrite delete');
+              await execOrThrow(tx, 'DELETE FROM auction_activities', [], 'auction_activities overwrite delete');
+            }
+          }
+          {
+            const rows = requireArray('auction_activities') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO auction_activities(id, title, description, image_url, start_price, min_increment, start_at, end_at, anti_snipe_seconds, status, current_price, current_bid_userid, current_bid_id, bid_count, winner_userid, winner_name, final_price, settled_at, cancelled_at, cancel_reason, created_by, created_name, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.title,
+                    row.description ?? null,
+                    row.image_url ?? null,
+                    row.start_price,
+                    row.min_increment,
+                    row.start_at,
+                    row.end_at,
+                    row.anti_snipe_seconds ?? 0,
+                    row.status ?? 'scheduled',
+                    row.current_price ?? null,
+                    row.current_bid_userid ?? null,
+                    row.current_bid_id ?? null,
+                    row.bid_count ?? 0,
+                    row.winner_userid ?? null,
+                    row.winner_name ?? null,
+                    row.final_price ?? null,
+                    row.settled_at ?? null,
+                    row.cancelled_at ?? null,
+                    row.cancel_reason ?? null,
+                    row.created_by ?? null,
+                    row.created_name ?? null,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `auction_activities[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('auction_activities', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'auction_activities');
+            } catch (err) {
+              markAndThrow('auction_activities', null, err);
+            }
+            report.auction_activities = count;
+          }
+          {
+            const rows = requireArray('auction_bids') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO auction_bids(id, activity_id, userid, user_name_snapshot, amount, state, created_at, settled_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.activity_id,
+                    row.userid,
+                    row.user_name_snapshot ?? null,
+                    row.amount,
+                    row.state ?? 'held',
+                    row.created_at ?? nowTs(),
+                    row.settled_at ?? null,
+                  ],
+                  `auction_bids[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('auction_bids', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'auction_bids');
+            } catch (err) {
+              markAndThrow('auction_bids', null, err);
+            }
+            report.auction_bids = count;
           }
         }
 

@@ -34,6 +34,11 @@ export function formatLedgerReason(row = {}) {
   if (reason === 'admin_deduct') return '管理员扣币';
   if (reason === 'api_deduct') return '接口扣币';
   if (reason === 'redeem') return product ? `核销扣币：${product}` : '核销扣币';
+  if (reason === 'auction_bid') return '竞拍出价（冻结）';
+  if (reason === 'auction_outbid_refund') return '竞拍被超出退回';
+  if (reason === 'auction_cancel_refund') return '竞拍取消退回';
+  if (reason === 'auction_settle_refund') return '竞拍成交释放冻结';
+  if (reason === 'auction_win_pay') return '竞拍成交扣款';
   if (reason === 'charity' || reason.startsWith('公益助力')) return reason.startsWith('公益助力') ? reason : '公益助力';
   if (reason === '打卡奖励') return '打卡奖励';
   return reason;

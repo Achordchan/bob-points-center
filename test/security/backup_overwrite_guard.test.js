@@ -110,3 +110,50 @@ test('设置覆盖仅清理与恢复后修订不匹配的确认', () => {
     /content_announcement_acknowledgements overwrite delete all/,
   );
 });
+
+test('拍卖表纳入全量备份，但不作为旧备份覆盖完整性的必需表', () => {
+  // 导出/导入白名单仍包含两张拍卖表
+  const fullTablesBlock = backupRoutesSource.match(/const FULL_TABLES = \[[\s\S]*?\n  \];/)?.[0] || '';
+  assert.match(fullTablesBlock, /'auction_activities'/);
+  assert.match(fullTablesBlock, /'auction_bids'/);
+  // overwrite 完整性校验把拍卖表视为可选，避免拒绝早于该功能的旧全量备份
+  assert.match(
+    backupRoutesSource,
+    /optionalFullTables = new Set\(\['auction_activities', 'auction_bids'\]\)/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /expectedTables = versionTables\.filter\(\(name\) => !optionalFullTables\.has\(name\)\)/,
+  );
+});
+
+test('拍卖两张表必须成对导入，只缺其一应被拒绝', () => {
+  assert.match(
+    backupRoutesSource,
+    /hasAuctionActivities !== hasAuctionBids[\s\S]*?拍卖数据必须成对导入/,
+  );
+});
+
+test('merge 导入遇到拍卖活动或出价 ID 冲突时均拒绝', () => {
+  assert.match(
+    backupRoutesSource,
+    /if \(mode !== 'overwrite'\) \{[\s\S]*?SELECT id FROM auction_activities WHERE id IN[\s\S]*?为避免出价挂到不相关活动，已拒绝导入/,
+  );
+  assert.match(
+    backupRoutesSource,
+    /SELECT id FROM auction_bids WHERE id IN[\s\S]*?为避免结算命中不相关出价，已拒绝导入/,
+  );
+});
+
+test('预校验拒绝 current_bid_id 跨活动/非 held/悬挂出价的损坏快照', () => {
+  // current_bid_id 必须指向本活动、held 状态且 bidder/金额一致的出价
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 无对应出价/);
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 属于其他活动/);
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 出价状态非 held/);
+  assert.match(backupRoutesSource, /current_bid_userid 与出价不一致/);
+  assert.match(backupRoutesSource, /current_price 与出价金额不一致/);
+  // 出价 activity_id 不得悬挂
+  assert.match(backupRoutesSource, /activity_id \$\{row\?\.activity_id\} 无对应活动/);
+  // 反向不变式：每条 held 出价必须被其所属活动 current_bid_id 引用
+  assert.match(backupRoutesSource, /held 出价 \$\{row\?\.id\} 未被所属活动 current_bid_id 引用/);
+});

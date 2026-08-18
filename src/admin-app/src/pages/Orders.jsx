@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, App, Button, Card, Descriptions, Drawer, Input, Modal, Space, Spin, Table, Tabs, Typography } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Drawer, Input, Modal, Space, Spin, Table, Tabs, Tag, Typography } from 'antd';
 import { api, qs } from '../api.js';
 import { amountText, formatTs, localTablePagination, orderAmount } from '../utils.js';
 import RedeemScanner from '../components/RedeemScanner.jsx';
 import { hasPermission } from '../permissions.js';
 
 const CLEAR_HISTORY_CONFIRM = 'CLEAR_REDEEM_HISTORY';
+
+// 竞拍订单：管理端可见性服务会剥离 redeem_source，用单号前缀判断（CDK 单号会脱敏，竞拍单号原样保留）
+function isAuctionOrder(row) {
+  return String(row?.exchange_id || '').startsWith('AUCTION_');
+}
 
 function verifierText(row) {
   const name = String(row?.fulfilled_name || '').trim();
@@ -126,13 +131,13 @@ function RedeemCenter({ onRedeemed }) {
       </Space> : order ? <Space direction="vertical" style={{ width: '100%' }} size={12}>
         {order.fulfilled_at && <Alert type="warning" showIcon message="该订单已核销" description={`核销时间：${formatTs(order.fulfilled_at)}`} />}
         <Descriptions bordered size="small" column={{ xs: 1, md: 2 }} items={[
-          { key: 'status', label: '订单状态', children: order.fulfilled_at ? '已核销' : '待核销' },
+          { key: 'status', label: '订单状态', children: <Space size={6}>{isAuctionOrder(order) && <Tag color="gold">竞拍竞得</Tag>}{order.fulfilled_at ? '已核销' : '待核销'}</Space> },
           { key: 'exchange', label: '兑换单号', children: order.exchange_id || payload.exchange_id || '-' },
           { key: 'user', label: '用户', children: order.name ? `${order.name} (${order.userid})` : (order.userid || payload.userid || '-') },
           { key: 'product', label: '商品', children: payloadProductText(order) },
           { key: 'amount', label: '金额', children: amountText(orderAmount(order)) },
           ...(order.redeem_source !== 'cdk' && order.created_at ? [
-            { key: 'created', label: '下单时间', children: formatTs(order.created_at) },
+            { key: 'created', label: isAuctionOrder(order) ? '竞得时间' : '下单时间', children: formatTs(order.created_at) },
           ] : []),
         ]} />
         <Space className="redeem-confirm-actions" wrap>
@@ -211,7 +216,7 @@ function OrderTable({ type, onOpen, reloadKey, me }) {
   columns.push(
     { title: '用户', render: (_, r) => r.name ? `${r.name} (${r.userid})` : r.userid },
     { title: '兑换单号', dataIndex: 'exchange_id', ellipsis: true },
-    { title: '商品', dataIndex: 'product_name' },
+    { title: '商品', render: (_, r) => isAuctionOrder(r) ? <Space size={6}><Tag color="gold">竞拍</Tag>{r.product_name}</Space> : r.product_name },
     { title: '金额', render: (_, r) => amountText(orderAmount(r)) },
   );
   if (type === 'history') columns.push({ title: '核销人', render: (_, r) => verifierText(r) });
