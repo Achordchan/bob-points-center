@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   cancelAuction,
@@ -914,4 +916,26 @@ test('purgeUserAuctionBids 不触碰已结算竞拍的历史出价', async () =>
   assert.equal(result.held_voided, 0, '没有在押出价可作废');
   assert.equal(result.activities_reverted, 0);
   assert.equal(db.bids.get(1).state, 'won', '已成交出价保持不变');
+});
+
+// ── 清理与并发出价的加锁顺序（P1 回归） ──────────────────────
+
+test('用户清理在扫描在押出价前先锁定账户，与出价加锁顺序一致', () => {
+  const src = readFileSync(
+    fileURLToPath(new URL('../../src/services/userDataPurgeService.js', import.meta.url)),
+    'utf8',
+  );
+  // purgeUserBusinessData 必须先对目标账户 SELECT ... FOR UPDATE，再进行后续清理
+  const lockIdx = src.indexOf('SELECT userid FROM accounts WHERE userid IN');
+  assert.ok(lockIdx >= 0, '清理前应锁定账户');
+  assert.match(src.slice(lockIdx, lockIdx + 120), /FOR UPDATE/);
+  // 锁定必须早于拍卖出价清理
+  const purgeAuctionIdx = src.indexOf('purgeUserAuctionBids(tx, targets)');
+  assert.ok(purgeAuctionIdx > lockIdx, '账户锁定应早于拍卖出价清理');
+  // placeAuctionBid 同样先锁 accounts FOR UPDATE，保证加锁顺序一致、避免死锁
+  const auctionSrc = readFileSync(
+    fileURLToPath(new URL('../../src/services/auctionService.js', import.meta.url)),
+    'utf8',
+  );
+  assert.match(auctionSrc, /SELECT balance FROM accounts WHERE userid = \? FOR UPDATE/);
 });

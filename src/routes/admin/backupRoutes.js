@@ -501,6 +501,47 @@ export function registerAdminBackupRoutes(router) {
         if (!row?.project_id) pushPreflight('charity_projects', index, '缺少 project_id');
       });
 
+      // 拍卖恢复一致性：结算按 bid id 查获胜者但不约束 activity_id，
+      // 故快照里 current_bid_id 必须指向本活动、状态 held 的出价，且 bidder/金额一致；
+      // 出价的 activity_id 也不得悬挂。拒绝损坏/被篡改的快照，避免恢复后错判获胜者。
+      const auctionActivities = requireArray('auction_activities') || [];
+      const auctionBids = requireArray('auction_bids') || [];
+      const auctionBidById = new Map(auctionBids.map((b) => [Number(b?.id), b]));
+      const auctionActivityIds = new Set(auctionActivities.map((a) => Number(a?.id)).filter(Number.isSafeInteger));
+      auctionActivities.forEach((row, index) => {
+        if (!row?.id) {
+          pushPreflight('auction_activities', index, '缺少 id');
+          return;
+        }
+        if (row.current_bid_id === undefined || row.current_bid_id === null) return;
+        const bid = auctionBidById.get(Number(row.current_bid_id));
+        if (!bid) {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 无对应出价`);
+          return;
+        }
+        if (Number(bid.activity_id) !== Number(row.id)) {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 属于其他活动`);
+        }
+        if (String(bid.state) !== 'held') {
+          pushPreflight('auction_activities', index, `current_bid_id ${row.current_bid_id} 出价状态非 held`);
+        }
+        if (row.current_bid_userid != null && String(bid.userid) !== String(row.current_bid_userid)) {
+          pushPreflight('auction_activities', index, 'current_bid_userid 与出价不一致');
+        }
+        if (row.current_price != null && Number(bid.amount) !== Number(row.current_price)) {
+          pushPreflight('auction_activities', index, 'current_price 与出价金额不一致');
+        }
+      });
+      auctionBids.forEach((row, index) => {
+        if (!row?.id) {
+          pushPreflight('auction_bids', index, '缺少 id');
+          return;
+        }
+        if (!auctionActivityIds.has(Number(row?.activity_id))) {
+          pushPreflight('auction_bids', index, `activity_id ${row?.activity_id} 无对应活动`);
+        }
+      });
+
       const mallOpening = requireArray('mall_opening_schedule') || [];
       if (mallOpening.length > 0 && (!mallOpening[0] || typeof mallOpening[0] !== 'object')) {
         pushPreflight('mall_opening_schedule', 0, '行数据无效');

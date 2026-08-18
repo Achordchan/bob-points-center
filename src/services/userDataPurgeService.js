@@ -31,6 +31,11 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   const placeholders = targets.map(() => '?').join(',');
   const counts = {};
 
+  // 先锁定目标用户账户行，与 placeAuctionBid「先锁 accounts FOR UPDATE 再动出价」保持一致的加锁顺序，
+  // 将清理与并发出价串行化：否则并发出价可能在下方扫描在押出价之后、清零余额之前落库，
+  // 逃过作废，导致重置后其退款凭空造币、删除后悬挂已删用户。
+  await tx.all(`SELECT userid FROM accounts WHERE userid IN (${placeholders}) FOR UPDATE`, targets);
+
   counts.mall_order_listings = await del(
     tx,
     `DELETE FROM mall_order_listings WHERE seller_userid IN (${placeholders}) OR buyer_userid IN (${placeholders})`,

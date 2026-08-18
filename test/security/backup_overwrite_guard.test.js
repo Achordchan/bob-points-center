@@ -144,3 +144,14 @@ test('merge 导入遇到拍卖活动或出价 ID 冲突时均拒绝', () => {
     /SELECT id FROM auction_bids WHERE id IN[\s\S]*?为避免结算命中不相关出价，已拒绝导入/,
   );
 });
+
+test('预校验拒绝 current_bid_id 跨活动/非 held/悬挂出价的损坏快照', () => {
+  // current_bid_id 必须指向本活动、held 状态且 bidder/金额一致的出价
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 无对应出价/);
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 属于其他活动/);
+  assert.match(backupRoutesSource, /current_bid_id \$\{row\.current_bid_id\} 出价状态非 held/);
+  assert.match(backupRoutesSource, /current_bid_userid 与出价不一致/);
+  assert.match(backupRoutesSource, /current_price 与出价金额不一致/);
+  // 出价 activity_id 不得悬挂
+  assert.match(backupRoutesSource, /activity_id \$\{row\?\.activity_id\} 无对应活动/);
+});
