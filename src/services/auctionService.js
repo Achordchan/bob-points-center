@@ -223,6 +223,44 @@ async function refundHeldBidInTx(tx, bid, { reason, now }) {
   return { userid: String(bid.userid), amount };
 }
 
+// 用户重置/删除时清理其在押（held）出价。
+// 调用方（purgeUserBusinessData）会在同一事务内清空该用户的 accounts 余额与 ledger 流水，
+// 故此处不再退款入账（否则会被随后清零/删除，且删除用户时还会违反 ledger→users 外键）；
+// 只把在押出价置为 refunded，并回退其所属竞拍的“当前最高价”指针，
+// 避免后续结算/被超出退回时再次触碰已清理的用户（重复入账或结算卡死）。
+// state 复用既有的 'refunded'（AUCTION_BID_STATES），不新增状态。
+export async function purgeUserAuctionBids(tx, userids, { now = nowSeconds() } = {}) {
+  const ids = (Array.isArray(userids) ? userids : [userids])
+    .map((x) => (x === null || x === undefined ? '' : String(x).trim()))
+    .filter(Boolean);
+  if (!ids.length) return { held_voided: 0, activities_reverted: 0 };
+  const placeholders = ids.map(() => '?').join(',');
+
+  const heldBids = await tx.all(
+    `SELECT id, activity_id FROM auction_bids WHERE userid IN (${placeholders}) AND state = 'held'`,
+    ids,
+  );
+  let activitiesReverted = 0;
+  for (const bid of heldBids) {
+    // 仅回退未结算/未取消、且当前最高价正指向该出价的竞拍：
+    // 顶价出价被清理后应恢复到“无人出价”，下一次出价重新从起拍价起算。
+    // eslint-disable-next-line no-await-in-loop
+    const reverted = await tx.run(
+      `UPDATE auction_activities
+          SET current_price = NULL, current_bid_userid = NULL, current_bid_id = NULL
+        WHERE id = ? AND current_bid_id = ? AND status NOT IN ('settled', 'cancelled')`,
+      [Number(bid.activity_id), Number(bid.id)],
+    );
+    if (reverted?.changes) activitiesReverted += 1;
+  }
+  const voided = await tx.run(
+    `UPDATE auction_bids SET state = 'refunded', settled_at = ?
+      WHERE userid IN (${placeholders}) AND state = 'held'`,
+    [now, ...ids],
+  );
+  return { held_voided: Number(voided?.changes || 0), activities_reverted: activitiesReverted };
+}
+
 export async function placeAuctionBid(db, {
   activityId,
   userid,

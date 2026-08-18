@@ -10,6 +10,7 @@ import {
   listMyAuctionBids,
   normalizeAuctionCreateInput,
   placeAuctionBid,
+  purgeUserAuctionBids,
   resolveAuctionDisplayStatus,
   settleAuctionIfDue,
 } from '../../src/services/auctionService.js';
@@ -226,6 +227,13 @@ class FakeAuctionDb {
         .sort((a, b) => a.end_at - b.end_at)
         .map((a) => ({ id: a.id, title: a.title }));
     }
+    if (s.startsWith('SELECT id, activity_id FROM auction_bids') && s.includes('WHERE userid IN')) {
+      // purgeUserAuctionBids：按 userid 批量取在押出价
+      const ids = new Set(params.map(String));
+      return [...this.bids.values()]
+        .filter((b) => b.state === 'held' && ids.has(String(b.userid)))
+        .map((b) => ({ id: b.id, activity_id: b.activity_id }));
+    }
     throw new Error('FakeAuctionDb.all 未实现的 SQL: ' + s.slice(0, 90));
   }
 
@@ -356,6 +364,31 @@ class FakeAuctionDb {
         ref_id: params[3] ?? null,
       });
       return { changes: 1, lastID: id };
+    }
+    if (s.startsWith("UPDATE auction_bids SET state = 'refunded'") && s.includes('WHERE userid IN')) {
+      // purgeUserAuctionBids：批量把目标用户的在押出价置为失效（不退款入账）
+      const now = Number(params[0]);
+      const ids = new Set(params.slice(1).map(String));
+      let changes = 0;
+      for (const bid of this.bids.values()) {
+        if (bid.state === 'held' && ids.has(String(bid.userid))) {
+          bid.state = 'refunded';
+          bid.settled_at = now;
+          changes += 1;
+        }
+      }
+      return { changes, lastID: null };
+    }
+    if (s.includes('SET current_price = NULL')) {
+      // purgeUserAuctionBids：回退竞拍当前最高价指针
+      const activity = this.activities.get(Number(params[0]));
+      if (!activity || activity.current_bid_id !== Number(params[1]) || ['settled', 'cancelled'].includes(activity.status)) {
+        return { changes: 0, lastID: null };
+      }
+      activity.current_price = null;
+      activity.current_bid_userid = null;
+      activity.current_bid_id = null;
+      return { changes: 1, lastID: activity.id };
     }
     if (s.startsWith("UPDATE auction_bids SET state = 'refunded'") || s.startsWith("UPDATE auction_bids SET state = 'won'")) {
       const state = s.includes("'refunded'") ? 'refunded' : 'won';
@@ -834,4 +867,51 @@ test('兑换单冲突时结算整体回滚，不会留下半结算状态', async
   assert.equal(db.bids.get(1).state, 'held', '获胜标记已回滚');
   const wonLedger = db.ledger.filter((x) => x.reason === 'auction_win_pay');
   assert.equal(wonLedger.length, 0, '成交流水已回滚');
+});
+
+// ── 用户重置/删除与拍卖出价的对账（P1 回归） ──────────────────
+
+test('重置/删除有在押出价的用户：作废出价并回退竞拍最高价，结算不再重复入账/卡死', async () => {
+  const db = makeDb();
+  await seedUser(db, 'alice', 'Alice', 500);
+  const id = await seedActiveAuction(db);
+  await placeAuctionBid(db, { activityId: id, userid: 'alice', amount: 110, now: ACTIVE_NOW });
+
+  const activityBefore = db.activities.get(id);
+  assert.equal(activityBefore.current_bid_id, 1, '出价后当前最高价指向该出价');
+  assert.equal(db.bids.get(1).state, 'held');
+
+  // 模拟 purgeUserBusinessData 内的拍卖清理（同一事务内调用）
+  const result = await purgeUserAuctionBids(db, ['alice'], { now: ACTIVE_NOW + 10 });
+  assert.equal(result.held_voided, 1, '在押出价被作废');
+  assert.equal(result.activities_reverted, 1, '竞拍最高价指针被回退');
+
+  const bid = db.bids.get(1);
+  assert.equal(bid.state, 'refunded', '出价不再是 held');
+  const activity = db.activities.get(id);
+  assert.equal(activity.current_bid_id, null);
+  assert.equal(activity.current_price, null);
+  assert.equal(activity.current_bid_userid, null);
+
+  // 到点结算：无获胜者、不抛 auction state inconsistent、不给已清用户补发结算流水
+  const settled = await settleAuctionIfDue(db, { activityId: id, now: 1700003600 });
+  assert.equal(settled.just_settled, true);
+  assert.equal(settled.winner, null, '被清理用户不再是获胜者');
+  assert.equal(db.activities.get(id).winner_userid, null);
+  const aliceSettleLedger = db.ledger.filter((x) => x.userid === 'alice' && x.reason.startsWith('auction_settle'));
+  assert.equal(aliceSettleLedger.length, 0, '不向已清理用户重复入账');
+});
+
+test('purgeUserAuctionBids 不触碰已结算竞拍的历史出价', async () => {
+  const db = makeDb();
+  await seedUser(db, 'alice', 'Alice', 500);
+  const id = await seedActiveAuction(db);
+  await placeAuctionBid(db, { activityId: id, userid: 'alice', amount: 110, now: ACTIVE_NOW });
+  await settleAuctionIfDue(db, { activityId: id, now: 1700003600 });
+  assert.equal(db.bids.get(1).state, 'won', '结算后为 won');
+
+  const result = await purgeUserAuctionBids(db, ['alice'], { now: 1700003700 });
+  assert.equal(result.held_voided, 0, '没有在押出价可作废');
+  assert.equal(result.activities_reverted, 0);
+  assert.equal(db.bids.get(1).state, 'won', '已成交出价保持不变');
 });

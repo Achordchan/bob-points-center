@@ -57,6 +57,8 @@ export function registerAdminBackupRoutes(router) {
     'mall_opening_schedule',
     'red_packet_activity',
     'red_packet_items',
+    'auction_activities',
+    'auction_bids',
     'content_faq',
     'content_announcements',
     'content_announcement_revisions',
@@ -1263,6 +1265,8 @@ export function registerAdminBackupRoutes(router) {
             if (rows && mode === 'overwrite') {
               const deleteOrder = [
                 'admin_user_roles',
+                'auction_bids',
+                'auction_activities',
                 'audit_logs',
                 'attendance_reward_records',
                 'ledger',
@@ -1929,6 +1933,103 @@ export function registerAdminBackupRoutes(router) {
               markAndThrow('red_packet_items', null, err);
             }
             report.red_packet_items = count;
+          }
+
+          // auction（活动为父、出价为子；auction_bids FK→auction_activities）
+          {
+            const activityRowsRaw = requireArray('auction_activities');
+            const bidRowsRaw = requireArray('auction_bids');
+            if (mode === 'overwrite' && (activityRowsRaw !== null || bidRowsRaw !== null)) {
+              await execOrThrow(tx, 'DELETE FROM auction_bids', [], 'auction_bids overwrite delete');
+              await execOrThrow(tx, 'DELETE FROM auction_activities', [], 'auction_activities overwrite delete');
+            }
+          }
+          {
+            const rows = requireArray('auction_activities') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO auction_activities(id, title, description, image_url, start_price, min_increment, start_at, end_at, anti_snipe_seconds, status, current_price, current_bid_userid, current_bid_id, bid_count, winner_userid, winner_name, final_price, settled_at, cancelled_at, cancel_reason, created_by, created_name, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.title,
+                    row.description ?? null,
+                    row.image_url ?? null,
+                    row.start_price,
+                    row.min_increment,
+                    row.start_at,
+                    row.end_at,
+                    row.anti_snipe_seconds ?? 0,
+                    row.status ?? 'scheduled',
+                    row.current_price ?? null,
+                    row.current_bid_userid ?? null,
+                    row.current_bid_id ?? null,
+                    row.bid_count ?? 0,
+                    row.winner_userid ?? null,
+                    row.winner_name ?? null,
+                    row.final_price ?? null,
+                    row.settled_at ?? null,
+                    row.cancelled_at ?? null,
+                    row.cancel_reason ?? null,
+                    row.created_by ?? null,
+                    row.created_name ?? null,
+                    row.created_at ?? nowTs(),
+                  ],
+                  `auction_activities[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('auction_activities', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'auction_activities');
+            } catch (err) {
+              markAndThrow('auction_activities', null, err);
+            }
+            report.auction_activities = count;
+          }
+          {
+            const rows = requireArray('auction_bids') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.id) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO auction_bids(id, activity_id, userid, user_name_snapshot, amount, state, created_at, settled_at)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO NOTHING`,
+                  [
+                    row.id,
+                    row.activity_id,
+                    row.userid,
+                    row.user_name_snapshot ?? null,
+                    row.amount,
+                    row.state ?? 'held',
+                    row.created_at ?? nowTs(),
+                    row.settled_at ?? null,
+                  ],
+                  `auction_bids[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('auction_bids', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'auction_bids');
+            } catch (err) {
+              markAndThrow('auction_bids', null, err);
+            }
+            report.auction_bids = count;
           }
         }
 

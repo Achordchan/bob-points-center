@@ -2,6 +2,7 @@
  * 用户重置/删除时的关联数据清理（同一事务内调用）。
  * 已有 FK CASCADE 的表仍显式删除，便于返回计数与兼容历史数据。
  */
+import { purgeUserAuctionBids } from './auctionService.js';
 
 function asList(userids) {
   return (Array.isArray(userids) ? userids : [userids])
@@ -61,6 +62,12 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
     `DELETE FROM user_dingtalk_profiles WHERE userid IN (${placeholders})`,
     targets,
   );
+  // 拍卖在押出价：置为失效并回退竞拍最高价指针（不退款入账，余额随后清零）。
+  // 必须在清零余额/删除流水之前完成对账逻辑之外的清理，避免删除用户时结算/退回悬挂外键。
+  const auctionPurge = await purgeUserAuctionBids(tx, targets);
+  counts.auction_bids_voided = auctionPurge.held_voided;
+  counts.auction_activities_reverted = auctionPurge.activities_reverted;
+
   counts.accounts_zero = await del(
     tx,
     `UPDATE accounts SET balance = 0, updated_at = unixepoch() WHERE userid IN (${placeholders})`,
