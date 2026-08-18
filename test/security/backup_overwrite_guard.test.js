@@ -154,4 +154,6 @@ test('预校验拒绝 current_bid_id 跨活动/非 held/悬挂出价的损坏快
   assert.match(backupRoutesSource, /current_price 与出价金额不一致/);
   // 出价 activity_id 不得悬挂
   assert.match(backupRoutesSource, /activity_id \$\{row\?\.activity_id\} 无对应活动/);
+  // 反向不变式：每条 held 出价必须被其所属活动 current_bid_id 引用
+  assert.match(backupRoutesSource, /held 出价 \$\{row\?\.id\} 未被所属活动 current_bid_id 引用/);
 });

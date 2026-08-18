@@ -31,10 +31,26 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   const placeholders = targets.map(() => '?').join(',');
   const counts = {};
 
-  // 先锁定目标用户账户行，与 placeAuctionBid「先锁 accounts FOR UPDATE 再动出价」保持一致的加锁顺序，
-  // 将清理与并发出价串行化：否则并发出价可能在下方扫描在押出价之后、清零余额之前落库，
-  // 逃过作废，导致重置后其退款凭空造币、删除后悬挂已删用户。
-  await tx.all(`SELECT userid FROM accounts WHERE userid IN (${placeholders}) FOR UPDATE`, targets);
+  // 与出价/结算统一加锁顺序：先锁定与目标用户相关的竞拍活动，再锁定其账户。
+  // - placeAuctionBid：先锁 auction_activities FOR UPDATE，再锁 accounts FOR UPDATE；
+  // - settleAuctionIfDue：仅锁 auction_activities FOR UPDATE。
+  // 因此清理必须同样「先活动、后账户」，否则会与出价反向加锁而死锁(40P01)。
+  // 先锁活动还能把清理与并发结算串行化：结算先锁活动，会阻塞到清理提交，
+  // 不会在清理删除 ledger/redeems 之后再为获胜者补写账目/兑换单而残留数据。
+  // ORDER BY 保证多行加锁次序确定，避免并发清理之间互相死锁。
+  await tx.all(
+    `SELECT id FROM auction_activities
+       WHERE current_bid_userid IN (${placeholders})
+          OR winner_userid IN (${placeholders})
+          OR id IN (SELECT activity_id FROM auction_bids WHERE userid IN (${placeholders}))
+       ORDER BY id
+       FOR UPDATE`,
+    [...targets, ...targets, ...targets],
+  );
+  await tx.all(
+    `SELECT userid FROM accounts WHERE userid IN (${placeholders}) ORDER BY userid FOR UPDATE`,
+    targets,
+  );
 
   counts.mall_order_listings = await del(
     tx,

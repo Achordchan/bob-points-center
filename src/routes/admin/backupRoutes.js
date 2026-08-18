@@ -507,6 +507,7 @@ export function registerAdminBackupRoutes(router) {
       const auctionActivities = requireArray('auction_activities') || [];
       const auctionBids = requireArray('auction_bids') || [];
       const auctionBidById = new Map(auctionBids.map((b) => [Number(b?.id), b]));
+      const auctionActivityById = new Map(auctionActivities.map((a) => [Number(a?.id), a]));
       const auctionActivityIds = new Set(auctionActivities.map((a) => Number(a?.id)).filter(Number.isSafeInteger));
       auctionActivities.forEach((row, index) => {
         if (!row?.id) {
@@ -539,6 +540,15 @@ export function registerAdminBackupRoutes(router) {
         }
         if (!auctionActivityIds.has(Number(row?.activity_id))) {
           pushPreflight('auction_bids', index, `activity_id ${row?.activity_id} 无对应活动`);
+        }
+        // 反向不变式：每条 held 出价必须正被其所属活动的 current_bid_id 引用。
+        // 否则恢复后出现「有扣款却无活动指针」的在押出价：结算判定无获胜者、取消不退款，
+        // 且后续任何出价都会撞 idx_auction_bids_held_once（每场至多一条 held）。
+        if (String(row?.state) === 'held') {
+          const activity = auctionActivityById.get(Number(row?.activity_id));
+          if (activity && Number(activity.current_bid_id) !== Number(row?.id)) {
+            pushPreflight('auction_bids', index, `held 出价 ${row?.id} 未被所属活动 current_bid_id 引用`);
+          }
         }
       });
 

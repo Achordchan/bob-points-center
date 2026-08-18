@@ -918,24 +918,31 @@ test('purgeUserAuctionBids 不触碰已结算竞拍的历史出价', async () =>
   assert.equal(db.bids.get(1).state, 'won', '已成交出价保持不变');
 });
 
-// ── 清理与并发出价的加锁顺序（P1 回归） ──────────────────────
+// ── 清理与出价/结算的加锁顺序（P1/P2 回归） ──────────────────
 
-test('用户清理在扫描在押出价前先锁定账户，与出价加锁顺序一致', () => {
+test('用户清理先锁竞拍活动再锁账户，与出价/结算加锁顺序一致（防死锁并串行化结算）', () => {
   const src = readFileSync(
     fileURLToPath(new URL('../../src/services/userDataPurgeService.js', import.meta.url)),
     'utf8',
   );
-  // purgeUserBusinessData 必须先对目标账户 SELECT ... FOR UPDATE，再进行后续清理
-  const lockIdx = src.indexOf('SELECT userid FROM accounts WHERE userid IN');
-  assert.ok(lockIdx >= 0, '清理前应锁定账户');
-  assert.match(src.slice(lockIdx, lockIdx + 120), /FOR UPDATE/);
-  // 锁定必须早于拍卖出价清理
+  // purgeUserBusinessData 必须「先锁 auction_activities FOR UPDATE，再锁 accounts FOR UPDATE」
+  const activityLockIdx = src.search(/SELECT id FROM auction_activities[\s\S]*?FOR UPDATE/);
+  const accountLockIdx = src.indexOf('SELECT userid FROM accounts WHERE userid IN');
+  assert.ok(activityLockIdx >= 0, '清理前应锁定相关竞拍活动');
+  assert.ok(accountLockIdx >= 0, '清理前应锁定账户');
+  assert.match(src.slice(accountLockIdx, accountLockIdx + 120), /FOR UPDATE/);
+  assert.ok(activityLockIdx < accountLockIdx, '必须先锁活动、后锁账户，与出价加锁顺序一致');
+  // 两处加锁都必须早于拍卖出价清理
   const purgeAuctionIdx = src.indexOf('purgeUserAuctionBids(tx, targets)');
-  assert.ok(purgeAuctionIdx > lockIdx, '账户锁定应早于拍卖出价清理');
-  // placeAuctionBid 同样先锁 accounts FOR UPDATE，保证加锁顺序一致、避免死锁
+  assert.ok(purgeAuctionIdx > accountLockIdx, '加锁应早于拍卖出价清理');
+
+  // placeAuctionBid 先锁 auction_activities、后锁 accounts（清理与之同序）
   const auctionSrc = readFileSync(
     fileURLToPath(new URL('../../src/services/auctionService.js', import.meta.url)),
     'utf8',
   );
-  assert.match(auctionSrc, /SELECT balance FROM accounts WHERE userid = \? FOR UPDATE/);
+  const bidActivityLock = auctionSrc.indexOf("SELECT * FROM auction_activities WHERE id = ? FOR UPDATE");
+  const bidAccountLock = auctionSrc.search(/SELECT balance FROM accounts WHERE userid = \? FOR UPDATE/);
+  assert.ok(bidActivityLock >= 0 && bidAccountLock >= 0);
+  assert.ok(bidActivityLock < bidAccountLock, '出价先锁活动、后锁账户');
 });
