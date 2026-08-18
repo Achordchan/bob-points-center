@@ -55,6 +55,8 @@ export function loadConfig() {
     // 可选会话轮换盐（稳定配置，不再启动时随机）；默认空
     sessionSalt: (process.env.SESSION_SALT || '').trim(),
     serverBaseUrl,
+    localDevAuthEnabled: toBool(process.env.LOCAL_DEV_AUTH_ENABLED, false),
+    devSessionDatabase: (process.env.DEV_SESSION_DATABASE || '').trim(),
     db: {
       kind: dbKind === 'postgres' ? 'postgres' : dbKind,
       host: process.env.PG_HOST || '127.0.0.1',

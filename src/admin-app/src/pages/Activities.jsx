@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { App, Alert, Button, Card, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag } from 'antd';
+import dayjs from 'dayjs';
+import { App, Alert, Button, Card, Col, DatePicker, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag } from 'antd';
 import { api, qs } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import ProductImageEditor from '../components/ProductImageEditor.jsx';
@@ -82,6 +83,294 @@ function RedPackets({ me }) {
             { title: '金额', dataIndex: 'amount', render: amountText },
           ]}
         />
+      </Space>}
+    </Drawer>
+  </Space>;
+}
+
+
+const auctionStatusText = { scheduled: '待开始', active: '进行中', settled: '已结算', cancelled: '已取消', settling: '待结算' };
+const auctionStatusColor = { scheduled: 'blue', active: 'green', settled: 'default', cancelled: 'red', settling: 'orange' };
+const auctionBidStateText = { held: '在押', refunded: '已退回', won: '竞得' };
+const auctionBidStateColor = { held: 'processing', refunded: 'default', won: 'gold' };
+
+const auctionAdminErrorText = {
+  'missing title': '请填写竞拍标题',
+  'title too long': '标题最多 80 字',
+  'description too long': '活动说明最多 2000 字',
+  'image_url too long': '图片地址过长',
+  'start_price must be positive integer': '起拍价必须是正整数',
+  'start_price too large': '起拍价超出上限',
+  'min_increment must be positive integer': '最低加价必须是正整数',
+  'min_increment too large': '最低加价超出上限',
+  'invalid start_at': '开始时间无效',
+  'start_at is in the past': '开始时间不能早于当前时间',
+  'invalid end_at': '结束时间无效',
+  'end_at must be at least 60 seconds in the future': '结束时间至少要在 1 分钟后',
+  'auction duration must be at least 60 seconds': '竞拍时长至少 1 分钟',
+  'anti_snipe_seconds must be between 0 and 600': '防狙击秒数需在 0-600 之间',
+  'auction not found': '竞拍不存在，请刷新列表',
+  'auction_already_cancelled': '该竞拍已被取消',
+  'auction_already_settled': '该竞拍已结束（到期后不可取消，最高出价已锁定）',
+  'invalid activity_id': '参数错误：活动 ID 无效',
+  concurrent_bid_conflict: '操作冲突，请刷新后重试',
+};
+
+function humanizeAuctionAdminError(err) {
+  const key = String(err?.message || err || '');
+  return auctionAdminErrorText[key] || (Number(err?.status) >= 500 ? '系统繁忙，请稍后再试' : `操作失败：${key}`);
+}
+
+function Auctions({ me }) {
+  const { message, modal } = App.useApp();
+  const canEdit = hasPermission(me, 'activities:edit');
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('');
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [cancelling, setCancelling] = useState(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [form] = Form.useForm();
+
+  const load = async (nextStatus = statusFilter) => {
+    setLoading(true);
+    try {
+      const resp = await api(`/admin/auction/list?${qs({ limit: 100, status: nextStatus })}`);
+      setRows(resp.data || []);
+    } catch (err) {
+      message.error(err.message || '竞拍列表加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load().catch(() => null); }, []);
+
+  const openCreate = () => {
+    form.resetFields();
+    form.setFieldsValue({
+      start_price: 100,
+      min_increment: 10,
+      range: [dayjs().add(10, 'minute'), dayjs().add(1, 'day')],
+      anti_snipe_seconds: 0,
+    });
+    setCreating(true);
+  };
+
+  const submitCreate = async (values) => {
+    const [startAt, endAt] = values.range || [];
+    if (!startAt || !endAt) {
+      message.error('请选择开始与结束时间');
+      return;
+    }
+    try {
+      await api('/admin/auction/create', {
+        method: 'POST',
+        body: {
+          title: values.title,
+          description: values.description || '',
+          image_url: values.image_url || '',
+          start_price: values.start_price,
+          min_increment: values.min_increment,
+          start_at: startAt.unix(),
+          end_at: endAt.unix(),
+          anti_snipe_seconds: values.anti_snipe_seconds ?? 0,
+        },
+      });
+      message.success('竞拍活动已创建');
+      setCreating(false);
+      form.resetFields();
+      load();
+    } catch (err) {
+      message.error(humanizeAuctionAdminError(err));
+    }
+  };
+
+  const openDetail = async (id) => {
+    setDetailLoading(true);
+    try {
+      const resp = await api(`/admin/auction/detail?id=${id}`);
+      setDetail(resp.data || null);
+    } catch (err) {
+      message.error(err.message || '详情加载失败');
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const submitCancel = async () => {
+    if (!cancelling) return;
+    setCancelBusy(true);
+    try {
+      await api('/admin/auction/cancel', {
+        method: 'POST',
+        body: { activity_id: cancelling.id, reason: cancelReason || '' },
+      });
+      message.success('竞拍已取消，在押金额已退回');
+      setCancelling(null);
+      setCancelReason('');
+      if (detail?.id === cancelling.id) setDetail(null);
+      load();
+    } catch (err) {
+      message.error(humanizeAuctionAdminError(err));
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
+  // 以 effective_status 为准：到期未结算（settling）的活动服务端会拒绝取消，前端直接隐藏入口。
+  const canCancelRow = (row) => canEdit && ['scheduled', 'active'].includes(String(row?.effective_status || row?.status || ''));
+  const auctionUser = (row) => {
+    const name = String(row?.display_name || row?.winner_name || '').trim();
+    const userid = String(row?.userid || row?.winner_userid || '').trim();
+    if (name && userid && name !== userid) return `${name} (${userid})`;
+    return name || userid || '-';
+  };
+
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    <DataToolbar
+      onRefresh={() => load()}
+      onCreate={canEdit ? openCreate : null}
+      createText="新建竞拍"
+    >
+      <Select
+        allowClear
+        placeholder="状态筛选"
+        style={{ width: 140 }}
+        value={statusFilter || undefined}
+        onChange={(v) => { const next = v || ''; setStatusFilter(next); load(next); }}
+        options={Object.entries(auctionStatusText).filter(([k]) => k !== 'settling').map(([k, v]) => ({ value: k, label: v }))}
+      />
+    </DataToolbar>
+    <Table
+      rowKey="id"
+      loading={loading}
+      dataSource={rows}
+      pagination={localTablePagination('场竞拍')}
+      scroll={{ x: 1180 }}
+      columns={[
+        { title: 'ID', dataIndex: 'id', width: 64 },
+        { title: '标题', dataIndex: 'title', ellipsis: true },
+        { title: '起拍价', dataIndex: 'start_price', width: 110, render: amountText },
+        { title: '当前价', dataIndex: 'current_price', width: 110, render: (v) => v === null || v === undefined ? '-' : amountText(v) },
+        { title: '出价数', dataIndex: 'bid_count', width: 80 },
+        { title: '状态', dataIndex: 'status', width: 90, render: (v, r) => <Tag color={auctionStatusColor[r.effective_status] || auctionStatusColor[v] || 'default'}>{statusText(auctionStatusText, r.effective_status === 'settling' ? 'settling' : v)}</Tag> },
+        { title: '开始时间', dataIndex: 'start_at', width: 160, render: formatTs },
+        { title: '结束时间', dataIndex: 'end_at', width: 160, render: formatTs },
+        { title: '得主', width: 170, render: (_, r) => r.winner_userid ? auctionUser(r) : (r.current_bidder_name ? `${r.current_bidder_name}（领先）` : '-') },
+        { title: '操作', fixed: 'right', width: 150, render: (_, r) => <Space>
+          <Button size="small" onClick={() => openDetail(r.id)}>详情</Button>
+          {canCancelRow(r) && <Button size="small" danger onClick={() => { setCancelling(r); setCancelReason(''); }}>取消</Button>}
+        </Space> },
+      ]}
+    />
+
+    <Modal
+      title="新建限时竞拍"
+      open={creating}
+      onCancel={() => setCreating(false)}
+      onOk={() => form.submit()}
+      okText="创建"
+      cancelText="取消"
+      okButtonProps={{ disabled: !canEdit }}
+      width={640}
+      destroyOnClose
+    >
+      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="员工出价即冻结 BOB 币；被他人超出自动退回；结束后最高出价人竞得，冻结金额转为成交扣款。" />
+      <Form form={form} layout="vertical" onFinish={submitCreate}>
+        <Form.Item name="title" label="竞拍标题" rules={[{ required: true, whitespace: true, message: '请输入标题' }, { max: 80, message: '标题最多 80 字' }]}>
+          <Input placeholder="如：限量周边礼盒" readOnly={!canEdit} />
+        </Form.Item>
+        <Form.Item name="image_url" label="商品图片">
+          <ProductImageEditor emptyText="未设置商品图片" disabled={!canEdit} />
+        </Form.Item>
+        <Row gutter={[12, 0]}>
+          <Col span={12}><Form.Item name="start_price" label="起拍价（BOB 币）" rules={[{ required: true, message: '请输入起拍价' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} disabled={!canEdit} /></Form.Item></Col>
+          <Col span={12}><Form.Item name="min_increment" label="最低加价幅度（BOB 币）" rules={[{ required: true, message: '请输入加价幅度' }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} disabled={!canEdit} /></Form.Item></Col>
+          <Col span={24}><Form.Item name="range" label="起止时间" rules={[{ required: true, message: '请选择起止时间' }]}>
+            <DatePicker.RangePicker
+              showTime={{ format: 'HH:mm' }}
+              format="YYYY-MM-DD HH:mm"
+              style={{ width: '100%' }}
+              disabled={!canEdit}
+              disabledDate={(d) => d && d.isBefore(dayjs().subtract(1, 'day'))}
+              disabledTime={(current, type) => {
+                const now = dayjs();
+                if (!current || !current.isSame(now, 'day')) return {};
+                if (type === 'start') {
+                  return {
+                    disabledHours: () => Array.from({ length: now.hour() }, (_, i) => i),
+                    disabledMinutes: (selectedHour) => selectedHour === now.hour()
+                      ? Array.from({ length: now.minute() }, (_, i) => i)
+                      : [],
+                  };
+                }
+                return {};
+              }}
+            />
+          </Form.Item></Col>
+          <Col span={12}><Form.Item name="anti_snipe_seconds" label="防狙击秒数（0 关闭）" extra="结束前该秒数内出价会顺延结束时间"><InputNumber min={0} max={600} precision={0} style={{ width: '100%' }} disabled={!canEdit} /></Form.Item></Col>
+        </Row>
+        <Form.Item name="description" label="活动说明">
+          <Input.TextArea rows={3} maxLength={2000} readOnly={!canEdit} placeholder="可填写商品介绍、领取方式等" />
+        </Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal
+      title={`取消竞拍 #${cancelling?.id ?? ''}`}
+      open={Boolean(cancelling)}
+      onCancel={() => { setCancelling(null); setCancelReason(''); }}
+      onOk={submitCancel}
+      okText="确认取消"
+      cancelText="返回"
+      okButtonProps={{ danger: true, loading: cancelBusy }}
+      destroyOnClose
+    >
+      {cancelling?.current_price ? <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={`当前已有在押出价 ${cancelling.current_price} BOB 币，取消后将全额退回出价人余额。`} /> : null}
+      <Input placeholder="取消原因（可选，最多 200 字）" maxLength={200} value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
+    </Modal>
+
+    <Drawer title={`竞拍详情 #${detail?.id ?? ''}`} open={Boolean(detail)} onClose={() => setDetail(null)} width={760}>
+      {detail && <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Descriptions bordered size="small" column={2} items={[
+          { key: 'title', label: '标题', span: 2, children: detail.title },
+          { key: 'status', label: '状态', children: <Tag color={auctionStatusColor[detail.effective_status] || auctionStatusColor[detail.status] || 'default'}>{statusText(auctionStatusText, detail.effective_status === 'settling' ? 'settling' : detail.status)}</Tag> },
+          { key: 'bids', label: '出价次数', children: detail.bid_count },
+          { key: 'start_price', label: '起拍价', children: amountText(detail.start_price) },
+          { key: 'min_increment', label: '最低加价', children: amountText(detail.min_increment) },
+          { key: 'start', label: '开始时间', children: formatTs(detail.start_at) },
+          { key: 'end', label: '结束时间', children: formatTs(detail.end_at) },
+          { key: 'anti', label: '防狙击', children: Number(detail.anti_snipe_seconds) > 0 ? `${detail.anti_snipe_seconds} 秒` : '关闭' },
+          { key: 'current', label: '当前价', children: detail.current_price === null || detail.current_price === undefined ? '-' : amountText(detail.current_price) },
+          { key: 'leader', label: '当前领先', children: detail.current_bidder_name ? `${detail.current_bidder_name} (${detail.current_bid_userid})` : '-' },
+          { key: 'winner', label: '得主', children: detail.winner_userid ? `${detail.winner_name || '-'} (${detail.winner_userid})` : (detail.status === 'settled' ? '流拍' : '-') },
+          { key: 'final', label: '成交价', children: detail.final_price === null || detail.final_price === undefined ? '-' : amountText(detail.final_price) },
+          { key: 'settled', label: '结算时间', children: formatTs(detail.settled_at) },
+          { key: 'redeem', label: '领取单号', children: detail.winner_userid ? `AUCTION_${detail.id}（员工端出示核销二维码，扫码即完成发放）` : '-' },
+          { key: 'cancel', label: '取消原因', children: detail.cancel_reason || '-' },
+          { key: 'created', label: '创建人', span: 2, children: detail.created_name ? `${detail.created_name} (${detail.created_by})` : '-' },
+        ]} />
+        {detail.description ? <Card size="small" title="活动说明"><div style={{ whiteSpace: 'pre-wrap' }}>{detail.description}</div></Card> : null}
+        <Card size="small" title={`出价记录（最近 ${Array.isArray(detail.bids) ? detail.bids.length : 0} 条）`}>
+          <Table
+            rowKey="id"
+            size="small"
+            loading={detailLoading}
+            dataSource={detail.bids || []}
+            pagination={localTablePagination('条出价', 10)}
+            columns={[
+              { title: '出价时间', dataIndex: 'created_at', render: formatTs, width: 170 },
+              { title: '出价人', render: (_, r) => auctionUser(r), width: 200 },
+              { title: '金额', dataIndex: 'amount', render: amountText, width: 120 },
+              { title: '状态', dataIndex: 'state', width: 100, render: (v) => <Tag color={auctionBidStateColor[v] || 'default'}>{statusText(auctionBidStateText, v)}</Tag> },
+            ]}
+          />
+        </Card>
+        {canCancelRow(detail) && <Button danger block onClick={() => { setCancelling(detail); setCancelReason(''); }}>取消这场竞拍并退回在押金额</Button>}
       </Space>}
     </Drawer>
   </Space>;
@@ -335,5 +624,5 @@ function Charity({ me }) {
 }
 
 export default function Activities(props) {
-  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets {...props} /> }, { key: 'attendance', label: '打卡奖励', children: <AttendanceRewards {...props} /> }, { key: 'charity', label: '公益助力', children: <Charity {...props} /> }]} /></Card>;
+  return <Card><Tabs items={[{ key: 'red', label: '红包活动', children: <RedPackets {...props} /> }, { key: 'auction', label: '限时竞拍', children: <Auctions {...props} /> }, { key: 'attendance', label: '打卡奖励', children: <AttendanceRewards {...props} /> }, { key: 'charity', label: '公益助力', children: <Charity {...props} /> }]} /></Card>;
 }

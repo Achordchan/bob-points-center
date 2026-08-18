@@ -11,7 +11,9 @@ import { adminRouter } from './routes/admin.js';
 import { bobTokenRouter } from './routes/bobToken.js';
 import { usersRouter } from './routes/users.js';
 import { qrImageRouter } from './routes/qrImage.js';
+import { devAuthRouter, shouldEnableLocalDevAuth } from './routes/devAuth.js';
 import { startMallOpeningScheduler } from './services/mallOpeningScheduler.js';
+import { startAuctionSettleScheduler } from './services/auctionSettleScheduler.js';
 import { startDingtalkStream } from './services/dingtalkStreamService.js';
 import { handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './services/attendanceRewardService.js';
 import { getClientIp, safeAppendAuditLog } from './services/auditLogService.js';
@@ -67,6 +69,13 @@ export function createApp({ db, cfg } = {}) {
     keyFn: (req) => clientIpKey(req, 'transfer'),
     message: '转账过于频繁，请稍后再试',
   });
+  const auctionBidLimiter = createRateLimiter({
+    windowMs: 60_000,
+    // 出价高峰集中在活动最后几秒；办公网 NAT 下同 IP 并发更高，阈值宽于转账。
+    max: 60,
+    keyFn: (req) => clientIpKey(req, 'auction_bid'),
+    message: '出价过于频繁，请稍后再试',
+  });
   const sseLimiter = createRateLimiter({
     windowMs: 60_000,
     max: 60,
@@ -84,6 +93,9 @@ export function createApp({ db, cfg } = {}) {
     }
     if (req.method === 'POST' && (p === '/ledger/transfer' || p === '/mall/transfer')) {
       return transferLimiter(req, res, next);
+    }
+    if (req.method === 'POST' && p === '/mall/auction/bid') {
+      return auctionBidLimiter(req, res, next);
     }
     return next();
   });
@@ -130,6 +142,9 @@ export function createApp({ db, cfg } = {}) {
   });
 
   app.use('/health', healthRouter());
+  if (shouldEnableLocalDevAuth(cfg)) {
+    app.use('/__dev', devAuthRouter());
+  }
   app.use('/ledger', ledgerRouter());
   app.use('/exchange', exchangeRouter());
   app.use('/redeem', redeemRouter());
@@ -142,6 +157,7 @@ export function createApp({ db, cfg } = {}) {
   app.use(docsRouter());
 
   startMallOpeningScheduler({ db, cfg });
+  startAuctionSettleScheduler({ db, cfg });
 
   // 钉钉 Stream 长连接：接收考勤打卡事件并发放 BOB 币奖励
   // 仅当钉钉 appKey / appSecret 已配置时才启动

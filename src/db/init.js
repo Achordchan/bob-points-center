@@ -132,6 +132,52 @@ CREATE TABLE IF NOT EXISTS red_packet_activity (
   created_at BIGINT NOT NULL DEFAULT (${nowExpr})
 );
 
+CREATE TABLE IF NOT EXISTS auction_activities (
+  id BIGSERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT,
+  image_url TEXT,
+  start_price BIGINT NOT NULL,
+  min_increment BIGINT NOT NULL,
+  start_at BIGINT NOT NULL,
+  end_at BIGINT NOT NULL,
+  anti_snipe_seconds INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'scheduled',
+  current_price BIGINT,
+  current_bid_userid TEXT,
+  current_bid_id BIGINT,
+  bid_count INTEGER NOT NULL DEFAULT 0,
+  winner_userid TEXT,
+  winner_name TEXT,
+  final_price BIGINT,
+  settled_at BIGINT,
+  cancelled_at BIGINT,
+  cancel_reason TEXT,
+  created_by TEXT,
+  created_name TEXT,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr})
+);
+CREATE INDEX IF NOT EXISTS idx_auction_activities_status_start ON auction_activities(status, start_at);
+CREATE INDEX IF NOT EXISTS idx_auction_activities_settled_at ON auction_activities(settled_at);
+
+CREATE TABLE IF NOT EXISTS auction_bids (
+  id BIGSERIAL PRIMARY KEY,
+  activity_id BIGINT NOT NULL,
+  userid TEXT NOT NULL,
+  user_name_snapshot TEXT,
+  amount BIGINT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'held',
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  settled_at BIGINT,
+  FOREIGN KEY (activity_id) REFERENCES auction_activities(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_auction_bids_activity_id ON auction_bids(activity_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_auction_bids_userid ON auction_bids(userid, id DESC);
+-- 每场竞拍同一时刻至多一条在押（held）出价：新出价必须先退掉上一条，数据库层兜底。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auction_bids_held_once
+  ON auction_bids(activity_id)
+  WHERE state = 'held';
+
 CREATE TABLE IF NOT EXISTS red_packet_items (
   id BIGSERIAL PRIMARY KEY,
   activity_id BIGINT NOT NULL,
@@ -708,6 +754,11 @@ export async function initDb(input) {
   await db.exec("CREATE INDEX IF NOT EXISTS idx_redeems_user_product_round ON redeems(userid, product_id, limit_round)");
   await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_red_packet_items_activity_claimed_once ON red_packet_items(activity_id, claimed_by) WHERE claimed_by IS NOT NULL");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_red_packet_items_activity_unclaimed ON red_packet_items(activity_id, id) WHERE claimed_by IS NULL");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_auction_activities_status_start ON auction_activities(status, start_at)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_auction_activities_settled_at ON auction_activities(settled_at)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_auction_bids_activity_id ON auction_bids(activity_id, id DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_auction_bids_userid ON auction_bids(userid, id DESC)");
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_auction_bids_held_once ON auction_bids(activity_id) WHERE state = 'held'");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '[]'");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_builtin INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE admin_roles ADD COLUMN IF NOT EXISTS is_enabled INTEGER NOT NULL DEFAULT 1");

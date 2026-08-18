@@ -124,7 +124,7 @@ button,
 .navLarge {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1168,6 +1168,7 @@ button.secondary.pseudoDisabled {
 
 .moreSubnav[data-active-more-tab="announcements"] [data-more-tab="announcements"],
 .moreSubnav[data-active-more-tab="faq"] [data-more-tab="faq"],
+.moreSubnav[data-active-more-tab="rich"] [data-more-tab="rich"],
 .moreSubnav[data-active-more-tab="stats"] [data-more-tab="stats"],
 .moreSubnav[data-active-more-tab="version"] [data-more-tab="version"],
 .moreSubnav[data-active-more-tab="feedback"] [data-more-tab="feedback"] {
@@ -3655,19 +3656,13 @@ body.modalOpenFixed {
   .navLarge {
     display: flex;
     flex-wrap: nowrap;
-    gap: 8px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-
-  .navLarge::-webkit-scrollbar {
-    display: none;
+    gap: 6px;
   }
 
   .navBtn {
-    flex: 1 0 54px;
-    padding: 12px 8px;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 12px 4px;
     border-radius: 14px;
     font-size: 13.5px;
   }
@@ -3968,4 +3963,356 @@ body.modalOpenFixed {
   border-radius: 10px;
   resize: vertical;
   font-size: 14px;
+}
+
+/* ── 限时竞拍（挂在市场 tab 的子标签下） ──────────────── */
+.auctionIntro {
+  margin: 0 0 10px;
+}
+
+.auctionList {
+  display: grid;
+  gap: 12px;
+}
+
+.auctionEmpty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.auctionItem {
+  border: 1px solid var(--mx-line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  cursor: pointer;
+}
+
+.auctionItemMedia {
+  flex: 0 0 92px;
+  height: 92px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--mx-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auctionItemMedia img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.auctionItemFallback {
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 2px;
+}
+
+.auctionItemMeta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auctionItemTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.auctionItemTitle {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auctionTag {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--mx-soft);
+  color: rgba(15, 23, 42, 0.7);
+}
+
+.auctionTagActive {
+  background: rgba(6, 182, 212, 0.14);
+  color: #0e7490;
+}
+
+.auctionTagScheduled {
+  background: rgba(26, 115, 232, 0.12);
+  color: #1a56c4;
+}
+
+.auctionTagSettling,
+.auctionTagSettled {
+  background: var(--mx-soft);
+  color: rgba(15, 23, 42, 0.55);
+}
+
+.auctionTagWon {
+  background: rgba(255, 184, 77, 0.2);
+  color: #92610a;
+}
+
+.auctionTagCancelled {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
+.auctionItemPrice {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.auctionItemPriceValue {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-right: 2px;
+}
+
+.auctionItemSub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auctionItemBottom {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.auctionCountdown {
+  font-size: 12px;
+  font-weight: 600;
+  color: #0e7490;
+  font-variant-numeric: tabular-nums;
+}
+
+.auctionItemGo {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.auctionMineSummary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.auctionMineStat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.auctionMineStat span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.auctionMineStat strong {
+  font-size: 16px;
+}
+
+.auctionMineStatHelp {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.auctionMineItem {
+  border: 1px solid var(--mx-line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.auctionMineInfo {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+/* 竞拍详情弹窗 */
+.auctionDetailBox {
+  max-width: 420px;
+  width: calc(100% - 32px);
+}
+
+.auctionDetailScroll {
+  max-height: min(64vh, 520px);
+  overflow-y: auto;
+}
+
+.auctionDetailMedia {
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  background: var(--mx-soft);
+}
+
+.auctionDetailMedia img {
+  width: 100%;
+  max-height: 200px;
+  object-fit: cover;
+  display: block;
+}
+
+.auctionDetailTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.auctionDetailTitle {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.auctionDetailDesc {
+  font-size: 13px;
+  color: rgba(15, 23, 42, 0.72);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 10px;
+}
+
+.auctionDetailGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.auctionDetailCell {
+  border: 1px solid var(--mx-line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.auctionDetailCell span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.auctionDetailCell strong {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auctionResultBanner {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 184, 77, 0.16);
+  color: #92610a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auctionResultCancelled {
+  background: var(--mx-soft);
+  color: rgba(15, 23, 42, 0.66);
+}
+
+.auctionMyBidLine {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.auctionDetailSectionTitle {
+  margin-top: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(15, 23, 42, 0.8);
+}
+
+.auctionBidList {
+  margin-top: 6px;
+  display: grid;
+  gap: 6px;
+}
+
+.auctionBidRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--mx-line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.auctionBidRowHeld {
+  border-color: rgba(6, 182, 212, 0.45);
+  background: rgba(6, 182, 212, 0.06);
+}
+
+.auctionBidName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auctionBidAmount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.auctionBidTime {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pillAuction {
+  background: rgba(255, 184, 77, 0.2);
+  color: #92610a;
+}
+
+.auctionResultHint {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.85;
 }

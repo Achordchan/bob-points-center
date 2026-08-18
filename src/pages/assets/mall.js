@@ -63,6 +63,16 @@
     redPacketOffsetMs: 0,
     redPacketClaimInFlight: false,
     redPacketLastCountdown: null,
+    auctionList: null,
+    marketTab: 'buy',
+    auctionDetail: null,
+    auctionDetailId: null,
+    auctionTimer: null,
+    auctionOffsetMs: 0,
+    auctionBidInFlight: false,
+    auctionListRefreshing: false,
+    auctionDetailRefreshing: false,
+    myAuction: null,
     reauthInFlight: false,
     oauthSession: null,
     modalLockScrollTop: 0,
@@ -351,6 +361,492 @@
 
   function setText(id, text) {
     document.getElementById(id).textContent = text;
+  }
+
+  // ── 限时竞拍 ──────────────────────────────────────────────
+  function auctionNowSec() {
+    return Math.floor((Date.now() + (Number(state.auctionOffsetMs) || 0)) / 1000);
+  }
+
+  function smoothAuctionOffset(serverTimeMs, serverTimeSec, reqStartMs, reqEndMs) {
+    const baseServerMs = Number.isFinite(Number(serverTimeMs))
+      ? Number(serverTimeMs)
+      : (Number.isFinite(Number(serverTimeSec)) ? Number(serverTimeSec) * 1000 : NaN);
+    if (!Number.isFinite(baseServerMs)) return;
+    const rttMs = Math.max(0, reqEndMs - reqStartMs);
+    const estimatedServerNowMs = baseServerMs + Math.floor(rttMs / 2);
+    const nextOffsetMs = estimatedServerNowMs - reqEndMs;
+    const prevOffsetMs = Number(state.auctionOffsetMs) || 0;
+    state.auctionOffsetMs = Math.round(prevOffsetMs * 0.35 + nextOffsetMs * 0.65);
+  }
+
+  function auctionStatusMeta(status) {
+    const s = String(status || '');
+    if (s === 'scheduled') return { text: '即将开始', cls: 'auctionTag auctionTagScheduled' };
+    if (s === 'active') return { text: '竞拍中', cls: 'auctionTag auctionTagActive' };
+    if (s === 'settling') return { text: '结算中', cls: 'auctionTag auctionTagSettling' };
+    if (s === 'settled') return { text: '已结束', cls: 'auctionTag auctionTagSettled' };
+    if (s === 'cancelled') return { text: '已取消', cls: 'auctionTag auctionTagCancelled' };
+    return { text: s || '-', cls: 'auctionTag' };
+  }
+
+  function auctionCountdownText(row) {
+    const now = auctionNowSec();
+    const status = String(row?.effective_status || row?.status || '');
+    if (status === 'scheduled') {
+      return `开始 ${formatAuctionCountdown(Number(row?.start_at || 0) - now)}`;
+    }
+    if (status === 'active') {
+      return `结束 ${formatAuctionCountdown(Math.max(0, Number(row?.end_at || 0) - now))}`;
+    }
+    return '';
+  }
+
+  function formatAuctionCountdown(sec) {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    if (s >= 86400) {
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      return h > 0 ? `${d}天${h}小时` : `${d}天`;
+    }
+    if (s >= 3600) {
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return m > 0 ? `${h}小时${m}分` : `${h}小时`;
+    }
+    if (s >= 600) return `${Math.floor(s / 60)}分${String(s % 60).padStart(2, '0')}秒`;
+    return formatShortCountdown(s);
+  }
+
+  function humanizeAuctionError(message, httpStatus) {
+    const m = String(message || '');
+    const map = {
+      'invalid activity_id': '活动不存在或参数错误',
+      'invalid amount': '出价金额无效，请输入正整数',
+      'not_started': '竞拍还未开始',
+      'auction ended': '竞拍已结束',
+      'auction_cancelled': '该竞拍已被取消',
+      'bid_too_low': '出价过低，请按最新价格重新出价',
+      'already_highest_bidder': '你已是当前最高出价人',
+      'insufficient balance': '余额不足，无法出价',
+      'concurrent_bid_conflict': '出价冲突，请按最新价格重试',
+      'concurrent_limit': '同时出价的人太多，请稍后再试',
+      rate_limited: '出价过于频繁，请稍后再试',
+      unauthorized: '登录状态已失效，请重新进入页面',
+      'auction not found': '竞拍不存在',
+    };
+    if (map[m]) return map[m];
+    if (httpStatus && Number(httpStatus) >= 500) return '系统繁忙，请稍后再试';
+    return m || '出价失败，请稍后再试';
+  }
+
+  async function loadAuctionList() {
+    const reqStartMs = Date.now();
+    const r = await safeFetchJson('/mall/auction/list');
+    const reqEndMs = Date.now();
+    if (!r?.data?.ok) {
+      const el = document.getElementById('auctionListErr');
+      if (el) el.textContent = r?.data?.error ? humanizeAuctionError(r.data.error, r.status) : '加载竞拍失败';
+      return;
+    }
+    const errEl = document.getElementById('auctionListErr');
+    if (errEl) errEl.textContent = '';
+    smoothAuctionOffset(r.data?.server_time_ms, r.data?.server_time, reqStartMs, reqEndMs);
+    state.auctionList = Array.isArray(r.data?.data) ? r.data.data : [];
+    renderAuctionList();
+  }
+
+  function renderAuctionList() {
+    const box = document.getElementById('auctionList');
+    if (!box) return;
+    const rows = state.auctionList || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="auctionEmpty">暂无竞拍活动，敬请期待</div>';
+      return;
+    }
+    box.innerHTML = rows.map((row) => {
+      const id = Number(row?.id || 0);
+      const title = String(row?.title || `竞拍 #${id}`);
+      const imageUrl = row?.image_url ? String(row.image_url) : '';
+      const status = auctionStatusMeta(row?.effective_status);
+      const currentPrice = row?.current_price !== null && row?.current_price !== undefined
+        ? Number(row.current_price)
+        : Number(row?.start_price || 0);
+      const bidder = row?.current_bidder_name ? String(row.current_bidder_name) : '';
+      const bids = Number(row?.bid_count || 0);
+      const settled = row?.effective_status === 'settled';
+      const winnerText = settled
+        ? (row?.winner_name ? `得主：${String(row.winner_name)}` : '无人出价，流拍')
+        : '';
+      return (
+        `<article class="auctionItem" data-auction-open="${id}">` +
+        `  <div class="auctionItemMedia">${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="" referrerpolicy="no-referrer" onerror="this.classList.add('hidden')" />` : '<div class="auctionItemFallback">拍卖</div>'}</div>` +
+        `  <div class="auctionItemMeta">` +
+        `    <div class="auctionItemTitleRow"><span class="auctionItemTitle">${escapeHtml(title)}</span><span class="${status.cls}">${escapeHtml(status.text)}</span></div>` +
+        `    <div class="auctionItemPrice"><span class="auctionItemPriceValue">${currentPrice}</span> BOB 币</div>` +
+        `    <div class="auctionItemSub">${settled ? escapeHtml(winnerText) : (bidder ? `最高出价：${escapeHtml(bidder)} · ${bids} 次出价` : `起拍 ${Number(row?.start_price || 0)} BOB 币 · ${bids} 次出价`)}</div>` +
+        `    <div class="auctionItemBottom"><span class="auctionCountdown" data-auction-countdown="${id}">${escapeHtml(auctionCountdownText(row))}</span><span class="auctionItemGo">查看详情 ›</span></div>` +
+        `  </div>` +
+        `</article>`
+      );
+    }).join('');
+    refreshAuctionCountdowns();
+  }
+
+  // 竞拍面板现在挂在「市场」tab 下的子标签里
+  function isAuctionVisible() {
+    return state.activeTab === 'market' && (state.marketTab === 'auction' || state.marketTab === 'auction-mine');
+  }
+
+  function applyMarketTabUi() {
+    const tab = ['buy', 'auction', 'sell', 'auction-mine'].includes(state.marketTab) ? state.marketTab : 'buy';
+    document.querySelectorAll('[data-market-tab]').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-market-tab') === tab);
+    });
+    setHidden('marketPanelBuy', tab !== 'buy');
+    setHidden('auctionPanelLive', tab !== 'auction');
+    setHidden('marketPanelSell', tab !== 'sell');
+    setHidden('auctionPanelMine', tab !== 'auction-mine');
+  }
+
+  function switchMarketTab(tab) {
+    const next = ['buy', 'auction', 'sell', 'auction-mine'].includes(tab) ? tab : 'buy';
+    const prev = state.marketTab;
+    state.marketTab = next;
+    applyMarketTabUi();
+    if (next === prev) return;
+    if (next === 'auction') {
+      loadAuctionList().catch(() => null);
+    } else if (next === 'auction-mine') {
+      loadMyAuction().catch(() => null);
+    } else {
+      loadMarketData().catch(() => null);
+    }
+  }
+
+  async function loadMyAuction() {
+    const r = await safeFetchJson('/mall/auction/me');
+    if (!r?.data?.ok) {
+      const el = document.getElementById('auctionMineErr');
+      if (el) el.textContent = '加载我的竞拍失败';
+      return;
+    }
+    const errEl = document.getElementById('auctionMineErr');
+    if (errEl) errEl.textContent = '';
+    state.myAuction = {
+      bids: Array.isArray(r.data?.bids) ? r.data.bids : [],
+      held_total: Number(r.data?.held_total || 0),
+      held_count: Number(r.data?.held_count || 0),
+    };
+    renderAuctionMine();
+  }
+
+  function renderAuctionMine() {
+    const summaryEl = document.getElementById('auctionMineSummary');
+    const box = document.getElementById('auctionMineList');
+    if (!summaryEl || !box) return;
+    const mine = state.myAuction || { bids: [], held_total: 0, held_count: 0 };
+    summaryEl.innerHTML = (
+      `<div class="auctionMineStat"><span>在押金额</span><strong>${Number(mine.held_total || 0)} BOB 币</strong></div>` +
+      `<div class="auctionMineStat"><span>在押场次</span><strong>${Number(mine.held_count || 0)}</strong></div>` +
+      `<div class="auctionMineStatHelp">出价即冻结，被超出或活动取消后自动退回</div>`
+    );
+    if (!mine.bids.length) {
+      box.innerHTML = '<div class="auctionEmpty">还没有出价记录</div>';
+      return;
+    }
+    box.innerHTML = mine.bids.map((row) => {
+      const stateText = row?.state === 'held'
+        ? '在押中'
+        : row?.state === 'won'
+          ? '竞得'
+          : '已退回';
+      const stateCls = row?.state === 'held'
+        ? 'auctionTag auctionTagActive'
+        : row?.state === 'won'
+          ? 'auctionTag auctionTagWon'
+          : 'auctionTag auctionTagSettled';
+      const activityStatus = auctionStatusMeta(
+        row?.state === 'held' && String(row?.activity_status || '') === 'active' ? 'active' : row?.activity_status,
+      );
+      const resultText = row?.state === 'won'
+        ? `成交价 ${Number(row?.final_price || 0)} BOB 币 · 奖品在「订单」页出示二维码领取`
+        : '';
+      return (
+        `<article class="auctionMineItem" data-auction-open="${Number(row?.activity_id || 0)}">` +
+        `  <div class="auctionMineInfo">` +
+        `    <div class="auctionItemTitleRow"><span class="auctionItemTitle">${escapeHtml(String(row?.title || '-'))}</span><span class="${stateCls}">${escapeHtml(stateText)}</span></div>` +
+        `    <div class="auctionItemSub">我的出价 ${Number(row?.amount || 0)} BOB 币 · ${escapeHtml(activityStatus.text)}${resultText ? ` · ${escapeHtml(resultText)}` : ''}</div>` +
+        `    <div class="auctionItemSub muted">${escapeHtml(fmtTs(row?.created_at) || '')}</div>` +
+        `  </div>` +
+        `  <span class="auctionItemGo">详情 ›</span>` +
+        `</article>`
+      );
+    }).join('');
+  }
+
+  async function loadAuctionDetail(id) {
+    const reqStartMs = Date.now();
+    const r = await safeFetchJson(`/mall/auction/detail?id=${encodeURIComponent(id)}`);
+    const reqEndMs = Date.now();
+    const errEl = document.getElementById('auctionDetailErr');
+    if (!r?.data?.ok) {
+      if (errEl) errEl.textContent = humanizeAuctionError(r?.data?.error, r.status);
+      return null;
+    }
+    if (errEl) errEl.textContent = '';
+    smoothAuctionOffset(r.data?.server_time_ms, r.data?.server_time, reqStartMs, reqEndMs);
+    state.auctionDetail = {
+      activity: r.data?.data || null,
+      my_bid: r.data?.my_bid || null,
+    };
+    renderAuctionDetail();
+    return state.auctionDetail;
+  }
+
+  function renderAuctionDetail() {
+    const body = document.getElementById('auctionDetailBody');
+    if (!body || !state.auctionDetail?.activity) return;
+    const a = state.auctionDetail.activity;
+    const myBid = state.auctionDetail.my_bid;
+    const status = auctionStatusMeta(a.effective_status);
+    const currentPrice = a.current_price !== null && a.current_price !== undefined
+      ? Number(a.current_price)
+      : Number(a.start_price || 0);
+    const floor = Number(a.next_bid_floor || 0);
+    const now = auctionNowSec();
+    const imageUrl = a.image_url ? String(a.image_url) : '';
+    // 员工端响应不含 current_bid_userid；每场至多一条 held 出价（唯一索引保证），
+    // 因此「我最近一条出价是 held」等价于「我是当前最高出价人」。
+    const iAmHighest = myBid?.state === 'held';
+
+    const bidsHtml = (a.bids || []).length
+      ? a.bids.map((bid) => (
+        `<div class="auctionBidRow${bid.state === 'held' ? ' auctionBidRowHeld' : ''}">` +
+        `<span class="auctionBidName">${escapeHtml(String(bid.display_name || '用户'))}</span>` +
+        `<span class="auctionBidAmount">${Number(bid.amount || 0)} BOB 币</span>` +
+        `<span class="auctionBidTime">${escapeHtml(fmtTs(bid.created_at) || '')}</span>` +
+        `</div>`
+      )).join('')
+      : '<div class="auctionEmpty">暂无出价</div>';
+
+    const statusLine = a.effective_status === 'scheduled'
+      ? `距开始 ${formatAuctionCountdown(Math.max(0, Number(a.start_at || 0) - now))}`
+      : a.effective_status === 'active'
+        ? `距结束 ${formatAuctionCountdown(Math.max(0, Number(a.end_at || 0) - now))}`
+        : status.text;
+
+    body.innerHTML = (
+      (imageUrl ? `<div class="auctionDetailMedia"><img src="${escapeHtml(imageUrl)}" alt="" referrerpolicy="no-referrer" /></div>` : '') +
+      `<div class="auctionDetailTitleRow"><div class="auctionDetailTitle">${escapeHtml(String(a.title || '-'))}</div><span class="${status.cls}">${escapeHtml(status.text)}</span></div>` +
+      (a.description ? `<div class="auctionDetailDesc">${escapeHtml(String(a.description))}</div>` : '') +
+      `<div class="auctionDetailGrid">` +
+      `<div class="auctionDetailCell"><span>当前价</span><strong>${currentPrice} BOB 币</strong></div>` +
+      `<div class="auctionDetailCell"><span>最低加价</span><strong>${Number(a.min_increment || 0)} BOB 币</strong></div>` +
+      `<div class="auctionDetailCell"><span>出价次数</span><strong>${Number(a.bid_count || 0)}</strong></div>` +
+      `<div class="auctionDetailCell"><span class="auctionCountdown" data-auction-countdown="${Number(a.id || 0)}">${escapeHtml(statusLine)}</span><strong>${escapeHtml(a.effective_status === 'scheduled' ? '等待开始' : iAmHighest ? '你正在领先' : (a.current_bidder_name ? `领先：${String(a.current_bidder_name)}` : '暂无出价'))}</strong></div>` +
+      `</div>` +
+      (a.anti_snipe_seconds > 0 && a.effective_status === 'active'
+        ? `<div class="help">结束前 ${Number(a.anti_snipe_seconds)} 秒内的出价会自动顺延结束时间。</div>`
+        : '') +
+      (a.effective_status === 'settled'
+        ? `<div class="auctionResultBanner">${a.winner_name ? `🏆 ${escapeHtml(String(a.winner_name))} 以 ${Number(a.final_price || 0)} BOB 币竞得<div class="auctionResultHint">奖品领取：请到「订单」页出示核销二维码</div>` : '本场无人出价，已流拍'}</div>`
+        : '') +
+      (a.effective_status === 'cancelled'
+        ? `<div class="auctionResultBanner auctionResultCancelled">该竞拍已取消${a.cancel_reason ? `：${escapeHtml(String(a.cancel_reason))}` : ''}，在押金额已退回。</div>`
+        : '') +
+      (myBid ? `<div class="auctionMyBidLine">我的最近出价：${Number(myBid.amount || 0)} BOB 币（${myBid.state === 'held' ? '在押中' : myBid.state === 'won' ? '已竞得' : '已退回'}）</div>` : '') +
+      `<div class="auctionDetailSectionTitle">出价记录</div>` +
+      `<div class="auctionBidList">${bidsHtml}</div>`
+    );
+
+    const bidBtn = document.getElementById('btnAuctionBidOpen');
+    if (bidBtn) {
+      const canBid = a.effective_status === 'active' && !iAmHighest;
+      bidBtn.classList.toggle('hidden', !canBid);
+      bidBtn.textContent = '我要出价';
+    }
+    refreshAuctionCountdowns();
+  }
+
+  function openAuctionDetail(id) {
+    state.auctionDetailId = Number(id) || null;
+    state.auctionDetail = null;
+    const body = document.getElementById('auctionDetailBody');
+    if (body) body.innerHTML = '<div class="auctionEmpty">加载中…</div>';
+    const errEl = document.getElementById('auctionDetailErr');
+    if (errEl) errEl.textContent = '';
+    const bidBtn = document.getElementById('btnAuctionBidOpen');
+    if (bidBtn) bidBtn.classList.add('hidden');
+    const modal = document.getElementById('auctionDetailModal');
+    if (modal) modal.classList.remove('hidden');
+    loadAuctionDetail(id);
+  }
+
+  function closeAuctionDetail() {
+    state.auctionDetailId = null;
+    state.auctionDetail = null;
+    const modal = document.getElementById('auctionDetailModal');
+    if (modal) modal.classList.add('hidden');
+    closeAuctionBidModal();
+  }
+
+  function openAuctionBidModal() {
+    const detail = state.auctionDetail;
+    if (!detail?.activity) return;
+    const a = detail.activity;
+    if (a.effective_status !== 'active') {
+      showNotice('竞拍当前不可出价', 'error');
+      return;
+    }
+    setText('auctionBidTitle', String(a.title || '-'));
+    setText('auctionBidCurrent', `${a.current_price !== null && a.current_price !== undefined ? Number(a.current_price) : Number(a.start_price || 0)} BOB 币`);
+    const floor = Number(a.next_bid_floor || 0);
+    setText('auctionBidFloorHint', `最低可出价 ${floor} BOB 币（当前价 + 加价幅度 ${Number(a.min_increment || 0)}）`);
+    const input = document.getElementById('auctionBidAmount');
+    if (input) {
+      input.min = String(floor);
+      input.value = String(floor);
+    }
+    const errEl = document.getElementById('auctionBidErr');
+    if (errEl) errEl.textContent = '';
+    const modal = document.getElementById('auctionBidModal');
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  function closeAuctionBidModal() {
+    const modal = document.getElementById('auctionBidModal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  async function confirmAuctionBid() {
+    const detail = state.auctionDetail;
+    if (!detail?.activity || state.auctionBidInFlight) return;
+    const a = detail.activity;
+    const input = document.getElementById('auctionBidAmount');
+    const rawAmount = input ? String(input.value || '').trim() : '';
+    const amount = Number(rawAmount);
+    const errEl = document.getElementById('auctionBidErr');
+    if (!rawAmount || !Number.isFinite(amount) || !Number.isInteger(amount) || amount <= 0) {
+      if (errEl) errEl.textContent = '请输入正确的出价金额（正整数）';
+      return;
+    }
+    const floor = Number(a.next_bid_floor || 0);
+    if (amount < floor) {
+      if (errEl) errEl.textContent = `出价不能低于 ${floor} BOB 币`;
+      return;
+    }
+
+    state.auctionBidInFlight = true;
+    const btn = document.getElementById('btnAuctionBidConfirm');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await safeFetchJson('/mall/auction/bid', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activity_id: Number(a.id), amount }),
+      });
+      if (!r?.data?.ok) {
+        const msg = humanizeAuctionError(r?.data?.error, r.status);
+        if (errEl) errEl.textContent = msg;
+        // 价格可能已被别人抬高，重新拉详情
+        await loadAuctionDetail(a.id);
+        return;
+      }
+      if (errEl) errEl.textContent = '';
+      closeAuctionBidModal();
+      showNotice(`出价成功，已冻结 ${Number(r.data?.amount || amount)} BOB 币`, 'success');
+      await Promise.all([
+        loadAuctionDetail(a.id),
+        refreshBalanceAndLedger(),
+      ]);
+      if (isAuctionVisible()) {
+        await loadAuctionList();
+      }
+    } finally {
+      state.auctionBidInFlight = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function refreshAuctionCountdowns() {
+    const byId = new Map();
+    for (const row of state.auctionList || []) byId.set(Number(row.id), row);
+    if (state.auctionDetail?.activity) byId.set(Number(state.auctionDetail.activity.id), state.auctionDetail.activity);
+    document.querySelectorAll('[data-auction-countdown]').forEach((node) => {
+      const id = Number(node.getAttribute('data-auction-countdown') || 0);
+      const row = byId.get(id);
+      if (!row) return;
+      node.textContent = auctionCountdownText(row) || auctionStatusMeta(row.effective_status).text;
+    });
+  }
+
+  function startAuctionTimer() {
+    if (state.auctionTimer) return;
+    state.auctionTimer = setInterval(() => {
+      if (document.hidden) return;
+      const tabVisible = isAuctionVisible();
+      const modalOpen = !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
+      if (!tabVisible && !modalOpen) return;
+      refreshAuctionCountdowns();
+      // 倒计时归零后自动刷新：scheduled 到点要转入进行中，active 到点要触发服务端结算；
+      // 用 in-flight 标志去重，避免每秒重复重拉
+      const now = auctionNowSec();
+      const due = (state.auctionList || []).some((row) => {
+        const st = String(row.effective_status || '');
+        if (st === 'active') return now >= Number(row.end_at || 0);
+        if (st === 'scheduled') return now >= Number(row.start_at || 0);
+        return false;
+      });
+      const detailDue = state.auctionDetail?.activity && (() => {
+        const st = String(state.auctionDetail.activity.effective_status || '');
+        if (st === 'active') return now >= Number(state.auctionDetail.activity.end_at || 0);
+        if (st === 'scheduled') return now >= Number(state.auctionDetail.activity.start_at || 0);
+        return false;
+      })();
+      if (due && tabVisible && !state.auctionListRefreshing) {
+        state.auctionListRefreshing = true;
+        loadAuctionList().catch(() => null).finally(() => { state.auctionListRefreshing = false; });
+      }
+      if (detailDue && modalOpen && !state.auctionDetailRefreshing) {
+        state.auctionDetailRefreshing = true;
+        loadAuctionDetail(state.auctionDetailId).catch(() => null).finally(() => { state.auctionDetailRefreshing = false; });
+      }
+    }, 1000);
+  }
+
+  function bindAuctionEvents() {
+    const listEl = document.getElementById('auctionList');
+    if (listEl) {
+      listEl.addEventListener('click', (ev) => {
+        const item = ev?.target?.closest ? ev.target.closest('[data-auction-open]') : null;
+        const id = item?.getAttribute ? item.getAttribute('data-auction-open') : '';
+        if (id) openAuctionDetail(id);
+      });
+    }
+    const mineEl = document.getElementById('auctionMineList');
+    if (mineEl) {
+      mineEl.addEventListener('click', (ev) => {
+        const item = ev?.target?.closest ? ev.target.closest('[data-auction-open]') : null;
+        const id = item?.getAttribute ? item.getAttribute('data-auction-open') : '';
+        if (id) openAuctionDetail(id);
+      });
+    }
+
+    document.getElementById('btnAuctionDetailClose')?.addEventListener('click', closeAuctionDetail);
+    document.getElementById('auctionDetailModal')?.addEventListener('click', (ev) => {
+      if (ev?.target?.id === 'auctionDetailModal') closeAuctionDetail();
+    });
+    document.getElementById('btnAuctionBidRefresh')?.addEventListener('click', () => {
+      if (state.auctionDetailId) loadAuctionDetail(state.auctionDetailId).catch(() => null);
+    });
+    document.getElementById('btnAuctionBidOpen')?.addEventListener('click', openAuctionBidModal);
+    document.getElementById('btnAuctionBidClose')?.addEventListener('click', closeAuctionBidModal);
+    document.getElementById('btnAuctionBidCancel')?.addEventListener('click', closeAuctionBidModal);
+    document.getElementById('auctionBidModal')?.addEventListener('click', (ev) => {
+      if (ev?.target?.id === 'auctionBidModal') closeAuctionBidModal();
+    });
+    document.getElementById('btnAuctionBidConfirm')?.addEventListener('click', confirmAuctionBid);
   }
 
   function stripHtml(value) {
@@ -1120,20 +1616,21 @@
       return;
     }
     if (state.activeTab === 'market') {
-      await loadMarketData();
+      if (state.marketTab === 'auction') await loadAuctionList();
+      else if (state.marketTab === 'auction-mine') await loadMyAuction();
+      else await loadMarketData();
       return;
     }
     if (state.activeTab === 'orders') {
       await loadOrders();
       return;
     }
-    if (state.activeTab === 'rich') {
-      if (state.activeRichTab === 'wealth') await loadRichBoard();
-      else await loadPopularProducts();
-      return;
-    }
     if (state.activeTab === 'more') {
       await loadMoreData();
+      if (state.activeMoreTab === 'rich') {
+        if (state.activeRichTab === 'wealth') await loadRichBoard();
+        else await loadPopularProducts();
+      }
     }
   }
 
@@ -1178,7 +1675,7 @@
         if (state.activeTab === 'more') {
           await loadMoreData();
         }
-        if (state.activeTab === 'rich' && state.activeRichTab === 'wealth') {
+        if (state.activeTab === 'more' && state.activeMoreTab === 'rich' && state.activeRichTab === 'wealth') {
           await loadRichBoard();
         }
         if (state.activeTab === 'market') {
@@ -1194,7 +1691,7 @@
           await loadMarketData();
         }
       });
-      if (state.activeTab === 'rich' && state.activeRichTab === 'products') {
+      if (state.activeTab === 'more' && state.activeMoreTab === 'rich' && state.activeRichTab === 'products') {
         scheduleRealtimeTask('rich_products', async () => {
           await loadPopularProducts();
         });
@@ -1205,7 +1702,7 @@
       scheduleRealtimeTask('products', async () => {
         await loadProducts(undefined, { force: true });
       });
-      if (state.activeTab === 'rich' && state.activeRichTab === 'products') {
+      if (state.activeTab === 'more' && state.activeMoreTab === 'rich' && state.activeRichTab === 'products') {
         scheduleRealtimeTask('rich_products', async () => {
           await loadPopularProducts();
         });
@@ -1244,6 +1741,23 @@
       scheduleRealtimeTask('red_packet', async () => {
         await loadRedPacketStatus();
       }, 20);
+      return;
+    }
+    if (eventName === 'auction_changed') {
+      scheduleRealtimeTask('auction', async () => {
+        const detailOpen = state.auctionDetailId
+          && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
+        if (detailOpen) {
+          await loadAuctionDetail(state.auctionDetailId);
+        }
+        if (isAuctionVisible()) {
+          if (state.marketTab === 'auction-mine') {
+            await loadMyAuction();
+          } else {
+            await loadAuctionList();
+          }
+        }
+      }, 60);
       return;
     }
     if (eventName === 'announcement_access_changed') {
@@ -1286,7 +1800,7 @@
       setRealtimeNotice('实时连接正在重试...');
     };
 
-    ['snapshot', 'ping', 'balance_changed', 'order_updated', 'products_changed', 'charity_changed', 'opening_changed', 'market_changed', 'red_packet_changed', 'more_changed', 'announcement_access_changed']
+    ['snapshot', 'ping', 'balance_changed', 'order_updated', 'products_changed', 'charity_changed', 'opening_changed', 'market_changed', 'red_packet_changed', 'auction_changed', 'more_changed', 'announcement_access_changed']
       .forEach((eventName) => {
         source.addEventListener(eventName, (evt) => {
           if (state.eventsSource !== source) return;
@@ -2264,6 +2778,7 @@
       subnav.setAttribute('data-active-more-tab', state.activeMoreTab || 'announcements');
     }
     setHidden('morePanelAnnouncements', state.activeMoreTab !== 'announcements');
+    setHidden('morePanelRich', state.activeMoreTab !== 'rich');
     setHidden('morePanelFaq', state.activeMoreTab !== 'faq');
     setHidden('morePanelStats', state.activeMoreTab !== 'stats');
     setHidden('morePanelVersion', state.activeMoreTab !== 'version');
@@ -2271,11 +2786,21 @@
   }
 
   function switchMoreTab(name) {
-    const next = name === 'faq' || name === 'stats' || name === 'version' || name === 'feedback'
+    const next = name === 'faq' || name === 'rich' || name === 'stats' || name === 'version' || name === 'feedback'
       ? name
       : 'announcements';
+    const prev = state.activeMoreTab;
     state.activeMoreTab = next;
     applyMoreTabUi();
+    if (next === prev || state.activeTab !== 'more') return;
+    if (next === 'rich') {
+      applyRichTabUi();
+      if (state.activeRichTab === 'wealth') {
+        loadRichBoard().catch(() => null);
+      } else {
+        loadPopularProducts().catch(() => null);
+      }
+    }
   }
 
   function isProductInStock(p) {
@@ -2296,8 +2821,18 @@
   }
 
   function switchTab(name) {
-    const tab = name === 'shop' || name === 'orders' || name === 'rich' || name === 'more' || name === 'market'
-      ? name
+    // 兼容旧入口链接：?tab=auction / ?tab=rich
+    let requested = name;
+    let legacySub = '';
+    if (requested === 'auction') {
+      requested = 'market';
+      legacySub = 'auction';
+    } else if (requested === 'rich') {
+      requested = 'more';
+      legacySub = 'rich';
+    }
+    const tab = requested === 'shop' || requested === 'orders' || requested === 'more' || requested === 'market'
+      ? requested
       : 'balance';
     state.activeTab = tab;
 
@@ -2307,7 +2842,6 @@
     });
 
     setHidden('tabBalance', tab !== 'balance');
-    setHidden('tabRich', tab !== 'rich');
     setHidden('tabShop', tab !== 'shop');
     setHidden('shopActions', tab !== 'shop');
     setHidden('tabMarket', tab !== 'market');
@@ -2317,20 +2851,36 @@
     if (tab === 'balance') {
       refreshBalanceAndLedger();
     }
-    if (tab === 'rich') {
-      applyRichTabUi();
-      if (state.activeRichTab === 'wealth') {
-        loadRichBoard();
-      } else if (state.activeRichTab === 'products') {
-        loadPopularProducts();
-      }
-    }
     if (tab === 'more') {
+      if (legacySub === 'rich' || state.activeMoreTab === 'rich') {
+        state.activeMoreTab = 'rich';
+      }
       applyMoreTabUi();
       loadMoreData();
+      if (state.activeMoreTab === 'rich') {
+        applyRichTabUi();
+        if (state.activeRichTab === 'wealth') {
+          loadRichBoard().catch(() => null);
+        } else {
+          loadPopularProducts().catch(() => null);
+        }
+      }
     }
     if (tab === 'market') {
-      loadMarketData();
+      if (legacySub === 'auction' || state.marketTab === 'auction' || state.marketTab === 'auction-mine') {
+        state.marketTab = legacySub === 'auction' ? 'auction' : state.marketTab;
+      } else {
+        state.marketTab = 'buy';
+      }
+      applyMarketTabUi();
+      startAuctionTimer();
+      if (state.marketTab === 'auction') {
+        loadAuctionList().catch(() => null);
+      } else if (state.marketTab === 'auction-mine') {
+        loadMyAuction().catch(() => null);
+      } else {
+        loadMarketData();
+      }
     }
 
     if (state.opening) {
@@ -2343,7 +2893,7 @@
     try {
       const sp = new URLSearchParams(window.location.search || '');
       const t = sp.get('tab');
-      if (t === 'shop' || t === 'orders' || t === 'balance' || t === 'rich' || t === 'more' || t === 'market') return t;
+      if (t === 'shop' || t === 'orders' || t === 'balance' || t === 'rich' || t === 'more' || t === 'market' || t === 'auction') return t;
       return null;
     } catch (_) {
       return null;
@@ -2365,6 +2915,11 @@
     }
     if (r.startsWith('公益助力：')) return r;
     if (r === 'red_packet') return '红包收入';
+    if (r === 'auction_bid') return '竞拍出价（冻结）';
+    if (r === 'auction_outbid_refund') return '竞拍被超出退回';
+    if (r === 'auction_cancel_refund') return '竞拍取消退回';
+    if (r === 'auction_settle_refund') return '竞拍成交释放冻结';
+    if (r === 'auction_win_pay') return '竞拍成交扣款';
     if (r === 'admin_deduct') return '管理员扣币';
     if (r === 'redeem') return '核销扣币';
     if (r === 'grant') return '系统发币';
@@ -2936,6 +3491,8 @@
         const pill = isListed
           ? '<span class="pill pillListed">挂单中</span>'
           : (isPending ? '<span class="pill pillOk">待核销</span>' : '<span class="pill pillBad">已核销</span>');
+        const isAuction = String(x?.redeem_source || '') === 'auction';
+        const auctionPill = isAuction ? ' <span class="pill pillAuction">竞拍竞得</span>' : '';
         const title = name || pid || '-';
 
         const clickableClass = isPending ? ' orderClickable' : '';
@@ -2943,7 +3500,7 @@
         return (
           `<div class="item${clickableClass}"${dataAttr}>` +
           `<div class="orderTop">` +
-          `<div class="orderTitle">${pill} <span style="margin-left:8px;">${escapeHtml(title)}</span></div>` +
+          `<div class="orderTitle">${pill}${auctionPill} <span style="margin-left:8px;">${escapeHtml(title)}</span></div>` +
           `<div class="orderMeta mono">${escapeHtml(ts)}</div>` +
           `</div>` +
           `</div>`
@@ -4532,6 +5089,8 @@
           });
 
           startRedPacketTimer();
+          startAuctionTimer();
+          bindAuctionEvents();
           ensureMallRealtime(true);
 
           document.addEventListener('visibilitychange', () => {
@@ -4920,16 +5479,13 @@
             });
           }
 
-          // Market sub-tab 切换
+          // Market sub-tab 切换（在售/竞拍大厅/我的出售/我的竞拍）
           const marketSubnav = document.getElementById('marketSubnav');
           if (marketSubnav) {
             marketSubnav.addEventListener('click', (ev) => {
               const btn = ev?.target?.closest ? ev.target.closest('[data-market-tab]') : null;
               if (!btn) return;
-              const tab = btn.getAttribute('data-market-tab');
-              marketSubnav.querySelectorAll('.segBtn').forEach((b) => b.classList.toggle('active', b === btn));
-              setHidden('marketPanelBuy', tab !== 'buy');
-              setHidden('marketPanelSell', tab !== 'sell');
+              switchMarketTab(btn.getAttribute('data-market-tab'));
             });
           }
 
@@ -4961,8 +5517,8 @@
                 balanceText: '',
                 createdAt: row?.created_at ?? null,
                 cdkInfoAvailable: row?.cdk_info_available === true || Number(row?.cdk_info_available || 0) === 1,
-                marketListAvailable: true,
-                refundAvailable: row?.redeem_source !== 'cdk',
+                marketListAvailable: String(row?.redeem_source || '') !== 'auction',
+                refundAvailable: row?.redeem_source !== 'cdk' && row?.redeem_source !== 'auction',
               });
               return;
             }

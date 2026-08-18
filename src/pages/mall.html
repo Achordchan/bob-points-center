@@ -50,7 +50,6 @@
 
       <nav class="navLarge" aria-label="导航">
         <button class="navBtn active" type="button" data-tab="balance"><span>余额</span></button>
-        <button class="navBtn" type="button" data-tab="rich"><span>排行</span></button>
         <button class="navBtn" type="button" data-tab="shop"><span>商城</span></button>
         <button class="navBtn" type="button" data-tab="market"><span>市场</span></button>
         <button class="navBtn" type="button" data-tab="orders"><span>订单</span></button>
@@ -240,17 +239,25 @@
 
         <section class="tab hidden" id="tabMarket">
           <div class="sectionHead">
-            <div class="sectionTitle">交易市场</div>
-            <div class="help">同事之间自由买卖未使用的商品</div>
+            <div class="sectionTitle">市场与竞拍</div>
+            <div class="help">买卖同事转让的商品，或用 BOB 币竞拍心仪奖品</div>
           </div>
 
           <div class="marketSubnav" id="marketSubnav">
             <button class="segBtn active" type="button" data-market-tab="buy">在售商品</button>
+            <button class="segBtn" type="button" data-market-tab="auction">竞拍大厅</button>
             <button class="segBtn" type="button" data-market-tab="sell">我的出售</button>
+            <button class="segBtn" type="button" data-market-tab="auction-mine">我的竞拍</button>
           </div>
 
           <section class="marketPanel card glass" id="marketPanelBuy">
             <div class="marketList" id="marketListings"></div>
+          </section>
+
+          <section class="marketPanel card glass hidden" id="auctionPanelLive">
+            <div class="auctionIntro help">出价即冻结 BOB 币，被他人超出自动退回；竞得后在「订单」页领取。</div>
+            <div class="auctionList" id="auctionList"></div>
+            <div class="error" id="auctionListErr"></div>
           </section>
 
           <section class="marketPanel card glass hidden" id="marketPanelSell">
@@ -267,33 +274,13 @@
             </div>
           </section>
 
+          <section class="marketPanel card glass hidden" id="auctionPanelMine">
+            <div class="auctionMineSummary" id="auctionMineSummary"></div>
+            <div class="auctionList" id="auctionMineList"></div>
+            <div class="error" id="auctionMineErr"></div>
+          </section>
+
           <div class="error" id="marketErr"></div>
-        </section>
-
-        <section class="tab hidden" id="tabRich">
-          <div class="sectionHead richHead">
-            <div class="sectionTitle">排行榜</div>
-            <div class="help">展示各种排行榜数据</div>
-          </div>
-          
-          <div class="richSubnav" id="richSubnav">
-            <button class="segBtn" type="button" data-rich-tab="wealth">大富翁排行榜</button>
-            <button class="segBtn" type="button" data-rich-tab="products">热门商品下单榜</button>
-          </div>
-
-          <div class="card glass richCard" id="richPanelWealth">
-            <div class="sectionTitle">大富翁排行榜</div>
-            <div class="help">展示当前 BOB 币最多的用户（按余额排行）</div>
-            <div class="richBoardList" id="richBoardList"></div>
-            <div class="error" id="richBoardErr"></div>
-          </div>
-
-          <div class="card glass richCard hidden" id="richPanelProducts">
-            <div class="sectionTitle">热门商品下单榜</div>
-            <div class="help">展示下单次数最多的商品排行</div>
-            <div class="richBoardList" id="popularProductsList"></div>
-            <div class="error" id="popularProductsErr"></div>
-          </div>
         </section>
 
         <section class="tab hidden" id="tabOrders">
@@ -332,6 +319,7 @@
             <div class="moreSubnav" id="moreSubnav">
               <button class="segBtn" type="button" data-more-tab="announcements">公告</button>
               <button class="segBtn" type="button" data-more-tab="faq">规则FAQ</button>
+              <button class="segBtn" type="button" data-more-tab="rich">排行榜</button>
               <button class="segBtn" type="button" data-more-tab="stats">我的数据</button>
               <button class="segBtn" type="button" data-more-tab="version">版本</button>
               <button class="segBtn" type="button" data-more-tab="feedback">反馈</button>
@@ -343,6 +331,31 @@
             <div class="help">最新通知会显示在这里。</div>
             <div class="list moreList" id="moreAnnouncements"></div>
             <div class="error" id="moreAnnouncementsErr"></div>
+          </div>
+
+          <div class="card glass moreCard hidden" id="morePanelRich">
+            <div class="sectionHead richHead" style="margin-top:0;">
+              <div>
+                <div class="sectionTitle">排行榜</div>
+                <div class="help">展示各种排行榜数据</div>
+              </div>
+            </div>
+            <div class="richSubnav" id="richSubnav">
+              <button class="segBtn" type="button" data-rich-tab="wealth">大富翁排行榜</button>
+              <button class="segBtn" type="button" data-rich-tab="products">热门商品下单榜</button>
+            </div>
+            <div class="card glass richCard" id="richPanelWealth">
+              <div class="sectionTitle">大富翁排行榜</div>
+              <div class="help">展示当前 BOB 币最多的用户（按余额排行）</div>
+              <div class="richBoardList" id="richBoardList"></div>
+              <div class="error" id="richBoardErr"></div>
+            </div>
+            <div class="card glass richCard hidden" id="richPanelProducts">
+              <div class="sectionTitle">热门商品下单榜</div>
+              <div class="help">展示下单次数最多的商品排行</div>
+              <div class="richBoardList" id="popularProductsList"></div>
+              <div class="error" id="popularProductsErr"></div>
+            </div>
           </div>
 
           <div class="card glass moreCard hidden" id="morePanelFaq">
@@ -835,6 +848,70 @@
         <div class="row modalActions" style="margin-top: 12px;">
           <button class="secondary" id="btnMarketListCancel" type="button">取消</button>
           <button class="buyBtn" id="btnMarketListConfirm" type="button">下一步</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="auctionDetailModal">
+      <div class="modalBox auctionDetailBox">
+        <div class="modalTop">
+          <div>
+            <div class="modalTitle">竞拍详情</div>
+            <div class="modalSub" id="auctionDetailSub">实时价格与倒计时</div>
+          </div>
+          <button class="iconBtn" id="btnAuctionDetailClose" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="auctionDetailScroll">
+          <div class="auctionDetail" id="auctionDetailBody"></div>
+        </div>
+        <div class="error" id="auctionDetailErr"></div>
+        <div class="row modalActions" style="margin-top: 12px;">
+          <button class="secondary" id="btnAuctionBidRefresh" type="button">刷新</button>
+          <button class="buyBtn hidden" id="btnAuctionBidOpen" type="button">我要出价</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="auctionBidModal">
+      <div class="modalBox">
+        <div class="modalTop">
+          <div>
+            <div class="modalTitle">确认出价</div>
+            <div class="modalSub">出价后立即冻结对应 BOB 币，被他人超出时自动退回</div>
+          </div>
+          <button class="iconBtn" id="btnAuctionBidClose" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="confirmBody">
+          <div class="confirmLine">
+            <div class="muted">竞拍</div>
+            <div class="confirmValue" id="auctionBidTitle">-</div>
+          </div>
+          <div class="confirmLine">
+            <div class="muted">当前价</div>
+            <div class="confirmValue" id="auctionBidCurrent">-</div>
+          </div>
+          <div class="confirmLine">
+            <div class="muted">出价金额</div>
+            <div class="confirmValue">
+              <input id="auctionBidAmount" type="number" min="1" step="1" placeholder="最低 X" />
+            </div>
+          </div>
+          <div class="help" id="auctionBidFloorHint">-</div>
+        </div>
+        <div class="error" id="auctionBidErr"></div>
+        <div class="row modalActions" style="margin-top: 12px;">
+          <button class="secondary" id="btnAuctionBidCancel" type="button">取消</button>
+          <button class="buyBtn" id="btnAuctionBidConfirm" type="button">确认出价</button>
         </div>
       </div>
     </div>

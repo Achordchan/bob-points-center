@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
 import { requireBobToken } from '../middleware/requireBobToken.js';
+import { createRateLimiter } from '../middleware/rateLimit.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
@@ -16,6 +17,14 @@ import { publishMallRealtimeEvent, registerMallRealtimeClient } from '../service
 import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../services/mallProductsCache.js';
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
+import {
+  getAuctionDetailForMall,
+  getMyAuctionBidForActivity,
+  listAuctionActivitiesForMall,
+  listMyAuctionBids,
+  notifyAuctionWinners,
+  placeAuctionBid,
+} from '../services/auctionService.js';
 import { createQrRenderPath } from '../services/qrImageService.js';
 import { getSiteVisibilitySettings } from '../services/systemSettings.js';
 import {
@@ -490,6 +499,14 @@ function buildQrForRedeem({ exchange_id, userid, product_id, product_name, bob_a
 
 export function mallRouter() {
   const router = Router();
+  // 出价按 userid 限流：办公网 NAT 下同 IP 是全公司共享额度，仅按 IP 限会在
+  // 热门场次收尾时误伤；IP 级限流（app.js，60/min）保留为 DoS 防护层。
+  const auctionUserBidLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 20,
+    keyFn: (req) => (req.webSession?.userid ? `auction_bid_user:${String(req.webSession.userid)}` : ''),
+    message: '出价过于频繁，请稍后再试',
+  });
   // 站点关闭时拦截业务 API（含购买/交易/公益/反馈写接口）；HTML 入口继续走页面 gate。
   // 仅放行：首页/screen/events 页面与红包大屏公开读。
   router.use((req, res, next) => {
@@ -766,8 +783,8 @@ export function mallRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const [balanceRow, pendingRow, fulfilledRow, rankRow, feedbackRow] = await Promise.all([
         db.get('SELECT COALESCE(balance, 0) AS balance FROM accounts WHERE userid = ? LIMIT 1', [userid]),
-        db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NULL AND exchange_id LIKE 'MALL_%'", [userid]),
-        db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NOT NULL AND exchange_id LIKE 'MALL_%'", [userid]),
+        db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NULL AND (exchange_id LIKE 'MALL_%' OR exchange_id LIKE 'AUCTION_%')", [userid]),
+        db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NOT NULL AND (exchange_id LIKE 'MALL_%' OR exchange_id LIKE 'AUCTION_%')", [userid]),
         db.get(
           `SELECT rank FROM (
              SELECT userid, ROW_NUMBER() OVER (ORDER BY balance DESC, userid COLLATE NOCASE ASC) AS rank
@@ -987,6 +1004,160 @@ export function mallRouter() {
       const errorCode = isDuplicateClaim ? 'already_claimed' : isBusy ? 'concurrent_limit' : msg;
       const status = isBusy ? 429 : 400;
       return res.status(status).json({ error: errorCode });
+    }
+  });
+
+  function mapAuctionBidError(err) {
+    const msg = String(err?.message || err || '');
+    const pgCode = String(err?.code || '');
+    if (pgCode === '23505') return { status: 409, code: 'concurrent_bid_conflict' };
+    if (pgCode === '55P03' || pgCode === '40P01') return { status: 429, code: 'concurrent_limit' };
+    switch (msg) {
+      case 'auction not found':
+        return { status: 404, code: msg };
+      case 'invalid activity_id':
+      case 'invalid amount':
+      case 'not_started':
+      case 'auction ended':
+      case 'auction_cancelled':
+      case 'bid_too_low':
+      case 'already_highest_bidder':
+      case 'insufficient balance':
+        return { status: 400, code: msg };
+      default:
+        return { status: 500, code: msg };
+    }
+  }
+
+  router.get('/auction/list', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
+    const db = req.app.locals.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const nowMs = Date.now();
+      const now = Math.floor(nowMs / 1000);
+      const limitRaw = toOptionalInt(req.query?.limit);
+      const result = await listAuctionActivitiesForMall(db, {
+        now,
+        limit: limitRaw || 20,
+      });
+      if (result.settledWinners?.length) {
+        for (const winner of result.settledWinners) {
+          const activity = result.list.find((x) => x.id === winner.activity_id);
+          winner.title = activity ? activity.title : '';
+        }
+        notifyAuctionWinners({ db, cfg: req.app?.locals?.cfg, winners: result.settledWinners });
+        publishMallRealtimeEvent('auction_changed', { reason: 'settled' });
+      }
+      return res.json({
+        ok: true,
+        data: result.list,
+        server_time: now,
+        server_time_ms: nowMs,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.get('/auction/detail', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const activityId = toOptionalInt(req.query?.id);
+    if (!activityId) {
+      return res.status(400).json({ error: 'invalid activity_id' });
+    }
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const nowMs = Date.now();
+      const now = Math.floor(nowMs / 1000);
+      const result = await getAuctionDetailForMall(db, { activityId, now });
+      if (result.settledWinner) {
+        result.settledWinner.title = result.activity.title;
+        notifyAuctionWinners({ db, cfg: req.app?.locals?.cfg, winners: [result.settledWinner] });
+        publishMallRealtimeEvent('auction_changed', { reason: 'settled', activity_id: activityId });
+      }
+      const myBid = await getMyAuctionBidForActivity(db, { activityId, userid });
+      return res.json({
+        ok: true,
+        data: result.activity,
+        my_bid: myBid,
+        server_time: now,
+        server_time_ms: nowMs,
+      });
+    } catch (err) {
+      const mapped = mapAuctionBidError(err);
+      return res.status(mapped.status).json({ error: mapped.code });
+    }
+  });
+
+  router.get('/auction/me', requireWebSession(), requireAnnouncementAccess(), async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const limitRaw = toOptionalInt(req.query?.limit);
+      const data = await listMyAuctionBids(db, { userid, limit: limitRaw || 50 });
+      return res.json({ ok: true, ...data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/auction/bid', requireWebSession(), requireAnnouncementAccess(), auctionUserBidLimiter, async (req, res) => {
+    const db = req.app.locals.db;
+    const userid = req.webSession?.userid ? String(req.webSession.userid) : '';
+    const name = req.webSession?.name ? String(req.webSession.name) : '';
+    if (!userid) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const activityId = toOptionalInt(req.body?.activity_id);
+    const amount = toOptionalInt(req.body?.amount);
+    try {
+      const result = await placeAuctionBid(db, {
+        activityId,
+        userid,
+        name,
+        amount,
+      });
+      if (result.refunded_to) {
+        sendOrQueueNotify({
+          db,
+          cfg: req.app?.locals?.cfg,
+          userid: result.refunded_to,
+          title: '【BOB币中心】竞拍出价被超出',
+          lines: [
+            `竞拍 #${result.activity_id} 有新的更高出价 ${String(result.amount)} BOB 币`,
+            '你此前冻结的出价金额已全额退回余额。',
+          ],
+          event: 'auction',
+          variables: {
+            amount: String(result.amount),
+            activity_id: String(result.activity_id),
+          },
+        }).catch(() => null);
+        publishMallRealtimeEvent('balance_changed', {
+          userid: result.refunded_to,
+          reason: 'auction_outbid_refund',
+        });
+      }
+      publishMallRealtimeEvent('balance_changed', { userid, reason: 'auction_bid' });
+      publishMallRealtimeEvent('auction_changed', {
+        activity_id: result.activity_id,
+        reason: 'bid',
+      });
+      const serverNowMs = Date.now();
+      return res.json({
+        ok: true,
+        ...result,
+        server_time: Math.floor(serverNowMs / 1000),
+        server_time_ms: serverNowMs,
+      });
+    } catch (err) {
+      const mapped = mapAuctionBidError(err);
+      return res.status(mapped.status).json({ error: mapped.code });
     }
   });
 
@@ -1570,14 +1741,18 @@ export function mallRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const rows = await db.all(
         `SELECT r.exchange_id, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
-                CASE WHEN c.id IS NULL THEN 'purchase' ELSE 'cdk' END AS redeem_source,
+                CASE
+                  WHEN r.exchange_id LIKE 'AUCTION_%' THEN 'auction'
+                  WHEN c.id IS NULL THEN 'purchase'
+                  ELSE 'cdk'
+                END AS redeem_source,
                 CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS cdk_info_available,
                 CASE WHEN active_l.listing_id IS NOT NULL THEN 1 ELSE 0 END AS is_listed
            FROM redeems r
            LEFT JOIN redeem_cdks c ON c.redeem_exchange_id = r.exchange_id
            LEFT JOIN mall_order_listings active_l
              ON active_l.exchange_id = r.exchange_id AND active_l.status = 'active'
-          WHERE r.userid = ? AND (r.exchange_id LIKE 'MALL_%' OR r.exchange_id LIKE 'CDK_%')
+          WHERE r.userid = ? AND (r.exchange_id LIKE 'MALL_%' OR r.exchange_id LIKE 'CDK_%' OR r.exchange_id LIKE 'AUCTION_%')
           ORDER BY r.created_at DESC
           LIMIT ?`,
         [userid, limit],
