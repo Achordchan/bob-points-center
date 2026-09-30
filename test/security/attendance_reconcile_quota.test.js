@@ -6,7 +6,7 @@ import {
   reconcileAttendanceRewards,
   resolveAttendanceUserProfile,
 } from '../../src/services/attendanceRewardService.js';
-import { clearUserProfileCache, getUserProfile } from '../../src/services/dingtalkService.js';
+import { clearUserProfileCache, getUserProfile, invalidateUserProfileCache } from '../../src/services/dingtalkService.js';
 import { handleContactUserEvent } from '../../src/services/dingtalkUserSyncService.js';
 
 function cstTimestamp(date, time) {
@@ -319,6 +319,37 @@ test('缓存命中或合并到别人请求得到的资料不写回本地库，�
       clearUserProfileCache();
       await resolveAttendanceUserProfile(db, wbCfg, 'wb1', { needDepartments: true });
       assert.equal(execs.filter((sql) => /INSERT INTO user_dingtalk_profiles/.test(sql)).length, 1);
+    },
+  );
+  clearUserProfileCache();
+});
+
+test('进行中的请求被作废（如全量同步写入）：发起者与合并者都不写回、不用于资格判定', async () => {
+  clearUserProfileCache();
+  const execs = [];
+  const db = {
+    ...makeCheckinDb({}),
+    async transaction(fn) {
+      return fn({ async run() {}, async exec(sql) { execs.push(sql); } });
+    },
+  };
+  const invCfg = { dingtalk: { appKey: 'invalidated-key', appSecret: 'invalidated-secret' } };
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { errcode: 0, result: { userid: 'iv1', name: '张三', active: true, dept_id_list: [5] } };
+    },
+    async () => {
+      const a = resolveAttendanceUserProfile(db, invCfg, 'iv1', { needDepartments: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const b = resolveAttendanceUserProfile(db, invCfg, 'iv1', { needDepartments: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      invalidateUserProfileCache('iv1'); // 全量同步写入该员工后会这样作废
+      const [ra, rb] = await Promise.all([a, b]);
+      assert.deepEqual(ra.deptIds, []);
+      assert.deepEqual(rb.deptIds, []);
+      assert.equal(execs.filter((sql) => /INSERT INTO user_dingtalk_profiles/.test(sql)).length, 0);
     },
   );
   clearUserProfileCache();

@@ -441,16 +441,21 @@ export function clearUserProfileCache() {
 // 通讯录事件已确认该员工资料变化时，丢弃缓存和进行中的请求，避免读到变更前的资料。
 export function invalidateUserProfileCache(userid) {
   const suffix = `:${String(userid || '')}`;
-  for (const map of [userProfileCache, userProfileInflight]) {
-    for (const key of [...map.keys()]) {
-      if (key.endsWith(suffix)) map.delete(key);
-    }
+  for (const key of [...userProfileCache.keys()]) {
+    if (key.endsWith(suffix)) userProfileCache.delete(key);
+  }
+  for (const [key, entry] of [...userProfileInflight]) {
+    if (!key.endsWith(suffix)) continue;
+    entry.invalidated = true; // 进行中的请求：调用者拿到结果时能知道它已失效
+    userProfileInflight.delete(key);
   }
 }
 
 // 同一员工短时间内多次触发（登录、打卡事件、补偿任务）只查一次钉钉；并发相同请求合并。
-// freshFetch：这份资料是否由本次调用自己发起的请求取得。缓存命中或合并到别人进行中的请求时为 false——
+// freshFetch：这份资料是否由本次调用自己发起、且未被作废的请求取得。缓存命中或合并到别人进行中的请求时为 false——
 // 那份数据的取数时间早于本次调用，调用方不得把它当作“本次调用时刻的快照”写回本地库。
+// invalidated：取数期间该员工的缓存被作废过（通讯录事件或全量同步写入），这份资料可能已过期，
+// 不得写回本地库，也不得用于奖励资格判定；对发起者和合并到同一请求的调用者都成立。
 export async function getUserProfile(cfg, userid) {
   if (!userid) {
     throw new Error('missing userid');
@@ -458,13 +463,13 @@ export async function getUserProfile(cfg, userid) {
   const key = `${getDingtalkCacheKey(cfg)}:${String(userid)}`;
   const cached = userProfileCache.get(key);
   if (cached && Date.now() < cached.expiresAt) {
-    return { ...cached.value, deptIds: [...cached.value.deptIds], freshFetch: false };
+    return { ...cached.value, deptIds: [...cached.value.deptIds], freshFetch: false, invalidated: false };
   }
 
   let entry = userProfileInflight.get(key);
   let initiated = false;
   if (!entry) {
-    const created = { promise: null };
+    const created = { promise: null, invalidated: false };
     created.promise = fetchUserProfile(cfg, userid)
       .then((value) => {
         if (userProfileInflight.get(key) === created) {
@@ -480,7 +485,12 @@ export async function getUserProfile(cfg, userid) {
     initiated = true;
   }
   const value = await entry.promise;
-  return { ...value, deptIds: [...value.deptIds], freshFetch: initiated };
+  return {
+    ...value,
+    deptIds: [...value.deptIds],
+    freshFetch: initiated && !entry.invalidated,
+    invalidated: entry.invalidated,
+  };
 }
 
 // 返回钉钉 user/get 的完整原始结果（不走缓存），供本地资料表落库使用。
