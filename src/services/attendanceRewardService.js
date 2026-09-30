@@ -349,7 +349,7 @@ async function writeAttendanceAudit(db, { eventType, userid, actorName, message,
 async function getLocalDingtalkProfile(db, userid) {
   try {
     const row = await db.get(
-      'SELECT name, dept_ids, updated_at FROM user_dingtalk_profiles WHERE userid = ? LIMIT 1',
+      'SELECT name, dept_ids, updated_at, active FROM user_dingtalk_profiles WHERE userid = ? LIMIT 1',
       [userid],
     );
     if (!row) return null;
@@ -365,7 +365,8 @@ async function getLocalDingtalkProfile(db, userid) {
     return {
       name: row.name ? String(row.name).trim() : '',
       deptIds,
-      fresh: updatedMs > 0 && Date.now() - updatedMs < LOCAL_PROFILE_TTL_MS,
+      // 已标记离职/停用（active = 0）的资料不能再为奖励资格提供缓存部门。
+      fresh: updatedMs > 0 && Date.now() - updatedMs < LOCAL_PROFILE_TTL_MS && Number(row.active) !== 0 && row.active !== false,
     };
   } catch {
     return null;
@@ -392,16 +393,20 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     const snapshotVersion = beginUserSnapshot();
     const profile = await getUserProfile(cfg, userid);
     const profileName = profile?.name ? String(profile.name).trim() : '';
-    if (profileName && profileName !== userid) {
-      await ensureAccount(db, { userid, name: profileName });
-    }
+    let written = false;
     if (profile?.raw) {
-      // 顺手把取到的完整资料写回本地，之后同一员工在 24 小时内不再请求钉钉。
-      await persistDingtalkUserDetail(db, cfg, profile.raw, { onlyIfStale: true, snapshotVersion }).catch((err) => {
+      // 姓名与部门在同一个按员工串行、带版本检查的写入里落库（顺手写回，之后 24 小时内不再请求钉钉）。
+      // 不在这里单独改 users.name：进行中的旧请求返回时可能把刚被事件更新的新名字覆盖回去。
+      try {
+        const out = await persistDingtalkUserDetail(db, cfg, profile.raw, { snapshotVersion });
+        written = Boolean(out?.ok && !out.skipped);
+      } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[AttendanceReward] persist user profile failed for ' + userid + ':', err?.message || err);
-      });
+      }
     }
+    // 没有成功写入时仅保证账户存在（不改名），发奖流程依赖它。
+    if (!written) await ensureAccount(db, { userid, name: '' });
     return {
       name: profileName || knownName,
       deptIds: Array.isArray(profile?.deptIds) ? profile.deptIds.map((id) => String(id)).filter(Boolean) : [],

@@ -7,6 +7,7 @@ import {
   resolveAttendanceUserProfile,
 } from '../../src/services/attendanceRewardService.js';
 import { clearUserProfileCache, getUserProfile } from '../../src/services/dingtalkService.js';
+import { handleContactUserEvent } from '../../src/services/dingtalkUserSyncService.js';
 
 function cstTimestamp(date, time) {
   return new Date(`${date}T${time}+08:00`).getTime();
@@ -104,7 +105,10 @@ test('手动补偿（未开启 skipRewardedUsers）仍查询全部用户', async
 });
 
 function makeCheckinDb({ prior = null, profile = null } = {}) {
+  const runs = [];
   return {
+    runs,
+    async run(sql, params) { runs.push({ sql, params }); },
     async get(sql) {
       if (/system_settings/.test(sql)) return { value: JSON.stringify({ enabled: true }) };
       if (/FROM attendance_reward_records/.test(sql)) return prior;
@@ -230,5 +234,43 @@ test('本地部门已过期且刷新失败时不采信旧部门（失败即拒�
   const freshDb = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: Math.floor(Date.now() / 1000) } });
   const fresh = await resolveAttendanceUserProfile(freshDb, {}, 'u1', { needDepartments: true });
   assert.deepEqual(fresh.deptIds, ['5']);
+  clearUserProfileCache();
+});
+
+test('已离职（active=0）的本地资料不再为奖励资格提供缓存部门', async () => {
+  clearUserProfileCache();
+  const now = Math.floor(Date.now() / 1000);
+  const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: now, active: 0 } });
+  const cfgInactive = { dingtalk: { appKey: 'inactive-key', appSecret: 'inactive-secret' } };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 60011, errmsg: 'boom' }),
+    async () => {
+      const profile = await resolveAttendanceUserProfile(db, cfgInactive, 'u1', { needDepartments: true });
+      assert.deepEqual(profile.deptIds, []);
+    },
+  );
+  const noCred = await resolveAttendanceUserProfile(db, {}, 'u1', { needDepartments: true });
+  assert.deepEqual(noCred.deptIds, []);
+  clearUserProfileCache();
+});
+
+test('取数期间收到通讯录事件时，打卡路径不会用旧名字覆盖 users.name', async () => {
+  clearUserProfileCache();
+  const db = makeCheckinDb({});
+  const nameCfg = { dingtalk: { appKey: 'name-key', appSecret: 'name-secret' } };
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { errcode: 0, result: { name: '旧名字', active: true, dept_id_list: [1] } };
+    },
+    async () => {
+      const pending = resolveAttendanceUserProfile(db, nameCfg, 'nm1', { needDepartments: false });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await handleContactUserEvent(db, nameCfg, { topic: 'user_leave_org', data: { UserId: ['nm1'] } });
+      await pending;
+      assert.equal(db.runs.some((r) => /UPDATE users SET name/.test(r.sql)), false);
+    },
+  );
   clearUserProfileCache();
 });

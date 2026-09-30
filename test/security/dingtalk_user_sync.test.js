@@ -27,7 +27,7 @@ function withFetchStub(handler, fn) {
     .finally(() => { globalThis.fetch = original; });
 }
 
-function makeDb({ existing = null } = {}) {
+function makeDb({ existing = null, activeProfiles = [] } = {}) {
   const log = { run: [], exec: [], order: [] };
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
@@ -39,6 +39,7 @@ function makeDb({ existing = null } = {}) {
       assert.match(sql, /user_dingtalk_profiles/);
       return existing;
     },
+    async all() { return activeProfiles.map((userid) => ({ userid })); },
     async run(sql, params) { log.run.push({ sql, params }); if (/SET active = 0/.test(sql)) log.order.push(`leave:${params[0]}`); },
     async exec(sql, params) { log.exec.push({ sql, params }); },
     async transaction(fn) { return fn(tx); },
@@ -336,6 +337,67 @@ test('批量离职事件按到达顺序入队：后到的重新入职不会被�
       await Promise.all([busy, leaving, rejoin]);
       const bbOrder = db.log.order.filter((x) => x.endsWith(':bb'));
       assert.deepEqual(bbOrder, ['leave:bb', 'upsert:bb']);
+    },
+  );
+});
+
+test('全量同步：采集期间登录刷新写入了更新的资料，旧快照不会覆盖它', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/department/get')) return { errcode: 0, result: { name: '新部门' } };
+      if (url.includes('/user/list')) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'ls1', name: '戊', active: true, dept_id_list: [1] }] } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const sync = syncAllDingtalkUsers(db, cfg);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // 同步采集期间，该员工登录刷新，写入了调动后的新部门（对应的通讯录事件被漏掉了）
+      const snapshotVersion = beginUserSnapshot();
+      await persistDingtalkUserDetail(db, cfg, { userid: 'ls1', name: '戊', active: true, dept_id_list: [1, 7] }, { snapshotVersion });
+      const result = await sync;
+      assert.deepEqual(db.log.order, ['upsert:ls1']);
+      assert.equal(result.upserted, 0);
+    },
+  );
+});
+
+test('全量同步兜底：把钉钉列表里已不存在的员工标记停用；列表为空时不处理', async () => {
+  clearUserProfileCache();
+  const db = makeDb({ activeProfiles: ['gone1', 'stay1'] });
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'stay1', name: '己', active: true, dept_id_list: [1] }] } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const result = await syncAllDingtalkUsers(db, cfg);
+      assert.equal(result.deactivated, 1);
+      assert.deepEqual(db.log.order.filter((x) => x.startsWith('leave:')), ['leave:gone1']);
+    },
+  );
+
+  const emptyDb = makeDb({ activeProfiles: ['gone1'] });
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      return { errcode: 0, result: { has_more: false, list: [] } };
+    },
+    async () => {
+      const result = await syncAllDingtalkUsers(emptyDb, cfg);
+      assert.equal(result.deactivated, 0);
+      assert.equal(emptyDb.log.run.length, 0);
     },
   );
 });

@@ -183,16 +183,36 @@ export async function syncAllDingtalkUsers(db, cfg) {
     const written = await withUserLock(u.userid, async () => {
       if (isSuperseded(u.userid, snapshotVersion)) return false;
       await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, u));
+      commitVersion(u.userid, snapshotVersion);
       return true;
     });
     if (written) upserted += 1;
+  }
+
+  // 兜底：钉钉列表里已不存在的员工标记为停用（离职事件处理失败/遗漏时靠这里修复）。
+  // 列表为空时不处理，避免接口异常（如权限被收回）导致整批误停用。
+  let deactivated = 0;
+  if (users.size > 0) {
+    const rows = await db.all('SELECT userid FROM user_dingtalk_profiles WHERE active IS NULL OR active <> 0');
+    for (const row of rows || []) {
+      const userid = String(row?.userid || '');
+      if (!userid || users.has(userid)) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const done = await withUserLock(userid, async () => {
+        if (isSuperseded(userid, snapshotVersion)) return false;
+        await db.run('UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?', [userid]);
+        commitVersion(userid, snapshotVersion);
+        return true;
+      });
+      if (done) deactivated += 1;
+    }
   }
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
     publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
   }
 
-  return { deptCount: deptIds.length, fetched, active: activeCount, upserted };
+  return { deptCount: deptIds.length, fetched, active: activeCount, upserted, deactivated };
 }
 
 // 同一员工的写操作按到达顺序串行：Stream 事件是并发处理的，
@@ -210,13 +230,14 @@ function withUserLock(userid, fn) {
   return run;
 }
 
-// 事件版本：每个通讯录事件在到达的那一刻（早于任何 await）给该员工打一个递增版本号。
+// 版本：每个通讯录事件在到达的那一刻（早于任何 await）给该员工打一个递增版本号；
+// 每次成功写库的快照也把自己的版本记为该员工的最新版本。
 // 凡是从钉钉取到的快照（全量同步、登录/打卡写回、事件自己的拉取），写库前都要确认
-// “取数开始之后没有更新的事件到达”，否则丢弃，由后到的事件自己重新取数写库。
-// 版本号只增不清理（只包含发生过事件的员工，体量有限），因此重叠的全量同步、
+// “取数开始之后，没有更新的事件到达，也没有更晚取数的快照已经写库”，否则丢弃。
+// 版本号只增不清理（只包含有过写入/事件的员工，体量有限），因此重叠的全量同步、
 // 尚无本地资料行的员工（首次登录）都不会丢失“已离职/已变更”的信息。
 let versionCounter = 0;
-const userEventVersion = new Map();
+const userLatestVersion = new Map();
 
 // 取数（发起钉钉请求）之前调用，返回的版本号随快照一起交给写库函数。
 export function beginUserSnapshot() {
@@ -226,14 +247,19 @@ export function beginUserSnapshot() {
 
 function noteUserEvent(userid) {
   versionCounter += 1;
-  userEventVersion.set(String(userid), versionCounter);
+  userLatestVersion.set(String(userid), versionCounter);
   // 该员工缓存里、进行中请求里的资料都可能是变更前的，一并作废。
   invalidateUserProfileCache(userid);
   return versionCounter;
 }
 
 function isSuperseded(userid, snapshotVersion) {
-  return (userEventVersion.get(String(userid)) || 0) > snapshotVersion;
+  return (userLatestVersion.get(String(userid)) || 0) > snapshotVersion;
+}
+
+function commitVersion(userid, snapshotVersion) {
+  const key = String(userid);
+  if ((userLatestVersion.get(key) || 0) < snapshotVersion) userLatestVersion.set(key, snapshotVersion);
 }
 
 const PROFILE_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -312,6 +338,7 @@ async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false, snapsh
     return { ok: true, skipped: true, reason: 'superseded' };
   }
   await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, profile));
+  if (snapshotVersion !== undefined) commitVersion(userid, snapshotVersion);
   return { ok: true, userid };
 }
 
