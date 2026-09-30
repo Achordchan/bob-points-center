@@ -4,6 +4,7 @@ import {
   getDueReconcileSlot,
   handleCheckinEvent,
   reconcileAttendanceRewards,
+  resolveAttendanceUserProfile,
 } from '../../src/services/attendanceRewardService.js';
 import { clearUserProfileCache, getUserProfile } from '../../src/services/dingtalkService.js';
 
@@ -207,4 +208,27 @@ test('测试模式的试运行记录在关闭测试模式后重新判定，不�
       );
     },
   );
+});
+
+test('本地部门已过期且刷新失败时不采信旧部门（失败即拒绝），只保留姓名', async () => {
+  clearUserProfileCache();
+  const staleAt = Math.floor(Date.now() / 1000) - 3 * 86400;
+  const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: staleAt } });
+  const failCfg = { dingtalk: { appKey: 'stale-key', appSecret: 'stale-secret' } };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 60011, errmsg: 'boom' }),
+    async () => {
+      const profile = await resolveAttendanceUserProfile(db, failCfg, 'u1', { needDepartments: true });
+      assert.equal(profile.name, '张三');
+      assert.deepEqual(profile.deptIds, []);
+    },
+  );
+  // 未配置钉钉凭证、无法刷新时同样不采信过期部门
+  const noCred = await resolveAttendanceUserProfile(db, {}, 'u1', { needDepartments: true });
+  assert.deepEqual(noCred.deptIds, []);
+  // 有效期内的本地部门仍被采用
+  const freshDb = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: Math.floor(Date.now() / 1000) } });
+  const fresh = await resolveAttendanceUserProfile(freshDb, {}, 'u1', { needDepartments: true });
+  assert.deepEqual(fresh.deptIds, ['5']);
+  clearUserProfileCache();
 });

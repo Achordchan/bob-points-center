@@ -373,11 +373,12 @@ async function getLocalDingtalkProfile(db, userid) {
 }
 
 // 优先使用“同步用户”写入本地的姓名/部门，仅在本地缺失或过期时才调钉钉 user/get，避免打卡高峰被限流。
-async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments = true } = {}) {
+export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments = true } = {}) {
   const localName = await getUserName(db, userid);
   const local = await getLocalDingtalkProfile(db, userid);
   const knownName = local?.name || localName || '';
-  const fallback = { name: knownName, deptIds: local ? local.deptIds : [] };
+  // 刷新失败时只保留姓名；已过期的本地部门不能用来判定“指定部门奖励”资格（宁可本次判为不符、稍后重判）。
+  const fallback = { name: knownName, deptIds: local?.fresh ? local.deptIds : [] };
 
   if (local?.fresh && knownName && (!needDepartments || local.deptIds.length > 0)) {
     return fallback;
