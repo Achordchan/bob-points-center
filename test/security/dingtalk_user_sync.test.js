@@ -4,6 +4,7 @@ import {
   syncAllDingtalkUsers,
   extractEventUserIds,
   getCstNow,
+  beginUserSnapshot,
   handleContactUserEvent,
   isWeeklySyncDue,
   persistDingtalkUserDetail,
@@ -30,7 +31,7 @@ function makeDb({ existing = null } = {}) {
   const log = { run: [], exec: [], order: [] };
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
-    async exec(sql, params) { log.exec.push({ sql, params }); if (/INSERT INTO user_dingtalk_profiles/.test(sql)) log.order.push('upsert'); },
+    async exec(sql, params) { log.exec.push({ sql, params }); if (/INSERT INTO user_dingtalk_profiles/.test(sql)) log.order.push(`upsert:${params[0]}`); },
   };
   return {
     log,
@@ -38,7 +39,7 @@ function makeDb({ existing = null } = {}) {
       assert.match(sql, /user_dingtalk_profiles/);
       return existing;
     },
-    async run(sql, params) { log.run.push({ sql, params }); if (/SET active = 0/.test(sql)) log.order.push('leave'); },
+    async run(sql, params) { log.run.push({ sql, params }); if (/SET active = 0/.test(sql)) log.order.push(`leave:${params[0]}`); },
     async exec(sql, params) { log.exec.push({ sql, params }); },
     async transaction(fn) { return fn(tx); },
   };
@@ -161,7 +162,7 @@ test('onlyIfStale：24 小时内已更新的资料不重复写库', async () => 
   );
 });
 
-test('同一员工的事件串行处理：慢的资料修改不会覆盖随后到达的离职', async () => {
+test('慢的资料修改不会覆盖随后到达的离职（先到的修改被后到的离职取代）', async () => {
   clearUserProfileCache();
   const db = makeDb();
   await withFetchStub(
@@ -179,7 +180,8 @@ test('同一员工的事件串行处理：慢的资料修改不会覆盖随后�
         handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['race1'] } }),
         handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['race1'] } }),
       ]);
-      assert.deepEqual(db.log.order, ['upsert', 'leave']);
+      // 修改在取部门名称期间离职事件到达：修改的快照已过期不再写库，最终只有停用
+      assert.deepEqual(db.log.order, ['leave:race1']);
     },
   );
 });
@@ -247,4 +249,93 @@ test('缓存失效后，进行中的旧请求不会再把变更前的资料写�
     },
   );
   clearUserProfileCache();
+});
+
+test('重叠的全量同步：后开始的同步先结束，也不会让先开始的旧快照恢复已离职员工', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  let listCalls = 0;
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        listCalls += 1;
+        if (listCalls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return { errcode: 0, result: { has_more: false, list: [{ userid: 'ov1', name: '丙', active: true, dept_id_list: [1] }] } };
+        }
+        // 第二次同步开始时该员工已离职，钉钉列表里不再包含
+        return { errcode: 0, result: { has_more: false, list: [] } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const syncA = syncAllDingtalkUsers(db, cfg);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['ov1'] } });
+      const syncB = syncAllDingtalkUsers(db, cfg);
+      await syncB;
+      await syncA;
+      assert.equal(db.log.order.filter((x) => x === 'upsert:ov1').length, 0);
+      assert.deepEqual(db.log.order, ['leave:ov1']);
+    },
+  );
+});
+
+test('首次写入前到达的离职：更早取到的在职资料不会再插入本地库', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  const tbCfg = { dingtalk: { appKey: 'tomb-key', appSecret: 'tomb-secret' } };
+  let userGetCalls = 0;
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      userGetCalls += 1;
+      if (userGetCalls === 1) await new Promise((resolve) => setTimeout(resolve, 150));
+      return { errcode: 0, result: { userid: 'tb1', name: '丁', active: true, dept_id_list: [1] } };
+    },
+    async () => {
+      // 模拟新人首次登录：先记版本再取资料，取数进行中离职事件到达（此时库里还没有该员工的资料行）
+      const snapshotVersion = beginUserSnapshot();
+      const lookup = getUserProfile(tbCfg, 'tb1');
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await handleContactUserEvent(db, tbCfg, { topic: 'user_leave_org', data: { UserId: ['tb1'] } });
+      const profile = await lookup;
+      const out = await persistDingtalkUserDetail(db, tbCfg, profile.raw, { onlyIfStale: true, snapshotVersion });
+      assert.equal(out.reason, 'superseded');
+      assert.equal(upsertOf(db), undefined);
+      // 离职同时作废了缓存和进行中的请求，之后重新读取会重新请求钉钉
+      await getUserProfile(tbCfg, 'tb1');
+      assert.equal(userGetCalls, 2);
+    },
+  );
+  clearUserProfileCache();
+});
+
+test('批量离职事件按到达顺序入队：后到的重新入职不会被同批里慢的员工拖到前面', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  await withFetchStub(
+    async (url, body) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/user/get')) {
+        if (body.userid === 'ba') await new Promise((resolve) => setTimeout(resolve, 200));
+        return { errcode: 0, result: { userid: body.userid, name: body.userid, active: true, dept_id_list: [1] } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      // ba 有一个进行中的慢修改，占住它的队列
+      const busy = handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['ba'] } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      // 离职批次 [ba, bb]：ba 排在慢修改之后，bb 应立即入队处理；随后 bb 重新入职
+      const leaving = handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['ba', 'bb'] } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const rejoin = handleContactUserEvent(db, cfg, { topic: 'user_add_org', data: { UserId: ['bb'] } });
+      await Promise.all([busy, leaving, rejoin]);
+      const bbOrder = db.log.order.filter((x) => x.endsWith(':bb'));
+      assert.deepEqual(bbOrder, ['leave:bb', 'upsert:bb']);
+    },
+  );
 });

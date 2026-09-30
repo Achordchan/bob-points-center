@@ -133,7 +133,7 @@ export async function upsertDingtalkUserProfile(tx, u) {
 }
 
 export async function syncAllDingtalkUsers(db, cfg) {
-  const startedAt = Date.now();
+  const snapshotVersion = beginUserSnapshot();
   const departments = await listDingtalkDepartmentsTree(cfg);
   const deptNameMap = new Map(departments.map((dept) => [String(dept.dept_id), String(dept.name || dept.dept_id)]));
   deptNameMap.set('1', '根部门');
@@ -176,19 +176,16 @@ export async function syncAllDingtalkUsers(db, cfg) {
     }
   }
 
-  // 逐个员工加锁写入；采集期间已被事件/登录更新过的员工，其快照已过期，跳过以免覆盖更新的数据。
+  // 逐个员工加锁写入；采集开始之后有事件到达的员工，其快照已过期，跳过以免覆盖更新的数据。
   let upserted = 0;
   for (const u of users.values()) {
     // eslint-disable-next-line no-await-in-loop
     const written = await withUserLock(u.userid, async () => {
-      if ((userTouchedAt.get(u.userid) || 0) >= startedAt) return false;
+      if (isSuperseded(u.userid, snapshotVersion)) return false;
       await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, u));
       return true;
     });
     if (written) upserted += 1;
-  }
-  for (const [userid, at] of [...userTouchedAt]) {
-    if (at < startedAt) userTouchedAt.delete(userid);
   }
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
@@ -213,10 +210,30 @@ function withUserLock(userid, fn) {
   return run;
 }
 
-// 记录每个员工最近一次由事件/登录/打卡写库的时间，全量同步据此丢弃已被更新过的旧快照。
-const userTouchedAt = new Map();
-function markUserTouched(userid) {
-  userTouchedAt.set(String(userid), Date.now());
+// 事件版本：每个通讯录事件在到达的那一刻（早于任何 await）给该员工打一个递增版本号。
+// 凡是从钉钉取到的快照（全量同步、登录/打卡写回、事件自己的拉取），写库前都要确认
+// “取数开始之后没有更新的事件到达”，否则丢弃，由后到的事件自己重新取数写库。
+// 版本号只增不清理（只包含发生过事件的员工，体量有限），因此重叠的全量同步、
+// 尚无本地资料行的员工（首次登录）都不会丢失“已离职/已变更”的信息。
+let versionCounter = 0;
+const userEventVersion = new Map();
+
+// 取数（发起钉钉请求）之前调用，返回的版本号随快照一起交给写库函数。
+export function beginUserSnapshot() {
+  versionCounter += 1;
+  return versionCounter;
+}
+
+function noteUserEvent(userid) {
+  versionCounter += 1;
+  userEventVersion.set(String(userid), versionCounter);
+  // 该员工缓存里、进行中请求里的资料都可能是变更前的，一并作废。
+  invalidateUserProfileCache(userid);
+  return versionCounter;
+}
+
+function isSuperseded(userid, snapshotVersion) {
+  return (userEventVersion.get(String(userid)) || 0) > snapshotVersion;
 }
 
 const PROFILE_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -250,14 +267,18 @@ function parseIdList(text) {
 // 把已经从钉钉取到的 user/get 原始资料写回本地库（新人首次登录、打卡取到资料时顺手落库，无需再请求一次）。
 // 部门名称：部门未变则沿用本地已有名称；部门变了才补查变化的部门。
 // onlyIfStale：本地资料 24 小时内已更新过则不重复写库（登录这类高频入口使用）。
+// snapshotVersion：调用方在取数前用 beginUserSnapshot() 拿到的版本号，取数期间有新事件到达则丢弃本次写入。
 export async function persistDingtalkUserDetail(db, cfg, raw, options = {}) {
   const userid = firstPresent(raw?.userid);
   if (!userid) return { ok: false, reason: 'missing_userid' };
   return withUserLock(userid, () => persistDetailUnlocked(db, cfg, raw, options));
 }
 
-async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false } = {}) {
+async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false, snapshotVersion } = {}) {
   const userid = firstPresent(raw?.userid);
+  if (snapshotVersion !== undefined && isSuperseded(userid, snapshotVersion)) {
+    return { ok: true, skipped: true, reason: 'superseded' };
+  }
 
   const existing = await db.get(
     'SELECT dept_ids, dept_names, updated_at FROM user_dingtalk_profiles WHERE userid = ? LIMIT 1',
@@ -286,29 +307,34 @@ async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false } = {})
   }
 
   const profile = normalizeDingtalkUserProfile(raw, deptNameMap);
+  // 补查部门名称期间可能有新事件到达，落库前再确认一次。
+  if (snapshotVersion !== undefined && isSuperseded(userid, snapshotVersion)) {
+    return { ok: true, skipped: true, reason: 'superseded' };
+  }
   await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, profile));
-  markUserTouched(userid);
   return { ok: true, userid };
 }
 
-export async function syncDingtalkUserById(db, cfg, userid) {
+// 注意：这两个函数在第一个 await 之前就完成“打版本号 + 入队”，保证事件按到达顺序排队。
+export function syncDingtalkUserById(db, cfg, userid, { eventVersion } = {}) {
+  const version = eventVersion ?? noteUserEvent(userid);
   // 拿锁之后再请求钉钉，读到的是前序事件处理完之后的最新状态。
   return withUserLock(userid, async () => {
+    // 已有更新的事件排在后面，它会自己取数写库，这里不必重复请求。
+    if (isSuperseded(userid, version)) return { ok: true, skipped: true, reason: 'superseded' };
     invalidateUserProfileCache(userid);
     const raw = await getUserDetail(cfg, userid);
-    return persistDetailUnlocked(db, cfg, raw);
+    return persistDetailUnlocked(db, cfg, raw, { snapshotVersion: version });
   });
 }
 
 // 离职只标记为停用，保留 users/accounts（BOB 币余额与流水不能丢）。
-export async function markDingtalkUserLeft(db, userid) {
-  await withUserLock(userid, async () => {
-    await db.run(
-      'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
-      [String(userid)],
-    );
-    markUserTouched(userid);
-  });
+export function markDingtalkUserLeft(db, userid, { eventVersion } = {}) {
+  if (eventVersion === undefined) noteUserEvent(userid);
+  return withUserLock(userid, () => db.run(
+    'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
+    [String(userid)],
+  ));
 }
 
 export function extractEventUserIds(data) {
@@ -337,24 +363,25 @@ export async function handleContactUserEvent(db, cfg, { topic, data } = {}) {
   }
   // eslint-disable-next-line no-console
   console.log(`[DingtalkUserSync] 收到通讯录事件 ${topic} users=${ids.length}`);
-  for (const userid of ids) {
-    try {
-      if (topic === 'user_leave_org') {
-        // eslint-disable-next-line no-await-in-loop
-        await markDingtalkUserLeft(db, userid);
+  // 先给同一批里的所有员工同步打版本号并入队，再统一等待：
+  // 批内某个员工的慢请求不能让后到的事件（如重新入职）抢在同批其他员工的处理之前。
+  const tasks = ids.map((userid) => {
+    const eventVersion = noteUserEvent(userid);
+    const task = topic === 'user_leave_org'
+      ? markDingtalkUserLeft(db, userid, { eventVersion }).then(() => '已标记停用')
+      : syncDingtalkUserById(db, cfg, userid, { eventVersion })
+        .then((out) => (out?.skipped ? `已跳过(${out.reason})` : '资料已更新'));
+    return task
+      .then((result) => {
         // eslint-disable-next-line no-console
-        console.log(`[DingtalkUserSync] ${topic} ${userid} 已标记停用`);
-      } else {
-        // eslint-disable-next-line no-await-in-loop
-        const out = await syncDingtalkUserById(db, cfg, userid);
+        console.log(`[DingtalkUserSync] ${topic} ${userid} ${result}`);
+      })
+      .catch((err) => {
         // eslint-disable-next-line no-console
-        console.log(`[DingtalkUserSync] ${topic} ${userid} ${out?.skipped ? `已跳过(${out.reason})` : '资料已更新'}`);
-      }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(`[DingtalkUserSync] ${topic} ${userid} failed:`, err?.message || err);
-    }
-  }
+        console.warn(`[DingtalkUserSync] ${topic} ${userid} failed:`, err?.message || err);
+      });
+  });
+  await Promise.all(tasks);
   return { count: ids.length };
 }
 

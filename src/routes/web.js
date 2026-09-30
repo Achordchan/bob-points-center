@@ -6,7 +6,7 @@ import {
   getUserIdByOAuthCode,
   getUserProfile,
 } from '../services/dingtalkService.js';
-import { persistDingtalkUserDetail } from '../services/dingtalkUserSyncService.js';
+import { beginUserSnapshot, persistDingtalkUserDetail } from '../services/dingtalkUserSyncService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
 import { cookieOptions, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
@@ -54,10 +54,11 @@ async function establishWebSession(req, res, userid) {
 
   let profile;
   try {
+    const snapshotVersion = beginUserSnapshot();
     profile = await getUserProfile(cfg, userid);
     if (profile?.raw) {
       // 新人首次进入时补全部门/职位等资料，后台无需再手动同步；失败不影响登录。
-      await persistDingtalkUserDetail(db, cfg, profile.raw, { onlyIfStale: true }).catch(() => {});
+      await persistDingtalkUserDetail(db, cfg, profile.raw, { onlyIfStale: true, snapshotVersion }).catch(() => {});
     }
   } catch {
     profile = cachedName ? { userid, name: cachedName, avatar: '' } : null;

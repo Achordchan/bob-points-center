@@ -3,7 +3,7 @@ import { ensureAccount, getBalance, grantBob } from './ledgerService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { safeAppendAuditLog } from './auditLogService.js';
 import { getAccessToken, getUserProfile, listSubDepartments } from './dingtalkService.js';
-import { persistDingtalkUserDetail } from './dingtalkUserSyncService.js';
+import { beginUserSnapshot, persistDingtalkUserDetail } from './dingtalkUserSyncService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
 const DEFAULT_WORK_START_MIN = 8 * 60 + 30; // 默认 08:30 前算有效
@@ -388,6 +388,7 @@ async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments =
   }
 
   try {
+    const snapshotVersion = beginUserSnapshot();
     const profile = await getUserProfile(cfg, userid);
     const profileName = profile?.name ? String(profile.name).trim() : '';
     if (profileName && profileName !== userid) {
@@ -395,7 +396,7 @@ async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments =
     }
     if (profile?.raw) {
       // 顺手把取到的完整资料写回本地，之后同一员工在 24 小时内不再请求钉钉。
-      await persistDingtalkUserDetail(db, cfg, profile.raw, { onlyIfStale: true }).catch((err) => {
+      await persistDingtalkUserDetail(db, cfg, profile.raw, { onlyIfStale: true, snapshotVersion }).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[AttendanceReward] persist user profile failed for ' + userid + ':', err?.message || err);
       });
