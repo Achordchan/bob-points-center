@@ -159,3 +159,52 @@ test('本地无资料时才调用 user/get，且短时间内同一员工只查�
   );
   clearUserProfileCache();
 });
+
+test('推送窗口内的定时补偿保留通知未发送成功的人，用于通知补发', async () => {
+  // 使用过去的日期：当天 9 点后 reconcile 会强制关闭推送，避免测试依赖真实时钟
+  const seen = [];
+  const db = {
+    async get() { return { value: JSON.stringify({ enabled: true, maxPerDay: 1 }) }; },
+    async all(sql, params) {
+      if (/FROM audit_logs/.test(sql)) return [];
+      if (/FROM users/.test(sql)) return [{ userid: 'u1' }, { userid: 'u2' }];
+      if (/GROUP BY userid/.test(sql)) {
+        seen.push({ sql, params });
+        // 仅 u1 已领奖且通知已发送；u2 已领奖但通知未发送，在查询条件里不应被算作“已完成”
+        return params[1] === 1 ? [{ userid: 'u1' }] : [{ userid: 'u1' }, { userid: 'u2' }];
+      }
+      return [];
+    },
+  };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 0, recordresult: [] }),
+    async (calls) => {
+      await reconcileAttendanceRewards(db, quotaCfg, { date: '2026-09-01', skipRewardedUsers: true, notifyOnReward: true });
+      assert.match(seen[0].sql, /notify_status = 'sent'/);
+      assert.equal(seen[0].params[1], 1);
+      assert.deepEqual(calls.find((c) => c.url.includes('/attendance/list')).body.userIdList, ['u2']);
+
+      calls.length = 0;
+      await reconcileAttendanceRewards(db, quotaCfg, { date: '2026-09-01', skipRewardedUsers: true, notifyOnReward: false });
+      assert.equal(seen[1].params[1], 0);
+      assert.equal(calls.filter((c) => c.url.includes('/attendance/list')).length, 0);
+    },
+  );
+});
+
+test('测试模式的试运行记录在关闭测试模式后重新判定，不被当作终态复用', async () => {
+  clearUserProfileCache();
+  const db = makeCheckinDb({
+    prior: { id: 7, status: 'test_passed', notify_status: 'not_sent', reward_reason: '', reward_amount: 0 },
+    profile: { name: '张三', dept_ids: '[]', updated_at: Math.floor(Date.now() / 1000) },
+  });
+  await withFetchStub(
+    () => { throw new Error('本地资料有效，不应调用钉钉接口'); },
+    async () => {
+      await assert.rejects(
+        handleCheckinEvent(db, quotaCfg, { data: JSON.stringify(checkinRecord) }),
+        /STOP_BEFORE_WRITE/,
+      );
+    },
+  );
+});

@@ -26,10 +26,10 @@ function withFetchStub(handler, fn) {
 }
 
 function makeDb({ existing = null } = {}) {
-  const log = { run: [], exec: [] };
+  const log = { run: [], exec: [], order: [] };
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
-    async exec(sql, params) { log.exec.push({ sql, params }); },
+    async exec(sql, params) { log.exec.push({ sql, params }); if (/INSERT INTO user_dingtalk_profiles/.test(sql)) log.order.push('upsert'); },
   };
   return {
     log,
@@ -37,7 +37,7 @@ function makeDb({ existing = null } = {}) {
       assert.match(sql, /user_dingtalk_profiles/);
       return existing;
     },
-    async run(sql, params) { log.run.push({ sql, params }); },
+    async run(sql, params) { log.run.push({ sql, params }); if (/SET active = 0/.test(sql)) log.order.push('leave'); },
     async exec(sql, params) { log.exec.push({ sql, params }); },
     async transaction(fn) { return fn(tx); },
   };
@@ -156,6 +156,29 @@ test('onlyIfStale：24 小时内已更新的资料不重复写库', async () => 
     async () => {
       await persistDingtalkUserDetail(staleDb, cfg, { userid: 'k2', name: '周八', active: true, dept_id_list: [1] }, { onlyIfStale: true });
       assert.ok(upsertOf(staleDb));
+    },
+  );
+});
+
+test('同一员工的事件串行处理：慢的资料修改不会覆盖随后到达的离职', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/user/get')) return { errcode: 0, result: { name: '钱九', active: true, dept_id_list: [1, 99] } };
+      if (url.includes('/department/get')) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return { errcode: 0, result: { name: '运营部' } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      await Promise.all([
+        handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['race1'] } }),
+        handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['race1'] } }),
+      ]);
+      assert.deepEqual(db.log.order, ['upsert', 'leave']);
     },
   );
 });

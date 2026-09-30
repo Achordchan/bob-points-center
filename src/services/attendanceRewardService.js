@@ -439,7 +439,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
     if (prior && priorStatus && priorStatus !== 'pending') {
       const needsReevaluate =
         (priorStatus === 'skipped' && String(prior.skip_reason || '') === 'department_not_allowed') ||
-        (settings?.testMode === true && priorStatus === 'test_passed');
+        priorStatus === 'test_passed'; // 试运行结果不是终态：关闭测试模式后需按正式规则重新判定
       const needsNotifyRetry = notifyOnReward && priorStatus === 'rewarded' && String(prior.notify_status || '') !== 'sent';
       if (!needsReevaluate && !needsNotifyRetry) {
         return {
@@ -470,7 +470,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
       const existingSkipReason = String(existing.skip_reason || '');
       const shouldReevaluate =
         (existingStatus === 'skipped' && existingSkipReason === 'department_not_allowed') ||
-        (settings?.testMode === true && existingStatus === 'test_passed');
+        existingStatus === 'test_passed'; // 试运行结果不是终态：关闭测试模式后需按正式规则重新判定
       if (!shouldReevaluate) {
         return {
           ok: true,
@@ -782,11 +782,12 @@ export async function reconcileAttendanceRewards(db, cfg, { date, userids, notif
 
   const totalUsers = users.length;
   if (skipRewardedUsers && settings.testMode !== true) {
+    // 推送窗口内，奖励通知还没发成功的人要保留，由 handleAttendanceRecord 走通知补发。
     const doneRows = await db.all(
       `SELECT userid FROM attendance_reward_records
-        WHERE work_date = ? AND status = 'rewarded'
+        WHERE work_date = ? AND status = 'rewarded' AND (? = 0 OR notify_status = 'sent')
         GROUP BY userid HAVING COUNT(*) >= ?`,
-      [range.date, Math.max(1, Number(settings.maxPerDay) || 1)],
+      [range.date, notifyOnReward ? 1 : 0, Math.max(1, Number(settings.maxPerDay) || 1)],
     );
     const done = new Set((doneRows || []).map((row) => String(row?.userid || '')));
     users = users.filter((id) => !done.has(id));

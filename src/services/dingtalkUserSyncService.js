@@ -188,6 +188,21 @@ export async function syncAllDingtalkUsers(db, cfg) {
   return { deptCount: deptIds.length, fetched, active: activeCount, upserted: users.size };
 }
 
+// 同一员工的写操作按到达顺序串行：Stream 事件是并发处理的，
+// 否则慢的“资料修改”可能在“离职”之后才写库，把 active 改回 1。
+const userLocks = new Map();
+function withUserLock(userid, fn) {
+  const key = String(userid);
+  const previous = userLocks.get(key) || Promise.resolve();
+  const run = previous.then(fn);
+  const tail = run.catch(() => {});
+  userLocks.set(key, tail);
+  tail.then(() => {
+    if (userLocks.get(key) === tail) userLocks.delete(key);
+  });
+  return run;
+}
+
 const PROFILE_FRESH_MS = 24 * 60 * 60 * 1000;
 const deptNameCache = new Map();
 const DEPT_NAME_CACHE_MS = 60 * 60 * 1000;
@@ -219,9 +234,14 @@ function parseIdList(text) {
 // 把已经从钉钉取到的 user/get 原始资料写回本地库（新人首次登录、打卡取到资料时顺手落库，无需再请求一次）。
 // 部门名称：部门未变则沿用本地已有名称；部门变了才补查变化的部门。
 // onlyIfStale：本地资料 24 小时内已更新过则不重复写库（登录这类高频入口使用）。
-export async function persistDingtalkUserDetail(db, cfg, raw, { onlyIfStale = false } = {}) {
+export async function persistDingtalkUserDetail(db, cfg, raw, options = {}) {
   const userid = firstPresent(raw?.userid);
   if (!userid) return { ok: false, reason: 'missing_userid' };
+  return withUserLock(userid, () => persistDetailUnlocked(db, cfg, raw, options));
+}
+
+async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false } = {}) {
+  const userid = firstPresent(raw?.userid);
 
   const existing = await db.get(
     'SELECT dept_ids, dept_names, updated_at FROM user_dingtalk_profiles WHERE userid = ? LIMIT 1',
@@ -255,17 +275,20 @@ export async function persistDingtalkUserDetail(db, cfg, raw, { onlyIfStale = fa
 }
 
 export async function syncDingtalkUserById(db, cfg, userid) {
-  invalidateUserProfileCache(userid);
-  const raw = await getUserDetail(cfg, userid);
-  return persistDingtalkUserDetail(db, cfg, raw);
+  // 拿锁之后再请求钉钉，读到的是前序事件处理完之后的最新状态。
+  return withUserLock(userid, async () => {
+    invalidateUserProfileCache(userid);
+    const raw = await getUserDetail(cfg, userid);
+    return persistDetailUnlocked(db, cfg, raw);
+  });
 }
 
 // 离职只标记为停用，保留 users/accounts（BOB 币余额与流水不能丢）。
 export async function markDingtalkUserLeft(db, userid) {
-  await db.run(
+  await withUserLock(userid, () => db.run(
     'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
     [String(userid)],
-  );
+  ));
 }
 
 export function extractEventUserIds(data) {
