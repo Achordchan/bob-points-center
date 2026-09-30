@@ -16,11 +16,18 @@ import {
   getUserProfile,
   hasDingtalkGroupOpenConversationId,
   listSubDepartments,
-  listUsersByDept,
   notableListRecords,
   queryDingtalkOpenGroupBaseInfo,
   queryDingtalkGroupRobot,
 } from '../../services/dingtalkService.js';
+export {
+  firstPresent,
+  isActiveFlag,
+  listDingtalkDepartmentsTree,
+  normalizeDingtalkDate,
+  normalizeDingtalkUserProfile,
+  toJsonText,
+} from '../../services/dingtalkUserSyncService.js';
 import {
   buildClearDingtalkOAuthStateCookie,
   buildDingtalkOAuthStateCookie,
@@ -708,62 +715,6 @@ export function normalizeNotableProductRecordFields(fields) {
   };
 }
 
-export function isActiveFlag(value) {
-  return value === true || value === 1 || value === '1' || value === 'true';
-}
-
-export function firstPresent(...values) {
-  for (const value of values) {
-    if (value !== null && value !== undefined && String(value).trim() !== '') return String(value).trim();
-  }
-  return '';
-}
-
-export function toJsonText(value) {
-  if (value === null || value === undefined) return '';
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-export function normalizeDingtalkDate(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n > 100000000000 ? Math.floor(n / 1000) : Math.floor(n);
-}
-
-export function normalizeDingtalkUserProfile(raw = {}, deptNameMap = new Map()) {
-  const deptIds = Array.isArray(raw.dept_id_list) ? raw.dept_id_list.map((id) => String(id)).filter(Boolean) : [];
-  const deptNames = deptIds.map((id) => deptNameMap.get(id) || '').filter(Boolean);
-  return {
-    userid: firstPresent(raw.userid),
-    unionid: firstPresent(raw.unionid),
-    name: firstPresent(raw.name),
-    avatar: firstPresent(raw.avatar),
-    mobile: firstPresent(raw.mobile),
-    telephone: firstPresent(raw.telephone),
-    email: firstPresent(raw.email),
-    org_email: firstPresent(raw.org_email),
-    title: firstPresent(raw.title),
-    job_number: firstPresent(raw.job_number, raw.jobNumber),
-    work_place: firstPresent(raw.work_place, raw.workPlace),
-    remark: firstPresent(raw.remark),
-    dept_ids: deptIds,
-    dept_names: deptNames,
-    extension: raw.extension || null,
-    hired_date: normalizeDingtalkDate(raw.hired_date),
-    active: isActiveFlag(raw.active) ? 1 : 0,
-    is_admin: isActiveFlag(raw.admin) ? 1 : 0,
-    is_boss: isActiveFlag(raw.boss) ? 1 : 0,
-    leader_in_dept: raw.leader_in_dept || null,
-    exclusive_account: isActiveFlag(raw.exclusive_account) ? 1 : 0,
-    raw,
-  };
-}
-
 export async function resolveAdminDisplayName(db, cfg, payload = {}) {
   const userid = payload?.userid ? String(payload.userid).trim() : '';
   if (db && userid) {
@@ -848,31 +799,6 @@ export async function collectAllDeptIds(cfg) {
       if (!Number.isFinite(subId)) continue;
       if (seen.has(subId)) continue;
       queue.push(subId);
-    }
-  }
-  return out;
-}
-
-export async function listDingtalkDepartmentsTree(cfg) {
-  const seen = new Set();
-  const queue = [{ deptId: 1, depth: 0 }];
-  const out = [];
-  while (queue.length) {
-    const item = queue.shift();
-    const deptId = Number(item.deptId);
-    if (!Number.isFinite(deptId) || seen.has(deptId)) continue;
-    seen.add(deptId);
-    const subs = await listSubDepartments(cfg, { deptId });
-    for (const dept of subs) {
-      const id = Number(dept?.dept_id);
-      if (!Number.isFinite(id)) continue;
-      out.push({
-        dept_id: String(id),
-        name: dept?.name ? String(dept.name) : String(id),
-        parent_id: String(deptId),
-        depth: Number(item.depth || 0),
-      });
-      queue.push({ deptId: id, depth: Number(item.depth || 0) + 1 });
     }
   }
   return out;

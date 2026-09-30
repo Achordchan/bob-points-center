@@ -3,11 +3,17 @@ import { ensureAccount, getBalance, grantBob } from './ledgerService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { safeAppendAuditLog } from './auditLogService.js';
 import { getAccessToken, getUserProfile, listSubDepartments } from './dingtalkService.js';
+import { beginUserSnapshot, isUserSnapshotSuperseded, persistDingtalkUserDetail } from './dingtalkUserSyncService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
 const DEFAULT_WORK_START_MIN = 8 * 60 + 30; // 默认 08:30 前算有效
 const DEPARTMENT_EXPANSION_CACHE_MS = 5 * 60 * 1000;
 const departmentExpansionCache = new Map();
+
+// 通讯录部门变更事件到达时调用，下次判定重新展开部门树。
+export function clearAttendanceDepartmentCache() {
+  departmentExpansionCache.clear();
+}
 
 function randomInt(min, max) {
   const lo = Math.min(min, max);
@@ -339,20 +345,43 @@ async function writeAttendanceAudit(db, { eventType, userid, actorName, message,
   });
 }
 
-async function resolveAttendanceUserProfile(db, cfg, userid) {
+// 姓名可用本地已知值；“指定部门奖励”所需的部门一律向钉钉实时取（user/get 不计量，
+// 请求已限速并带 10 分钟缓存，通讯录事件会作废缓存），不使用本地缓存的部门做资格判定。
+// 取不到时部门为空（失败即拒绝，稍后重判）。
+export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments = true } = {}) {
   const localName = await getUserName(db, userid);
   const fallback = { name: localName || '', deptIds: [] };
+
+  if (!needDepartments && localName) return fallback;
 
   if (!cfg?.dingtalk?.appKey || !cfg?.dingtalk?.appSecret) {
     return fallback;
   }
 
   try {
+    const snapshotVersion = beginUserSnapshot();
     const profile = await getUserProfile(cfg, userid);
     const profileName = profile?.name ? String(profile.name).trim() : '';
-    if (profileName && profileName !== userid) {
-      await ensureAccount(db, { userid, name: profileName });
+    let written = false;
+    let persistSuperseded = false;
+    // 只有本次调用自己发起的请求取得的资料才写回：缓存命中/合并的请求，取数时间早于本次的版本号。
+    if (profile?.raw && profile.freshFetch) {
+      // 姓名与部门在同一个按员工串行、带版本检查的写入里落库，供后台展示使用。
+      // 不在这里单独改 users.name：进行中的旧请求返回时可能把刚被事件更新的新名字覆盖回去。
+      try {
+        const out = await persistDingtalkUserDetail(db, cfg, profile.raw, { snapshotVersion });
+        written = Boolean(out?.ok && !out.skipped);
+        persistSuperseded = out?.reason === 'superseded';
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[AttendanceReward] persist user profile failed for ' + userid + ':', err?.message || err);
+      }
     }
+    // 没有成功写入时仅保证账户存在（不改名），发奖流程依赖它。
+    if (!written) await ensureAccount(db, { userid, name: '' });
+    // 取数期间有通讯录事件到达：这份资料可能已过期，不用于资格判定，稍后重判。
+    // 对每个调用者独立判断（包括缓存命中、合并到他人请求的调用者），与是否写库无关。
+    if (profile?.invalidated || persistSuperseded || isUserSnapshotSuperseded(userid, snapshotVersion)) return { name: profileName || localName || '', deptIds: [] };
     return {
       name: profileName || localName || '',
       deptIds: Array.isArray(profile?.deptIds) ? profile.deptIds.map((id) => String(id)).filter(Boolean) : [],
@@ -366,7 +395,7 @@ async function resolveAttendanceUserProfile(db, cfg, userid) {
 }
 
 async function resolveAttendanceDisplayName(db, cfg, userid) {
-  const profile = await resolveAttendanceUserProfile(db, cfg, userid);
+  const profile = await resolveAttendanceUserProfile(db, cfg, userid, { needDepartments: false });
   return profile.name || '';
 }
 
@@ -378,7 +407,39 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
   if (!isAttendanceRewardDateActive(settings, preliminary.work_date)) {
     return { ok: true, skipped: true, reason: 'before_start_date' };
   }
-  const userProfile = await resolveAttendanceUserProfile(db, cfg, userid);
+
+  // 已有终态记录时直接复用，不再为它查询用户信息或部门（补偿任务每轮都会重放当天全部打卡记录）。
+  if (preliminary.check_time_ms > 0) {
+    const prior = await db.get(
+      `SELECT id, status, skip_reason, notify_status, reward_reason, reward_amount
+         FROM attendance_reward_records
+        WHERE userid = ? AND work_date = ? AND check_time_ms = ?
+        LIMIT 1`,
+      [preliminary.userid, preliminary.work_date, preliminary.check_time_ms],
+    );
+    const priorStatus = String(prior?.status || '');
+    if (prior && priorStatus && priorStatus !== 'pending') {
+      const needsReevaluate =
+        (priorStatus === 'skipped' && String(prior.skip_reason || '') === 'department_not_allowed') ||
+        priorStatus === 'test_passed'; // 试运行结果不是终态：关闭测试模式后需按正式规则重新判定
+      const needsNotifyRetry = notifyOnReward && priorStatus === 'rewarded' && String(prior.notify_status || '') !== 'sent';
+      if (!needsReevaluate && !needsNotifyRetry) {
+        return {
+          ok: true,
+          reused: true,
+          status: priorStatus,
+          recordId: prior.id,
+          notify_status: prior.notify_status,
+          rewardReason: prior.reward_reason,
+          amount: prior.reward_amount,
+        };
+      }
+    }
+  }
+
+  const userProfile = await resolveAttendanceUserProfile(db, cfg, userid, {
+    needDepartments: String(settings?.departmentMode || 'all') === 'selected',
+  });
   const displayName = userProfile.name || '';
   const normalized = normalizeAttendanceRecord(record, displayName || userid);
   if (!normalized.user_name_snapshot) normalized.user_name_snapshot = displayName || userid;
@@ -391,7 +452,7 @@ async function handleAttendanceRecord(db, cfg, settings, record, { eventSource =
       const existingSkipReason = String(existing.skip_reason || '');
       const shouldReevaluate =
         (existingStatus === 'skipped' && existingSkipReason === 'department_not_allowed') ||
-        (settings?.testMode === true && existingStatus === 'test_passed');
+        existingStatus === 'test_passed'; // 试运行结果不是终态：关闭测试模式后需按正式规则重新判定
       if (!shouldReevaluate) {
         return {
           ok: true,
@@ -682,7 +743,8 @@ export function shouldNotifyAttendanceReward(now = getCurrentCstInfo()) {
   return Number.isFinite(minutes) && minutes >= 8 * 60 && minutes < 9 * 60;
 }
 
-export async function reconcileAttendanceRewards(db, cfg, { date, userids, notifyOnReward = false } = {}) {
+// skipRewardedUsers：定时任务使用，当天已领满奖励的人不再查询钉钉考勤（attendance/list 按次计量，配额有限）。
+export async function reconcileAttendanceRewards(db, cfg, { date, userids, notifyOnReward = false, skipRewardedUsers = false } = {}) {
   const settings = await getAttendanceRewardSettings(db);
   if (!settings?.enabled) return { ok: true, skipped: true, reason: 'disabled' };
   if (settings.testMode === true) notifyOnReward = false;
@@ -696,11 +758,40 @@ export async function reconcileAttendanceRewards(db, cfg, { date, userids, notif
     notifyOnReward = false; // 9 点后补发不推送，只记账
   }
   await seedAttendanceRewardRecordsFromAudit(db, { date: range.date });
-  const users = Array.isArray(userids) && userids.length > 0
+  let users = Array.isArray(userids) && userids.length > 0
     ? userids.map((x) => String(x || '').trim()).filter(Boolean)
     : (await db.all('SELECT userid FROM users ORDER BY userid ASC')).map((row) => String(row?.userid || '')).filter(Boolean);
 
+  const totalUsers = users.length;
+  if (skipRewardedUsers && settings.testMode !== true) {
+    // 推送窗口内，只要有任何一条已发放的奖励通知还没发成功，就保留该用户（不受当前 maxPerDay 影响），
+    // 由 handleAttendanceRecord 走通知补发。
+    const doneRows = await db.all(
+      `SELECT userid FROM attendance_reward_records
+        WHERE work_date = ? AND status = 'rewarded'
+        GROUP BY userid
+        HAVING COUNT(*) >= ?
+           AND (? = 0 OR SUM(CASE WHEN notify_status = 'sent' THEN 0 ELSE 1 END) = 0)`,
+      [range.date, Math.max(1, Number(settings.maxPerDay) || 1), notifyOnReward ? 1 : 0],
+    );
+    const done = new Set((doneRows || []).map((row) => String(row?.userid || '')));
+    users = users.filter((id) => !done.has(id));
+  }
+  if (users.length === 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[AttendanceReward] reconcile date=${range.date} users=0/${totalUsers} attendanceListCalls=0 scheduled=${skipRewardedUsers}（全员已领奖，跳过）`);
+    const summary = await getAttendanceRewardDailySummary(db, { days: 7, date: range.date });
+    return { ok: true, date: range.date, count: 0, results: [], summary };
+  }
+
   const attendanceRows = await fetchAttendanceRecords(cfg, { from: range.from, to: range.to, userids: users });
+  // attendance/list 按次计量：记录每轮实际请求次数，便于和钉钉后台调用统计核对。
+  // eslint-disable-next-line no-console
+  console.log(
+    `[AttendanceReward] reconcile date=${range.date} users=${users.length}/${totalUsers} `
+    + `attendanceListCalls=${Math.ceil(users.length / RECONCILE_BATCH_SIZE)} records=${attendanceRows.length} `
+    + `scheduled=${skipRewardedUsers}`,
+  );
   const results = [];
   for (const record of attendanceRows) {
     // eslint-disable-next-line no-await-in-loop
@@ -844,26 +935,53 @@ export async function getAttendanceRewardDayDetail(db, { date } = {}) {
   };
 }
 
+// 补偿只是 Stream 实时事件的兜底，按固定时间点各跑一次（attendance/list 按次计量）。
+// notify=true 的时间点仍在 8–9 点推送窗口内。
+export const ATTENDANCE_RECONCILE_SLOTS = [
+  { key: 'morning-1', minutes: 8 * 60 + 20, notify: true },
+  { key: 'morning-2', minutes: 8 * 60 + 50, notify: true },
+  { key: 'midday', minutes: 11 * 60 + 5, notify: false },
+  { key: 'evening', minutes: 18 * 60 + 5, notify: false },
+];
+const RECONCILE_SLOT_GRACE_MIN = 10;
+const RECONCILE_SLOT_MAX_ATTEMPTS = 2;
+
+export function getDueReconcileSlot(now, attempts = new Map()) {
+  const minutes = Number(now?.minutes);
+  if (!Number.isFinite(minutes)) return null;
+  for (const slot of ATTENDANCE_RECONCILE_SLOTS) {
+    if (minutes < slot.minutes || minutes >= slot.minutes + RECONCILE_SLOT_GRACE_MIN) continue;
+    if ((attempts.get(`${now.date}:${slot.key}`) || 0) >= RECONCILE_SLOT_MAX_ATTEMPTS) continue;
+    return slot;
+  }
+  return null;
+}
+
 export function startAttendanceRewardReconcileScheduler({ db, cfg } = {}) {
   let inFlight = false;
+  const attempts = new Map();
   async function runOnce() {
     if (inFlight) return;
     const now = getCurrentCstInfo();
-    const inMorningWindow = now.minutes >= 8 * 60 && now.minutes < 9 * 60;
-    const inMiddayWindow = now.minutes >= 11 * 60 && now.minutes < 11 * 60 + 15;
-    const inEveningWindow = now.minutes >= 18 * 60 && now.minutes < 18 * 60 + 15;
-    if (!inMorningWindow && !inMiddayWindow && !inEveningWindow) return;
+    const slot = getDueReconcileSlot(now, attempts);
+    if (!slot) return;
 
     inFlight = true;
+    const attemptKey = `${now.date}:${slot.key}`;
+    attempts.set(attemptKey, (attempts.get(attemptKey) || 0) + 1);
     try {
-      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: inMorningWindow });
+      await reconcileAttendanceRewards(db, cfg, { notifyOnReward: slot.notify, skipRewardedUsers: true });
+      attempts.set(attemptKey, RECONCILE_SLOT_MAX_ATTEMPTS);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[AttendanceReward] reconcile failed:', err?.message || err);
     } finally {
       inFlight = false;
+      for (const key of attempts.keys()) {
+        if (!key.startsWith(`${now.date}:`)) attempts.delete(key);
+      }
     }
   }
   setTimeout(runOnce, 15000);
-  setInterval(runOnce, 2 * 60 * 1000);
+  setInterval(runOnce, 60 * 1000);
 }

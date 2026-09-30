@@ -10,6 +10,21 @@ let accessTokenCache = null;
 let jsapiTicketCache = null;
 let v1AccessTokenCache = null;
 
+// 钉钉对单应用有 QPS 限流（峰值 25 时出现过大量限流），统一把请求起始间隔拉开到 ≥100ms（≤10 QPS）。
+const MIN_REQUEST_GAP_MS = 100;
+let paceChain = Promise.resolve();
+let lastRequestStartedAt = 0;
+
+function paceDingtalkRequest() {
+  const slot = paceChain.then(async () => {
+    const wait = lastRequestStartedAt + MIN_REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastRequestStartedAt = Date.now();
+  });
+  paceChain = slot;
+  return slot;
+}
+
 async function httpJson(method, url, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
@@ -21,6 +36,7 @@ async function httpJson(method, url, body) {
     throw new Error('fetch not available, please use Node.js 18+');
   }
 
+  await paceDingtalkRequest();
   const resp = await fetch(url, opts);
   const text = await resp.text();
   let data;
@@ -46,6 +62,7 @@ async function httpJsonWithHeaders(method, url, { headers = {}, body } = {}) {
     throw new Error('fetch not available, please use Node.js 18+');
   }
 
+  await paceDingtalkRequest();
   const resp = await fetch(url, opts);
   const text = await resp.text();
   let data;
@@ -65,7 +82,9 @@ function assertDingtalkOk(data, context) {
     throw new Error(`dingtalk ${context} failed: empty response`);
   }
   if (data.errcode && data.errcode !== 0) {
-    throw new Error(`dingtalk ${context} failed: ${data.errmsg || data.errcode}`);
+    const err = new Error(`dingtalk ${context} failed: ${data.errmsg || data.errcode}`);
+    err.errcode = Number(data.errcode);
+    throw err;
   }
 }
 
@@ -127,11 +146,11 @@ export async function queryDingtalkGroupRobot(cfg, { openConversationId, robotCo
   return resp?.body?.result && typeof resp.body.result === 'object' ? resp.body.result : null;
 }
 
-export async function getRootDepartmentProfile(cfg, { language = 'zh_CN' } = {}) {
+export async function getRootDepartmentProfile(cfg, { language = 'zh_CN', deptId = 1 } = {}) {
   const token = await getAccessToken(cfg);
   const url = `https://oapi.dingtalk.com/topapi/v2/department/get?access_token=${encodeURIComponent(token)}`;
   const data = await httpJson('POST', url, {
-    dept_id: 1,
+    dept_id: Number(deptId) || 1,
     language: String(language || 'zh_CN'),
   });
 
@@ -411,7 +430,73 @@ export async function getUserIdByOAuthCode(cfg, code) {
   return String(userid);
 }
 
+const USER_PROFILE_CACHE_MS = 10 * 60 * 1000;
+const userProfileCache = new Map();
+// 进行中的请求带一个令牌：缓存失效后令牌作废，旧请求返回时不得再写入缓存。
+const userProfileInflight = new Map();
+
+export function clearUserProfileCache() {
+  userProfileCache.clear();
+  userProfileInflight.clear();
+}
+
+// 通讯录事件已确认该员工资料变化时，丢弃缓存和进行中的请求，避免读到变更前的资料。
+export function invalidateUserProfileCache(userid) {
+  const suffix = `:${String(userid || '')}`;
+  for (const key of [...userProfileCache.keys()]) {
+    if (key.endsWith(suffix)) userProfileCache.delete(key);
+  }
+  for (const [key, entry] of [...userProfileInflight]) {
+    if (!key.endsWith(suffix)) continue;
+    entry.invalidated = true; // 进行中的请求：调用者拿到结果时能知道它已失效
+    userProfileInflight.delete(key);
+  }
+}
+
+// 同一员工短时间内多次触发（登录、打卡事件、补偿任务）只查一次钉钉；并发相同请求合并。
+// freshFetch：这份资料是否由本次调用自己发起、且未被作废的请求取得。缓存命中或合并到别人进行中的请求时为 false——
+// 那份数据的取数时间早于本次调用，调用方不得把它当作“本次调用时刻的快照”写回本地库。
+// invalidated：取数期间该员工的缓存被作废过（通讯录事件或全量同步写入），这份资料可能已过期，
+// 不得写回本地库，也不得用于奖励资格判定；对发起者和合并到同一请求的调用者都成立。
 export async function getUserProfile(cfg, userid) {
+  if (!userid) {
+    throw new Error('missing userid');
+  }
+  const key = `${getDingtalkCacheKey(cfg)}:${String(userid)}`;
+  const cached = userProfileCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { ...cached.value, deptIds: [...cached.value.deptIds], freshFetch: false, invalidated: false };
+  }
+
+  let entry = userProfileInflight.get(key);
+  let initiated = false;
+  if (!entry) {
+    const created = { promise: null, invalidated: false };
+    created.promise = fetchUserProfile(cfg, userid)
+      .then((value) => {
+        if (userProfileInflight.get(key) === created) {
+          userProfileCache.set(key, { value, expiresAt: Date.now() + USER_PROFILE_CACHE_MS });
+        }
+        return value;
+      })
+      .finally(() => {
+        if (userProfileInflight.get(key) === created) userProfileInflight.delete(key);
+      });
+    userProfileInflight.set(key, created);
+    entry = created;
+    initiated = true;
+  }
+  const value = await entry.promise;
+  return {
+    ...value,
+    deptIds: [...value.deptIds],
+    freshFetch: initiated && !entry.invalidated,
+    invalidated: entry.invalidated,
+  };
+}
+
+// 返回钉钉 user/get 的完整原始结果（不走缓存），供本地资料表落库使用。
+export async function getUserDetail(cfg, userid) {
   if (!userid) {
     throw new Error('missing userid');
   }
@@ -422,18 +507,21 @@ export async function getUserProfile(cfg, userid) {
 
   assertDingtalkOk(data, 'user.get');
 
-  const result = data?.result || {};
-  const name = result?.name;
-  const avatar = result?.avatar;
+  return { userid: String(userid), ...(data?.result || {}) };
+}
+
+async function fetchUserProfile(cfg, userid) {
+  const result = await getUserDetail(cfg, userid);
   const deptIds = Array.isArray(result?.dept_id_list)
     ? result.dept_id_list.map((id) => String(id)).filter(Boolean)
     : [];
   return {
     userid: String(userid),
-    name: name ? String(name) : '',
-    avatar: avatar ? String(avatar) : '',
+    name: result?.name ? String(result.name) : '',
+    avatar: result?.avatar ? String(result.avatar) : '',
     title: result?.title ? String(result.title) : '',
     deptIds,
+    raw: result,
   };
 }
 
