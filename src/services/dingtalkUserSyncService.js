@@ -184,35 +184,19 @@ export async function syncAllDingtalkUsers(db, cfg) {
       if (isSuperseded(u.userid, snapshotVersion)) return false;
       await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, u));
       commitVersion(u.userid, snapshotVersion);
+      // 本地资料已被这份快照替换，getUserProfile 里可能残留的旧缓存/进行中请求一并作废。
+      invalidateUserProfileCache(u.userid);
       return true;
     });
     if (written) upserted += 1;
   }
 
-  // 兜底：钉钉列表里已不存在的员工标记为停用（离职事件处理失败/遗漏时靠这里修复）。
-  // 列表为空时不处理，避免接口异常（如权限被收回）导致整批误停用。
-  let deactivated = 0;
-  if (users.size > 0) {
-    const rows = await db.all('SELECT userid FROM user_dingtalk_profiles WHERE active IS NULL OR active <> 0');
-    for (const row of rows || []) {
-      const userid = String(row?.userid || '');
-      if (!userid || users.has(userid)) continue;
-      // eslint-disable-next-line no-await-in-loop
-      const done = await withUserLock(userid, async () => {
-        if (isSuperseded(userid, snapshotVersion)) return false;
-        await db.run('UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?', [userid]);
-        commitVersion(userid, snapshotVersion);
-        return true;
-      });
-      if (done) deactivated += 1;
-    }
-  }
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
     publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
   }
 
-  return { deptCount: deptIds.length, fetched, active: activeCount, upserted, deactivated };
+  return { deptCount: deptIds.length, fetched, active: activeCount, upserted };
 }
 
 // 同一员工的写操作按到达顺序串行：Stream 事件是并发处理的，
@@ -379,7 +363,28 @@ export function extractEventUserIds(data) {
 export const DINGTALK_CONTACT_USER_EVENTS = ['user_add_org', 'user_modify_org', 'user_active_org', 'user_leave_org'];
 export const DINGTALK_CONTACT_DEPT_EVENTS = ['org_dept_create', 'org_dept_modify', 'org_dept_remove'];
 
-export async function handleContactUserEvent(db, cfg, { topic, data } = {}) {
+const EVENT_RETRY_DELAYS_MS = [2000, 10000, 60000];
+
+// 事件处理失败（如数据库瞬时故障）时有限次重试。Stream 已经确认过该事件，钉钉不会重推。
+// 重试前若同一员工已有更新的事件到达，则放弃：更新的事件会自己处理，旧的离职不能再把重新入职的人停用。
+// 仅在进程内重试，进程重启会丢失。
+async function runWithRetry(op, userid, eventVersion, delaysMs, firstErr) {
+  let lastErr = firstErr;
+  for (const delay of delaysMs) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    if (isSuperseded(userid, eventVersion)) throw lastErr;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      return await op();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+export async function handleContactUserEvent(db, cfg, { topic, data, retryDelaysMs = EVENT_RETRY_DELAYS_MS } = {}) {
   const ids = extractEventUserIds(data);
   if (ids.length === 0) {
     // 解析不到 userId 时保留原始内容，便于核对钉钉实际推送的字段格式。
@@ -394,10 +399,26 @@ export async function handleContactUserEvent(db, cfg, { topic, data } = {}) {
   // 批内某个员工的慢请求不能让后到的事件（如重新入职）抢在同批其他员工的处理之前。
   const tasks = ids.map((userid) => {
     const eventVersion = noteUserEvent(userid);
-    const task = topic === 'user_leave_org'
+    // 第一次尝试同步入队（保证按到达顺序）；只有失败后才进入重试。
+    const first = topic === 'user_leave_org'
       ? markDingtalkUserLeft(db, userid, { eventVersion }).then(() => '已标记停用')
       : syncDingtalkUserById(db, cfg, userid, { eventVersion })
         .then((out) => (out?.skipped ? `已跳过(${out.reason})` : '资料已更新'));
+    const task = first.catch((firstErr) => {
+      if (retryDelaysMs.length === 0 || isSuperseded(userid, eventVersion)) throw firstErr;
+      // eslint-disable-next-line no-console
+      console.warn(`[DingtalkUserSync] ${topic} ${userid} 处理失败，将重试:`, firstErr?.message || firstErr);
+      return runWithRetry(
+        () => (topic === 'user_leave_org'
+          ? markDingtalkUserLeft(db, userid, { eventVersion }).then(() => '已标记停用')
+          : syncDingtalkUserById(db, cfg, userid, { eventVersion })
+            .then((out) => (out?.skipped ? `已跳过(${out.reason})` : '资料已更新'))),
+        userid,
+        eventVersion,
+        retryDelaysMs,
+        firstErr,
+      );
+    });
     return task
       .then((result) => {
         // eslint-disable-next-line no-console

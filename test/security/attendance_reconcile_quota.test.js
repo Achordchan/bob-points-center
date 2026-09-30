@@ -135,7 +135,7 @@ test('已有终态记录的打卡不再查询钉钉用户信息', async () => {
   );
 });
 
-test('本地已同步且未过期的用户资料优先，不调用钉钉 user/get', async () => {
+test('全部部门模式下姓名已知时不调用钉钉 user/get', async () => {
   const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify([1, 2]), updated_at: Math.floor(Date.now() / 1000) } });
   await withFetchStub(
     () => { throw new Error('不应调用钉钉接口'); },
@@ -214,46 +214,6 @@ test('测试模式的试运行记录在关闭测试模式后重新判定，不�
   );
 });
 
-test('本地部门已过期且刷新失败时不采信旧部门（失败即拒绝），只保留姓名', async () => {
-  clearUserProfileCache();
-  const staleAt = Math.floor(Date.now() / 1000) - 3 * 86400;
-  const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: staleAt } });
-  const failCfg = { dingtalk: { appKey: 'stale-key', appSecret: 'stale-secret' } };
-  await withFetchStub(
-    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 60011, errmsg: 'boom' }),
-    async () => {
-      const profile = await resolveAttendanceUserProfile(db, failCfg, 'u1', { needDepartments: true });
-      assert.equal(profile.name, '张三');
-      assert.deepEqual(profile.deptIds, []);
-    },
-  );
-  // 未配置钉钉凭证、无法刷新时同样不采信过期部门
-  const noCred = await resolveAttendanceUserProfile(db, {}, 'u1', { needDepartments: true });
-  assert.deepEqual(noCred.deptIds, []);
-  // 有效期内的本地部门仍被采用
-  const freshDb = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: Math.floor(Date.now() / 1000) } });
-  const fresh = await resolveAttendanceUserProfile(freshDb, {}, 'u1', { needDepartments: true });
-  assert.deepEqual(fresh.deptIds, ['5']);
-  clearUserProfileCache();
-});
-
-test('已离职（active=0）的本地资料不再为奖励资格提供缓存部门', async () => {
-  clearUserProfileCache();
-  const now = Math.floor(Date.now() / 1000);
-  const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: now, active: 0 } });
-  const cfgInactive = { dingtalk: { appKey: 'inactive-key', appSecret: 'inactive-secret' } };
-  await withFetchStub(
-    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 60011, errmsg: 'boom' }),
-    async () => {
-      const profile = await resolveAttendanceUserProfile(db, cfgInactive, 'u1', { needDepartments: true });
-      assert.deepEqual(profile.deptIds, []);
-    },
-  );
-  const noCred = await resolveAttendanceUserProfile(db, {}, 'u1', { needDepartments: true });
-  assert.deepEqual(noCred.deptIds, []);
-  clearUserProfileCache();
-});
-
 test('取数期间收到通讯录事件时，打卡路径不会用旧名字覆盖 users.name', async () => {
   clearUserProfileCache();
   const db = makeCheckinDb({});
@@ -270,6 +230,57 @@ test('取数期间收到通讯录事件时，打卡路径不会用旧名字覆�
       await handleContactUserEvent(db, nameCfg, { topic: 'user_leave_org', data: { UserId: ['nm1'] } });
       await pending;
       assert.equal(db.runs.some((r) => /UPDATE users SET name/.test(r.sql)), false);
+    },
+  );
+  clearUserProfileCache();
+});
+
+test('指定部门奖励的部门一律向钉钉实时取，不使用本地缓存的部门', async () => {
+  clearUserProfileCache();
+  const db = makeCheckinDb({ profile: { name: '张三', dept_ids: JSON.stringify(['5']), updated_at: Math.floor(Date.now() / 1000), active: 1 } });
+  const liveCfg = { dingtalk: { appKey: 'live-key', appSecret: 'live-secret' } };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken')
+      ? { errcode: 0, access_token: 't', expires_in: 7200 }
+      : { errcode: 0, result: { name: '张三', active: true, dept_id_list: [9] } }),
+    async (calls) => {
+      const profile = await resolveAttendanceUserProfile(db, liveCfg, 'live1', { needDepartments: true });
+      assert.deepEqual(profile.deptIds, ['9']);
+      assert.equal(calls.filter((c) => c.url.includes('/user/get')).length, 1);
+    },
+  );
+  clearUserProfileCache();
+
+  const failCfg = { dingtalk: { appKey: 'fail-key', appSecret: 'fail-secret' } };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 60011, errmsg: 'boom' }),
+    async () => {
+      const failed = await resolveAttendanceUserProfile(db, failCfg, 'live2', { needDepartments: true });
+      assert.equal(failed.name, '张三');
+      assert.deepEqual(failed.deptIds, []);
+    },
+  );
+  const noCred = await resolveAttendanceUserProfile(db, {}, 'live3', { needDepartments: true });
+  assert.deepEqual(noCred.deptIds, []);
+  clearUserProfileCache();
+});
+
+test('取数期间收到通讯录事件：这份资料不用于资格判定（部门为空，稍后重判）', async () => {
+  clearUserProfileCache();
+  const db = makeCheckinDb({});
+  const supCfg = { dingtalk: { appKey: 'sup-key', appSecret: 'sup-secret' } };
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { errcode: 0, result: { name: '张三', active: true, dept_id_list: [5] } };
+    },
+    async () => {
+      const pending = resolveAttendanceUserProfile(db, supCfg, 'sp1', { needDepartments: true });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await handleContactUserEvent(db, supCfg, { topic: 'user_leave_org', data: { UserId: ['sp1'] } });
+      const profile = await pending;
+      assert.deepEqual(profile.deptIds, []);
     },
   );
   clearUserProfileCache();

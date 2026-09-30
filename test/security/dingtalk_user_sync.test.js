@@ -27,7 +27,7 @@ function withFetchStub(handler, fn) {
     .finally(() => { globalThis.fetch = original; });
 }
 
-function makeDb({ existing = null, activeProfiles = [] } = {}) {
+function makeDb({ existing = null, activeProfiles = [], failLeaveTimes = 0 } = {}) {
   const log = { run: [], exec: [], order: [] };
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
@@ -40,7 +40,14 @@ function makeDb({ existing = null, activeProfiles = [] } = {}) {
       return existing;
     },
     async all() { return activeProfiles.map((userid) => ({ userid })); },
-    async run(sql, params) { log.run.push({ sql, params }); if (/SET active = 0/.test(sql)) log.order.push(`leave:${params[0]}`); },
+    async run(sql, params) {
+      if (/SET active = 0/.test(sql) && failLeaveTimes > 0) {
+        failLeaveTimes -= 1;
+        throw new Error('db temporarily unavailable');
+      }
+      log.run.push({ sql, params });
+      if (/SET active = 0/.test(sql)) log.order.push(`leave:${params[0]}`);
+    },
     async exec(sql, params) { log.exec.push({ sql, params }); },
     async transaction(fn) { return fn(tx); },
   };
@@ -120,7 +127,7 @@ test('单个员工同步失败不影响同批其他员工', async () => {
       return { errcode: 0, result: { name: '赵六', active: true, dept_id_list: [1] } };
     },
     async () => {
-      const out = await handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['bad', 'ok'] } });
+      const out = await handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['bad', 'ok'] }, retryDelaysMs: [] });
       assert.equal(out.count, 2);
       assert.equal(upsertOf(db)?.params[0], 'ok');
     },
@@ -368,36 +375,55 @@ test('全量同步：采集期间登录刷新写入了更新的资料，旧快�
   );
 });
 
-test('全量同步兜底：把钉钉列表里已不存在的员工标记停用；列表为空时不处理', async () => {
+
+test('离职事件因数据库瞬时故障失败时有限次重试并最终成功', async () => {
+  const db = makeDb({ failLeaveTimes: 2 });
+  await handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['rt1'] }, retryDelaysMs: [5, 5, 5] });
+  assert.deepEqual(db.log.order, ['leave:rt1']);
+});
+
+test('离职事件重试前若已有更新的事件到达（重新入职），放弃重试，不再停用', async () => {
   clearUserProfileCache();
-  const db = makeDb({ activeProfiles: ['gone1', 'stay1'] });
+  const db = makeDb({ failLeaveTimes: 1 });
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      return { errcode: 0, result: { userid: 'rt2', name: '庚', active: true, dept_id_list: [1] } };
+    },
+    async () => {
+      const leaving = handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['rt2'] }, retryDelaysMs: [80, 80] });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await handleContactUserEvent(db, cfg, { topic: 'user_add_org', data: { UserId: ['rt2'] }, retryDelaysMs: [] });
+      await leaving;
+      // 只有重新入职的写入，离职的重试被放弃
+      assert.deepEqual(db.log.order, ['upsert:rt2']);
+    },
+  );
+});
+
+test('全量同步写入某员工后，作废 getUserProfile 里该员工的缓存', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  const cacheCfg = { dingtalk: { appKey: 'fullsync-key', appSecret: 'fullsync-secret' } };
+  let userGetCalls = 0;
   await withFetchStub(
     async (url) => {
       if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
       if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
       if (url.includes('/user/list')) {
-        return { errcode: 0, result: { has_more: false, list: [{ userid: 'stay1', name: '己', active: true, dept_id_list: [1] }] } };
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'fc1', name: '辛', active: true, dept_id_list: [1] }] } };
       }
-      throw new Error(`unexpected ${url}`);
+      userGetCalls += 1;
+      return { errcode: 0, result: { userid: 'fc1', name: '辛', active: true, dept_id_list: [1] } };
     },
     async () => {
-      const result = await syncAllDingtalkUsers(db, cfg);
-      assert.equal(result.deactivated, 1);
-      assert.deepEqual(db.log.order.filter((x) => x.startsWith('leave:')), ['leave:gone1']);
+      await getUserProfile(cacheCfg, 'fc1');
+      await getUserProfile(cacheCfg, 'fc1');
+      assert.equal(userGetCalls, 1);
+      await syncAllDingtalkUsers(db, cacheCfg);
+      await getUserProfile(cacheCfg, 'fc1');
+      assert.equal(userGetCalls, 2);
     },
   );
-
-  const emptyDb = makeDb({ activeProfiles: ['gone1'] });
-  await withFetchStub(
-    async (url) => {
-      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
-      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
-      return { errcode: 0, result: { has_more: false, list: [] } };
-    },
-    async () => {
-      const result = await syncAllDingtalkUsers(emptyDb, cfg);
-      assert.equal(result.deactivated, 0);
-      assert.equal(emptyDb.log.run.length, 0);
-    },
-  );
+  clearUserProfileCache();
 });

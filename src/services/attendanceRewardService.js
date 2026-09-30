@@ -9,7 +9,6 @@ const RECONCILE_BATCH_SIZE = 20;
 const DEFAULT_WORK_START_MIN = 8 * 60 + 30; // 默认 08:30 前算有效
 const DEPARTMENT_EXPANSION_CACHE_MS = 5 * 60 * 1000;
 const departmentExpansionCache = new Map();
-const LOCAL_PROFILE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // 通讯录部门变更事件到达时调用，下次判定重新展开部门树。
 export function clearAttendanceDepartmentCache() {
@@ -346,44 +345,14 @@ async function writeAttendanceAudit(db, { eventType, userid, actorName, message,
   });
 }
 
-async function getLocalDingtalkProfile(db, userid) {
-  try {
-    const row = await db.get(
-      'SELECT name, dept_ids, updated_at, active FROM user_dingtalk_profiles WHERE userid = ? LIMIT 1',
-      [userid],
-    );
-    if (!row) return null;
-    let deptIds = [];
-    try {
-      const parsed = JSON.parse(String(row.dept_ids || '[]'));
-      if (Array.isArray(parsed)) deptIds = parsed.map((id) => String(id || '').trim()).filter(Boolean);
-    } catch {
-      deptIds = [];
-    }
-    const updatedAt = Number(row.updated_at) || 0;
-    const updatedMs = updatedAt > 1e12 ? updatedAt : updatedAt * 1000;
-    return {
-      name: row.name ? String(row.name).trim() : '',
-      deptIds,
-      // 已标记离职/停用（active = 0）的资料不能再为奖励资格提供缓存部门。
-      fresh: updatedMs > 0 && Date.now() - updatedMs < LOCAL_PROFILE_TTL_MS && Number(row.active) !== 0 && row.active !== false,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// 优先使用“同步用户”写入本地的姓名/部门，仅在本地缺失或过期时才调钉钉 user/get，避免打卡高峰被限流。
+// 姓名可用本地已知值；“指定部门奖励”所需的部门一律向钉钉实时取（user/get 不计量，
+// 请求已限速并带 10 分钟缓存，通讯录事件会作废缓存），不使用本地缓存的部门做资格判定。
+// 取不到时部门为空（失败即拒绝，稍后重判）。
 export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepartments = true } = {}) {
   const localName = await getUserName(db, userid);
-  const local = await getLocalDingtalkProfile(db, userid);
-  const knownName = local?.name || localName || '';
-  // 刷新失败时只保留姓名；已过期的本地部门不能用来判定“指定部门奖励”资格（宁可本次判为不符、稍后重判）。
-  const fallback = { name: knownName, deptIds: local?.fresh ? local.deptIds : [] };
+  const fallback = { name: localName || '', deptIds: [] };
 
-  if (local?.fresh && knownName && (!needDepartments || local.deptIds.length > 0)) {
-    return fallback;
-  }
+  if (!needDepartments && localName) return fallback;
 
   if (!cfg?.dingtalk?.appKey || !cfg?.dingtalk?.appSecret) {
     return fallback;
@@ -394,12 +363,14 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     const profile = await getUserProfile(cfg, userid);
     const profileName = profile?.name ? String(profile.name).trim() : '';
     let written = false;
+    let superseded = false;
     if (profile?.raw) {
-      // 姓名与部门在同一个按员工串行、带版本检查的写入里落库（顺手写回，之后 24 小时内不再请求钉钉）。
+      // 姓名与部门在同一个按员工串行、带版本检查的写入里落库，供后台展示使用。
       // 不在这里单独改 users.name：进行中的旧请求返回时可能把刚被事件更新的新名字覆盖回去。
       try {
         const out = await persistDingtalkUserDetail(db, cfg, profile.raw, { snapshotVersion });
         written = Boolean(out?.ok && !out.skipped);
+        superseded = out?.reason === 'superseded';
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[AttendanceReward] persist user profile failed for ' + userid + ':', err?.message || err);
@@ -407,8 +378,10 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     }
     // 没有成功写入时仅保证账户存在（不改名），发奖流程依赖它。
     if (!written) await ensureAccount(db, { userid, name: '' });
+    // 取数期间有通讯录事件到达：这份资料可能已过期，不用于资格判定，稍后重判。
+    if (superseded) return { name: profileName || localName || '', deptIds: [] };
     return {
-      name: profileName || knownName,
+      name: profileName || localName || '',
       deptIds: Array.isArray(profile?.deptIds) ? profile.deptIds.map((id) => String(id)).filter(Boolean) : [],
     };
   } catch (err) {
