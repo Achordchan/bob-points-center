@@ -29,13 +29,15 @@ function withFetchStub(handler, fn) {
 
 function makeDb({ existing = null, activeProfiles = [], failLeaveTimes = 0 } = {}) {
   const log = { run: [], exec: [], order: [] };
+  const settings = new Map();
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
     async exec(sql, params) { log.exec.push({ sql, params }); if (/INSERT INTO user_dingtalk_profiles/.test(sql)) log.order.push(`upsert:${params[0]}`); },
   };
   return {
     log,
-    async get(sql) {
+    async get(sql, params) {
+      if (/system_settings/.test(sql)) return settings.has(params[0]) ? { value: settings.get(params[0]) } : null;
       assert.match(sql, /user_dingtalk_profiles/);
       return existing;
     },
@@ -48,7 +50,10 @@ function makeDb({ existing = null, activeProfiles = [], failLeaveTimes = 0 } = {
       log.run.push({ sql, params });
       if (/SET active = 0/.test(sql)) log.order.push(`leave:${params[0]}`);
     },
-    async exec(sql, params) { log.exec.push({ sql, params }); },
+    async exec(sql, params) {
+      log.exec.push({ sql, params });
+      if (/INSERT INTO system_settings/.test(sql)) settings.set(params[0], params[1]);
+    },
     async transaction(fn) { return fn(tx); },
   };
 }
@@ -111,7 +116,10 @@ test('离职事件只标记停用，不删除用户与账户', async () => {
       await handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['gone'] } });
       assert.equal(calls.length, 0);
       assert.equal(db.log.run.length, 1);
-      assert.match(db.log.run[0].sql, /UPDATE user_dingtalk_profiles SET active = 0/);
+      // 账户存在但没有资料行时补一条停用行（INSERT … SELECT FROM users … ON CONFLICT DO UPDATE）
+      assert.match(db.log.run[0].sql, /INSERT INTO user_dingtalk_profiles/);
+      assert.match(db.log.run[0].sql, /FROM users WHERE userid = \?/);
+      assert.match(db.log.run[0].sql, /DO UPDATE SET active = 0/);
       assert.deepEqual(db.log.run[0].params, ['gone']);
     },
   );
@@ -488,6 +496,33 @@ test('离职确认期间该员工有新事件到达（如重新入职）：放�
       const result = await sync;
       assert.equal(result.deactivated, 0);
       assert.deepEqual(db.log.order.filter((x) => x.endsWith(':sup1')), ['upsert:sup1']);
+    },
+  );
+});
+
+test('离职确认有单次上限时游标轮转：下一次同步接着往后查，不会总是重复查同一批', async () => {
+  clearUserProfileCache();
+  const candidates = ['c1', 'c2', 'c3', 'c4', 'c5'];
+  const db = makeDb({ activeProfiles: candidates });
+  const checked = [];
+  await withFetchStub(
+    async (url, body) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'listed1', name: '甲', active: true, dept_id_list: [1] }] } };
+      }
+      if (url.includes('/user/get')) {
+        checked.push(body.userid);
+        return { errcode: 60011, errmsg: '没有权限' }; // 一直无法确认：不停用
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      await syncAllDingtalkUsers(db, cfg, { maxDepartureChecks: 2 });
+      await syncAllDingtalkUsers(db, cfg, { maxDepartureChecks: 2 });
+      await syncAllDingtalkUsers(db, cfg, { maxDepartureChecks: 2 });
+      assert.deepEqual(checked, ['c1', 'c2', 'c3', 'c4', 'c5', 'c1']);
     },
   );
 });

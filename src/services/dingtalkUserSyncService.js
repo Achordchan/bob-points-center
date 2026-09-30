@@ -132,7 +132,7 @@ export async function upsertDingtalkUserProfile(tx, u) {
   );
 }
 
-export async function syncAllDingtalkUsers(db, cfg) {
+export async function syncAllDingtalkUsers(db, cfg, { maxDepartureChecks } = {}) {
   const snapshotVersion = beginUserSnapshot();
   const departments = await listDingtalkDepartmentsTree(cfg);
   const deptNameMap = new Map(departments.map((dept) => [String(dept.dept_id), String(dept.name || dept.dept_id)]));
@@ -191,7 +191,7 @@ export async function syncAllDingtalkUsers(db, cfg) {
     if (written) upserted += 1;
   }
 
-  const deactivated = await deactivateConfirmedDepartures(db, cfg, users);
+  const deactivated = await deactivateConfirmedDepartures(db, cfg, users, { maxChecks: maxDepartureChecks });
 
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
@@ -204,17 +204,29 @@ export async function syncAllDingtalkUsers(db, cfg) {
 // 钉钉 v2/user/get 对不存在的员工返回该错误码（“找不到该用户”）。
 const DINGTALK_ERRCODE_USER_NOT_FOUND = 60121;
 const MAX_DEPARTURE_CHECKS_PER_SYNC = 200;
+const DEPARTURE_CURSOR_KEY = 'dingtalk_departure_check_cursor';
 
 // 离职事件处理失败/遗漏时的兜底：本地仍标记在职、但不在本次列表里的员工，逐个向钉钉确认——
 // 只有钉钉明确返回“用户不存在”或 active=false 才标记停用。列表里“缺人”本身不作为离职依据
 // （应用通讯录可见范围缩小时，在职员工也会不在列表里），无法确认（权限不足、网络错误等）一律不处理。
 // 只改 active 标记，保留 users/accounts（BOB 币余额与流水不能丢）。
-async function deactivateConfirmedDepartures(db, cfg, listedUsers) {
+async function deactivateConfirmedDepartures(db, cfg, listedUsers, { maxChecks = MAX_DEPARTURE_CHECKS_PER_SYNC } = {}) {
   const rows = await db.all('SELECT userid FROM user_dingtalk_profiles WHERE active IS NULL OR active <> 0');
-  const candidates = (rows || [])
+  const all = (rows || [])
     .map((row) => String(row?.userid || ''))
     .filter((userid) => userid && !listedUsers.has(userid))
-    .slice(0, MAX_DEPARTURE_CHECKS_PER_SYNC);
+    .sort();
+  // 每次同步最多确认 maxChecks 人；游标持久化在 system_settings，下次接着往后查，避免总是重复查同一批。
+  const cursorRow = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', [DEPARTURE_CURSOR_KEY]);
+  const cursor = String(cursorRow?.value || '');
+  const start = all.findIndex((userid) => userid > cursor);
+  const ordered = start < 0 ? all : [...all.slice(start), ...all.slice(0, start)];
+  const candidates = ordered.slice(0, maxChecks);
+  const nextCursor = all.length > maxChecks && candidates.length > 0 ? candidates[candidates.length - 1] : '';
+  await db.exec(
+    'INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()',
+    [DEPARTURE_CURSOR_KEY, nextCursor],
+  );
   let deactivated = 0;
   for (const userid of candidates) {
     const version = beginUserSnapshot();
@@ -387,10 +399,13 @@ export function syncDingtalkUserById(db, cfg, userid, { eventVersion } = {}) {
 }
 
 // 离职只标记为停用，保留 users/accounts（BOB 币余额与流水不能丢）。
+// 账户存在但还没有资料行（自动同步上线前靠登录创建的账户）时，补一条 active=0 的资料行作为离职标记。
 export function markDingtalkUserLeft(db, userid, { eventVersion } = {}) {
   if (eventVersion === undefined) noteUserEvent(userid);
   return withUserLock(userid, () => db.run(
-    'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
+    `INSERT INTO user_dingtalk_profiles(userid, active, updated_at)
+     SELECT userid, 0, unixepoch() FROM users WHERE userid = ?
+     ON CONFLICT(userid) DO UPDATE SET active = 0, updated_at = unixepoch()`,
     [String(userid)],
   ));
 }
