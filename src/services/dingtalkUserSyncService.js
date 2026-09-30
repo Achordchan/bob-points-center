@@ -305,9 +305,20 @@ export function isUserSnapshotSuperseded(userid, snapshotVersion) {
   return isSuperseded(userid, snapshotVersion);
 }
 
+// 已成功写库的快照的最大版本（只含快照写入，不含事件到达）。
+const userCommittedSnapshotVersion = new Map();
+
 function commitVersion(userid, snapshotVersion) {
   const key = String(userid);
   if ((userLatestVersion.get(key) || 0) < snapshotVersion) userLatestVersion.set(key, snapshotVersion);
+  if ((userCommittedSnapshotVersion.get(key) || 0) < snapshotVersion) userCommittedSnapshotVersion.set(key, snapshotVersion);
+}
+
+// 是否已有取数时间晚于该事件的快照写库（如离职事件重试排队期间，全量同步/登录把员工写成了在职）。
+// 只看已写库的快照、不看“后到的事件”：后到的资料修改事件在员工已离职时取数会失败（用户不存在），
+// 不会写库，这时离职标记必须保留。
+function hasNewerCommittedSnapshot(userid, eventVersion) {
+  return (userCommittedSnapshotVersion.get(String(userid)) || 0) > eventVersion;
 }
 
 const PROFILE_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -410,8 +421,12 @@ const MARK_LEFT_SQL = `INSERT INTO user_dingtalk_profiles(userid, active, update
      ON CONFLICT(userid) DO UPDATE SET active = 0, updated_at = unixepoch()`;
 
 export function markDingtalkUserLeft(db, userid, { eventVersion } = {}) {
-  if (eventVersion === undefined) noteUserEvent(userid);
-  return withUserLock(userid, () => db.run(MARK_LEFT_SQL, [String(userid)]));
+  const version = eventVersion ?? noteUserEvent(userid);
+  return withUserLock(userid, async () => {
+    // 排队等锁期间，更晚取数的快照可能已经把员工写成在职，此时以它为准（与其它带版本的写路径一致）。
+    if (hasNewerCommittedSnapshot(userid, version)) return;
+    await db.run(MARK_LEFT_SQL, [String(userid)]);
+  });
 }
 
 export function extractEventUserIds(data) {

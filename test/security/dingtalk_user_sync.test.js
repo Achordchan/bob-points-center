@@ -531,3 +531,29 @@ test('离职确认有单次上限时游标轮转：下一次同步接着往后�
     },
   );
 });
+
+test('离职事件重试排队期间，更晚取数的快照已把员工写成在职：不再重新标记离职', async () => {
+  clearUserProfileCache();
+  const db = makeDb({ failLeaveTimes: 1 });
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/get')) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return { errcode: 0, result: { name: '新部门' } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      // 离职事件第一次写库失败，60ms 后重试
+      const leaving = handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['rl1'] }, retryDelaysMs: [60] });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      // 更晚取数的快照（如登录刷新/全量同步）持有员工锁，慢在补查部门名称
+      const snapshotVersion = beginUserSnapshot();
+      const persisting = persistDingtalkUserDetail(db, cfg, { userid: 'rl1', name: '己', active: true, dept_id_list: [55] }, { snapshotVersion });
+      await Promise.all([leaving, persisting]);
+      // 重试的离职写入排在快照之后，快照已写成在职，离职写入必须放弃
+      assert.deepEqual(db.log.order, ['upsert:rl1']);
+    },
+  );
+});
