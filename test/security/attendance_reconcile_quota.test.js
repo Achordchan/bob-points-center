@@ -176,7 +176,7 @@ test('推送窗口内的定时补偿保留通知未发送成功的人，用于�
       if (/GROUP BY userid/.test(sql)) {
         seen.push({ sql, params });
         // 仅 u1 已领奖且通知已发送；u2 已领奖但通知未发送，在查询条件里不应被算作“已完成”
-        return params[1] === 1 ? [{ userid: 'u1' }] : [{ userid: 'u1' }, { userid: 'u2' }];
+        return params[2] === 1 ? [{ userid: 'u1' }] : [{ userid: 'u1' }, { userid: 'u2' }];
       }
       return [];
     },
@@ -185,13 +185,13 @@ test('推送窗口内的定时补偿保留通知未发送成功的人，用于�
     (url) => (url.includes('/gettoken') ? { errcode: 0, access_token: 't', expires_in: 7200 } : { errcode: 0, recordresult: [] }),
     async (calls) => {
       await reconcileAttendanceRewards(db, quotaCfg, { date: '2026-09-01', skipRewardedUsers: true, notifyOnReward: true });
-      assert.match(seen[0].sql, /notify_status = 'sent'/);
-      assert.equal(seen[0].params[1], 1);
+      assert.match(seen[0].sql, /SUM\(CASE WHEN notify_status = 'sent' THEN 0 ELSE 1 END\) = 0/);
+      assert.equal(seen[0].params[2], 1);
       assert.deepEqual(calls.find((c) => c.url.includes('/attendance/list')).body.userIdList, ['u2']);
 
       calls.length = 0;
       await reconcileAttendanceRewards(db, quotaCfg, { date: '2026-09-01', skipRewardedUsers: true, notifyOnReward: false });
-      assert.equal(seen[1].params[1], 0);
+      assert.equal(seen[1].params[2], 0);
       assert.equal(calls.filter((c) => c.url.includes('/attendance/list')).length, 0);
     },
   );

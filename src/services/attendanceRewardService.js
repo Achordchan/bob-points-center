@@ -764,12 +764,15 @@ export async function reconcileAttendanceRewards(db, cfg, { date, userids, notif
 
   const totalUsers = users.length;
   if (skipRewardedUsers && settings.testMode !== true) {
-    // 推送窗口内，奖励通知还没发成功的人要保留，由 handleAttendanceRecord 走通知补发。
+    // 推送窗口内，只要有任何一条已发放的奖励通知还没发成功，就保留该用户（不受当前 maxPerDay 影响），
+    // 由 handleAttendanceRecord 走通知补发。
     const doneRows = await db.all(
       `SELECT userid FROM attendance_reward_records
-        WHERE work_date = ? AND status = 'rewarded' AND (? = 0 OR notify_status = 'sent')
-        GROUP BY userid HAVING COUNT(*) >= ?`,
-      [range.date, notifyOnReward ? 1 : 0, Math.max(1, Number(settings.maxPerDay) || 1)],
+        WHERE work_date = ? AND status = 'rewarded'
+        GROUP BY userid
+        HAVING COUNT(*) >= ?
+           AND (? = 0 OR SUM(CASE WHEN notify_status = 'sent' THEN 0 ELSE 1 END) = 0)`,
+      [range.date, Math.max(1, Number(settings.maxPerDay) || 1), notifyOnReward ? 1 : 0],
     );
     const done = new Set((doneRows || []).map((row) => String(row?.userid || '')));
     users = users.filter((id) => !done.has(id));

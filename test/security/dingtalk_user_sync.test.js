@@ -557,3 +557,23 @@ test('离职事件重试排队期间，更晚取数的快照已把员工写成�
     },
   );
 });
+
+test('离职事件重试期间后到的资料修改事件（员工已离职，取数失败）不会取消离职重试', async () => {
+  clearUserProfileCache();
+  const db = makeDb({ failLeaveTimes: 1 });
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/user/get')) return { errcode: 60121, errmsg: '找不到该用户' };
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const leaving = handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['lr1'] }, retryDelaysMs: [80] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // 后到的资料修改事件：员工已离职，钉钉返回“用户不存在”，不会写库
+      await handleContactUserEvent(db, cfg, { topic: 'user_modify_org', data: { UserId: ['lr1'] }, retryDelaysMs: [] });
+      await leaving;
+      assert.deepEqual(db.log.order, ['leave:lr1']);
+    },
+  );
+});

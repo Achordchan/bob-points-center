@@ -8,6 +8,10 @@ import {
 import { ensureAccount } from './ledgerService.js';
 import { publishMallRealtimeEvent } from './mallRealtimeService.js';
 
+// 部署边界：本服务的“事件版本 + 员工锁”是进程内状态，依赖本项目单进程部署的既有前提——
+// 定时任务、钉钉 Stream 长连接（多开会重复收到并处理考勤事件）、限流计数、实时推送客户端表也都是进程内的。
+// 若将来改为多进程/多实例，需要先把这些一并改造，并把这里的顺序保证改为数据库版本号/咨询锁，
+// 否则不同进程之间的事件与全量同步无法互相取代过期快照。
 export function isActiveFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
@@ -447,14 +451,23 @@ export const DINGTALK_CONTACT_DEPT_EVENTS = ['org_dept_create', 'org_dept_modify
 const EVENT_RETRY_DELAYS_MS = [2000, 10000, 60000];
 
 // 事件处理失败（如数据库瞬时故障）时有限次重试。Stream 已经确认过该事件，钉钉不会重推。
-// 重试前若同一员工已有更新的事件到达，则放弃：更新的事件会自己处理，旧的离职不能再把重新入职的人停用。
-// 仅在进程内重试，进程重启会丢失。
-async function runWithRetry(op, userid, eventVersion, delaysMs, firstErr) {
+// 重试前判断是否已被更新的数据取代，是则放弃：
+// - 资料同步类事件：同一员工已有更新的事件到达即放弃（更新的事件会自己取数写库）；
+// - 离职事件：只有“更晚取数的快照已写库”才放弃。后到的资料修改事件在员工已离职时取数会失败、
+//   不会写库，此时离职重试必须继续，否则本地资料会一直是在职。
+// 仅在进程内重试，进程重启会丢失（周全量同步的离职确认会兜底）。
+function shouldAbortRetry(topic, userid, eventVersion) {
+  return topic === 'user_leave_org'
+    ? hasNewerCommittedSnapshot(userid, eventVersion)
+    : isSuperseded(userid, eventVersion);
+}
+
+async function runWithRetry(op, shouldAbort, delaysMs, firstErr) {
   let lastErr = firstErr;
   for (const delay of delaysMs) {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, delay));
-    if (isSuperseded(userid, eventVersion)) throw lastErr;
+    if (shouldAbort()) throw lastErr;
     try {
       // eslint-disable-next-line no-await-in-loop
       return await op();
@@ -486,7 +499,7 @@ export async function handleContactUserEvent(db, cfg, { topic, data, retryDelays
       : syncDingtalkUserById(db, cfg, userid, { eventVersion })
         .then((out) => (out?.skipped ? `已跳过(${out.reason})` : '资料已更新'));
     const task = first.catch((firstErr) => {
-      if (retryDelaysMs.length === 0 || isSuperseded(userid, eventVersion)) throw firstErr;
+      if (retryDelaysMs.length === 0 || shouldAbortRetry(topic, userid, eventVersion)) throw firstErr;
       // eslint-disable-next-line no-console
       console.warn(`[DingtalkUserSync] ${topic} ${userid} 处理失败，将重试:`, firstErr?.message || firstErr);
       return runWithRetry(
@@ -494,8 +507,7 @@ export async function handleContactUserEvent(db, cfg, { topic, data, retryDelays
           ? markDingtalkUserLeft(db, userid, { eventVersion }).then(() => '已标记停用')
           : syncDingtalkUserById(db, cfg, userid, { eventVersion })
             .then((out) => (out?.skipped ? `已跳过(${out.reason})` : '资料已更新'))),
-        userid,
-        eventVersion,
+        () => shouldAbortRetry(topic, userid, eventVersion),
         retryDelaysMs,
         firstErr,
       );
