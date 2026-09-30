@@ -133,6 +133,7 @@ export async function upsertDingtalkUserProfile(tx, u) {
 }
 
 export async function syncAllDingtalkUsers(db, cfg) {
+  const startedAt = Date.now();
   const departments = await listDingtalkDepartmentsTree(cfg);
   const deptNameMap = new Map(departments.map((dept) => [String(dept.dept_id), String(dept.name || dept.dept_id)]));
   deptNameMap.set('1', '根部门');
@@ -175,17 +176,26 @@ export async function syncAllDingtalkUsers(db, cfg) {
     }
   }
 
-  await inTransaction(db, async (tx) => {
-    for (const u of users.values()) {
-      await upsertDingtalkUserProfile(tx, u);
-    }
-  });
+  // 逐个员工加锁写入；采集期间已被事件/登录更新过的员工，其快照已过期，跳过以免覆盖更新的数据。
+  let upserted = 0;
+  for (const u of users.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    const written = await withUserLock(u.userid, async () => {
+      if ((userTouchedAt.get(u.userid) || 0) >= startedAt) return false;
+      await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, u));
+      return true;
+    });
+    if (written) upserted += 1;
+  }
+  for (const [userid, at] of [...userTouchedAt]) {
+    if (at < startedAt) userTouchedAt.delete(userid);
+  }
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
     publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
   }
 
-  return { deptCount: deptIds.length, fetched, active: activeCount, upserted: users.size };
+  return { deptCount: deptIds.length, fetched, active: activeCount, upserted };
 }
 
 // 同一员工的写操作按到达顺序串行：Stream 事件是并发处理的，
@@ -201,6 +211,12 @@ function withUserLock(userid, fn) {
     if (userLocks.get(key) === tail) userLocks.delete(key);
   });
   return run;
+}
+
+// 记录每个员工最近一次由事件/登录/打卡写库的时间，全量同步据此丢弃已被更新过的旧快照。
+const userTouchedAt = new Map();
+function markUserTouched(userid) {
+  userTouchedAt.set(String(userid), Date.now());
 }
 
 const PROFILE_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -271,6 +287,7 @@ async function persistDetailUnlocked(db, cfg, raw, { onlyIfStale = false } = {})
 
   const profile = normalizeDingtalkUserProfile(raw, deptNameMap);
   await inTransaction(db, (tx) => upsertDingtalkUserProfile(tx, profile));
+  markUserTouched(userid);
   return { ok: true, userid };
 }
 
@@ -285,10 +302,13 @@ export async function syncDingtalkUserById(db, cfg, userid) {
 
 // 离职只标记为停用，保留 users/accounts（BOB 币余额与流水不能丢）。
 export async function markDingtalkUserLeft(db, userid) {
-  await withUserLock(userid, () => db.run(
-    'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
-    [String(userid)],
-  ));
+  await withUserLock(userid, async () => {
+    await db.run(
+      'UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?',
+      [String(userid)],
+    );
+    markUserTouched(userid);
+  });
 }
 
 export function extractEventUserIds(data) {

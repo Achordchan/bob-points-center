@@ -430,6 +430,7 @@ export async function getUserIdByOAuthCode(cfg, code) {
 
 const USER_PROFILE_CACHE_MS = 10 * 60 * 1000;
 const userProfileCache = new Map();
+// 进行中的请求带一个令牌：缓存失效后令牌作废，旧请求返回时不得再写入缓存。
 const userProfileInflight = new Map();
 
 export function clearUserProfileCache() {
@@ -437,11 +438,13 @@ export function clearUserProfileCache() {
   userProfileInflight.clear();
 }
 
-// 通讯录事件已确认该员工资料变化时，丢弃缓存，避免 10 分钟内读到旧部门。
+// 通讯录事件已确认该员工资料变化时，丢弃缓存和进行中的请求，避免读到变更前的资料。
 export function invalidateUserProfileCache(userid) {
   const suffix = `:${String(userid || '')}`;
-  for (const key of [...userProfileCache.keys()]) {
-    if (key.endsWith(suffix)) userProfileCache.delete(key);
+  for (const map of [userProfileCache, userProfileInflight]) {
+    for (const key of [...map.keys()]) {
+      if (key.endsWith(suffix)) map.delete(key);
+    }
   }
 }
 
@@ -454,17 +457,23 @@ export async function getUserProfile(cfg, userid) {
   const cached = userProfileCache.get(key);
   if (cached && Date.now() < cached.expiresAt) return { ...cached.value, deptIds: [...cached.value.deptIds] };
 
-  let pending = userProfileInflight.get(key);
-  if (!pending) {
-    pending = fetchUserProfile(cfg, userid)
+  let entry = userProfileInflight.get(key);
+  if (!entry) {
+    const created = { promise: null };
+    created.promise = fetchUserProfile(cfg, userid)
       .then((value) => {
-        userProfileCache.set(key, { value, expiresAt: Date.now() + USER_PROFILE_CACHE_MS });
+        if (userProfileInflight.get(key) === created) {
+          userProfileCache.set(key, { value, expiresAt: Date.now() + USER_PROFILE_CACHE_MS });
+        }
         return value;
       })
-      .finally(() => userProfileInflight.delete(key));
-    userProfileInflight.set(key, pending);
+      .finally(() => {
+        if (userProfileInflight.get(key) === created) userProfileInflight.delete(key);
+      });
+    userProfileInflight.set(key, created);
+    entry = created;
   }
-  const value = await pending;
+  const value = await entry.promise;
   return { ...value, deptIds: [...value.deptIds] };
 }
 

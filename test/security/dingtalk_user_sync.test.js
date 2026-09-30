@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  syncAllDingtalkUsers,
   extractEventUserIds,
   getCstNow,
   handleContactUserEvent,
   isWeeklySyncDue,
   persistDingtalkUserDetail,
 } from '../../src/services/dingtalkUserSyncService.js';
-import { clearUserProfileCache } from '../../src/services/dingtalkService.js';
+import { clearUserProfileCache, getUserProfile, invalidateUserProfileCache } from '../../src/services/dingtalkService.js';
 
 const cfg = { dingtalk: { appKey: 'sync-test-key', appSecret: 'sync-test-secret' } };
 
@@ -181,4 +182,69 @@ test('同一员工的事件串行处理：慢的资料修改不会覆盖随后�
       assert.deepEqual(db.log.order, ['upsert', 'leave']);
     },
   );
+});
+
+test('全量同步采集期间被事件更新过的员工，同步快照不会覆盖（如离职后恢复在职）', async () => {
+  clearUserProfileCache();
+  const db = makeDb();
+  const upsertedIds = [];
+  const origExec = db.log.exec;
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return {
+          errcode: 0,
+          result: {
+            has_more: false,
+            list: [
+              { userid: 'fs1', name: '甲', active: true, dept_id_list: [1] },
+              { userid: 'fs2', name: '乙', active: true, dept_id_list: [1] },
+            ],
+          },
+        };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const sync = syncAllDingtalkUsers(db, cfg);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      // 全量同步已开始采集，此时 fs1 离职事件先到达并写库
+      await handleContactUserEvent(db, cfg, { topic: 'user_leave_org', data: { UserId: ['fs1'] } });
+      const result = await sync;
+      for (const call of origExec) {
+        if (/INSERT INTO user_dingtalk_profiles/.test(call.sql)) upsertedIds.push(call.params[0]);
+      }
+      assert.deepEqual(upsertedIds, ['fs2']);
+      assert.equal(result.upserted, 1);
+      assert.equal(db.log.run.filter((c) => /SET active = 0/.test(c.sql)).length, 1);
+    },
+  );
+});
+
+test('缓存失效后，进行中的旧请求不会再把变更前的资料写回缓存', async () => {
+  clearUserProfileCache();
+  const profileCfg = { dingtalk: { appKey: 'inflight-key', appSecret: 'inflight-secret' } };
+  let userGetCalls = 0;
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      userGetCalls += 1;
+      const isFirst = userGetCalls === 1;
+      if (isFirst) await new Promise((resolve) => setTimeout(resolve, 150));
+      return { errcode: 0, result: { name: isFirst ? '旧名' : '新名', dept_id_list: [1] } };
+    },
+    async () => {
+      const first = getUserProfile(profileCfg, 'inv1');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      invalidateUserProfileCache('inv1');
+      assert.equal((await first).name, '旧名');
+      // 旧请求返回后不得留在缓存里：下一次读取必须重新请求并拿到新资料
+      assert.equal((await getUserProfile(profileCfg, 'inv1')).name, '新名');
+      assert.equal(userGetCalls, 2);
+    },
+  );
+  clearUserProfileCache();
 });
