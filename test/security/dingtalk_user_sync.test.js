@@ -28,7 +28,7 @@ function withFetchStub(handler, fn) {
 }
 
 function makeDb({ existing = null, activeProfiles = [], failLeaveTimes = 0 } = {}) {
-  const log = { run: [], exec: [], order: [] };
+  const log = { run: [], exec: [], order: [], allSql: [] };
   const settings = new Map();
   const tx = {
     async run(sql, params) { log.run.push({ sql, params }); },
@@ -41,7 +41,7 @@ function makeDb({ existing = null, activeProfiles = [], failLeaveTimes = 0 } = {
       assert.match(sql, /user_dingtalk_profiles/);
       return existing;
     },
-    async all() { return activeProfiles.map((userid) => ({ userid })); },
+    async all(sql) { log.allSql.push(sql); return activeProfiles.map((userid) => ({ userid })); },
     async run(sql, params) {
       if (/SET active = 0/.test(sql) && failLeaveTimes > 0) {
         failLeaveTimes -= 1;
@@ -458,6 +458,11 @@ test('全量同步的离职兜底：只有钉钉明确确认离职才停用，�
       const result = await syncAllDingtalkUsers(db, cfg);
       assert.equal(result.deactivated, 2);
       assert.deepEqual(db.log.order.filter((x) => x.startsWith('leave:')).sort(), ['leave:gone1', 'leave:inactive1']);
+      // 候选人从 users 出发左连接资料表（含还没有资料行的旧账户），确认离职时补建/更新停用行
+      assert.match(db.log.allSql[0], /FROM users u\s+LEFT JOIN user_dingtalk_profiles p/);
+      const leaveSql = db.log.run.find((r) => /SET active = 0/.test(r.sql)).sql;
+      assert.match(leaveSql, /INSERT INTO user_dingtalk_profiles/);
+      assert.match(leaveSql, /FROM users WHERE userid = \?/);
     },
   );
 });

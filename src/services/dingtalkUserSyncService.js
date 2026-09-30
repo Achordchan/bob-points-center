@@ -209,9 +209,14 @@ const DEPARTURE_CURSOR_KEY = 'dingtalk_departure_check_cursor';
 // 离职事件处理失败/遗漏时的兜底：本地仍标记在职、但不在本次列表里的员工，逐个向钉钉确认——
 // 只有钉钉明确返回“用户不存在”或 active=false 才标记停用。列表里“缺人”本身不作为离职依据
 // （应用通讯录可见范围缩小时，在职员工也会不在列表里），无法确认（权限不足、网络错误等）一律不处理。
-// 只改 active 标记，保留 users/accounts（BOB 币余额与流水不能丢）。
+// 只写资料表的 active 标记（没有资料行则补建停用行），保留 users/accounts（BOB 币余额与流水不能丢）。
 async function deactivateConfirmedDepartures(db, cfg, listedUsers, { maxChecks = MAX_DEPARTURE_CHECKS_PER_SYNC } = {}) {
-  const rows = await db.all('SELECT userid FROM user_dingtalk_profiles WHERE active IS NULL OR active <> 0');
+  // 从 users 出发：自动同步上线前靠登录创建、还没有资料行的旧账户也要检查。
+  const rows = await db.all(
+    `SELECT u.userid AS userid FROM users u
+       LEFT JOIN user_dingtalk_profiles p ON p.userid = u.userid
+      WHERE p.userid IS NULL OR p.active IS NULL OR p.active <> 0`,
+  );
   const all = (rows || [])
     .map((row) => String(row?.userid || ''))
     .filter((userid) => userid && !listedUsers.has(userid))
@@ -242,7 +247,7 @@ async function deactivateConfirmedDepartures(db, cfg, listedUsers, { maxChecks =
     // eslint-disable-next-line no-await-in-loop
     const done = await withUserLock(userid, async () => {
       if (isSuperseded(userid, version)) return false;
-      await db.run('UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?', [userid]);
+      await db.run(MARK_LEFT_SQL, [userid]);
       commitVersion(userid, version);
       invalidateUserProfileCache(userid);
       return true;
@@ -400,14 +405,13 @@ export function syncDingtalkUserById(db, cfg, userid, { eventVersion } = {}) {
 
 // 离职只标记为停用，保留 users/accounts（BOB 币余额与流水不能丢）。
 // 账户存在但还没有资料行（自动同步上线前靠登录创建的账户）时，补一条 active=0 的资料行作为离职标记。
+const MARK_LEFT_SQL = `INSERT INTO user_dingtalk_profiles(userid, active, updated_at)
+     SELECT userid, 0, unixepoch() FROM users WHERE userid = ?
+     ON CONFLICT(userid) DO UPDATE SET active = 0, updated_at = unixepoch()`;
+
 export function markDingtalkUserLeft(db, userid, { eventVersion } = {}) {
   if (eventVersion === undefined) noteUserEvent(userid);
-  return withUserLock(userid, () => db.run(
-    `INSERT INTO user_dingtalk_profiles(userid, active, updated_at)
-     SELECT userid, 0, unixepoch() FROM users WHERE userid = ?
-     ON CONFLICT(userid) DO UPDATE SET active = 0, updated_at = unixepoch()`,
-    [String(userid)],
-  ));
+  return withUserLock(userid, () => db.run(MARK_LEFT_SQL, [String(userid)]));
 }
 
 export function extractEventUserIds(data) {
