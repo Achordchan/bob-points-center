@@ -3,7 +3,7 @@ import { ensureAccount, getBalance, grantBob } from './ledgerService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { safeAppendAuditLog } from './auditLogService.js';
 import { getAccessToken, getUserProfile, listSubDepartments } from './dingtalkService.js';
-import { beginUserSnapshot, persistDingtalkUserDetail } from './dingtalkUserSyncService.js';
+import { beginUserSnapshot, isUserSnapshotSuperseded, persistDingtalkUserDetail } from './dingtalkUserSyncService.js';
 
 const RECONCILE_BATCH_SIZE = 20;
 const DEFAULT_WORK_START_MIN = 8 * 60 + 30; // 默认 08:30 前算有效
@@ -363,7 +363,7 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     const profile = await getUserProfile(cfg, userid);
     const profileName = profile?.name ? String(profile.name).trim() : '';
     let written = false;
-    let superseded = false;
+    let persistSuperseded = false;
     // 只有本次调用自己发起的请求取得的资料才写回：缓存命中/合并的请求，取数时间早于本次的版本号。
     if (profile?.raw && profile.freshFetch) {
       // 姓名与部门在同一个按员工串行、带版本检查的写入里落库，供后台展示使用。
@@ -371,7 +371,7 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
       try {
         const out = await persistDingtalkUserDetail(db, cfg, profile.raw, { snapshotVersion });
         written = Boolean(out?.ok && !out.skipped);
-        superseded = out?.reason === 'superseded';
+        persistSuperseded = out?.reason === 'superseded';
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[AttendanceReward] persist user profile failed for ' + userid + ':', err?.message || err);
@@ -380,7 +380,8 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     // 没有成功写入时仅保证账户存在（不改名），发奖流程依赖它。
     if (!written) await ensureAccount(db, { userid, name: '' });
     // 取数期间有通讯录事件到达：这份资料可能已过期，不用于资格判定，稍后重判。
-    if (superseded) return { name: profileName || localName || '', deptIds: [] };
+    // 对每个调用者独立判断（包括缓存命中、合并到他人请求的调用者），与是否写库无关。
+    if (persistSuperseded || isUserSnapshotSuperseded(userid, snapshotVersion)) return { name: profileName || localName || '', deptIds: [] };
     return {
       name: profileName || localName || '',
       deptIds: Array.isArray(profile?.deptIds) ? profile.deptIds.map((id) => String(id)).filter(Boolean) : [],

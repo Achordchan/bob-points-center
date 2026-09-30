@@ -241,6 +241,12 @@ function isSuperseded(userid, snapshotVersion) {
   return (userLatestVersion.get(String(userid)) || 0) > snapshotVersion;
 }
 
+// 调用方在取数前用 beginUserSnapshot() 拿版本，取数后用它判断“取数期间是否有更新的事件到达”。
+// 与是否写库无关：缓存命中/合并到他人请求的调用者同样需要判断。
+export function isUserSnapshotSuperseded(userid, snapshotVersion) {
+  return isSuperseded(userid, snapshotVersion);
+}
+
 function commitVersion(userid, snapshotVersion) {
   const key = String(userid);
   if ((userLatestVersion.get(key) || 0) < snapshotVersion) userLatestVersion.set(key, snapshotVersion);

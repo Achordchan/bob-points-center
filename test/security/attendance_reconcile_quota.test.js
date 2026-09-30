@@ -265,7 +265,7 @@ test('指定部门奖励的部门一律向钉钉实时取，不使用本地缓�
   clearUserProfileCache();
 });
 
-test('取数期间收到通讯录事件：这份资料不用于资格判定（部门为空，稍后重判）', async () => {
+test('取数期间收到通讯录事件：发起者与合并到同一请求的调用者都不用这份资料判定资格', async () => {
   clearUserProfileCache();
   const db = makeCheckinDb({});
   const supCfg = { dingtalk: { appKey: 'sup-key', appSecret: 'sup-secret' } };
@@ -276,11 +276,15 @@ test('取数期间收到通讯录事件：这份资料不用于资格判定（�
       return { errcode: 0, result: { name: '张三', active: true, dept_id_list: [5] } };
     },
     async () => {
-      const pending = resolveAttendanceUserProfile(db, supCfg, 'sp1', { needDepartments: true });
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      // 两个打卡处理共享同一个进行中的请求：发起者与合并者都必须判定为过期
+      const pendingA = resolveAttendanceUserProfile(db, supCfg, 'sp1', { needDepartments: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const pendingB = resolveAttendanceUserProfile(db, supCfg, 'sp1', { needDepartments: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
       await handleContactUserEvent(db, supCfg, { topic: 'user_leave_org', data: { UserId: ['sp1'] } });
-      const profile = await pending;
-      assert.deepEqual(profile.deptIds, []);
+      const [a, b] = await Promise.all([pendingA, pendingB]);
+      assert.deepEqual(a.deptIds, []);
+      assert.deepEqual(b.deptIds, []);
     },
   );
   clearUserProfileCache();
