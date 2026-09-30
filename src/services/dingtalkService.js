@@ -82,7 +82,9 @@ function assertDingtalkOk(data, context) {
     throw new Error(`dingtalk ${context} failed: empty response`);
   }
   if (data.errcode && data.errcode !== 0) {
-    throw new Error(`dingtalk ${context} failed: ${data.errmsg || data.errcode}`);
+    const err = new Error(`dingtalk ${context} failed: ${data.errmsg || data.errcode}`);
+    err.errcode = Number(data.errcode);
+    throw err;
   }
 }
 

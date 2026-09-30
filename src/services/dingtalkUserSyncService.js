@@ -191,12 +191,53 @@ export async function syncAllDingtalkUsers(db, cfg) {
     if (written) upserted += 1;
   }
 
+  const deactivated = await deactivateConfirmedDepartures(db, cfg, users);
+
   if (users.size > 0) {
     publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
     publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
   }
 
-  return { deptCount: deptIds.length, fetched, active: activeCount, upserted };
+  return { deptCount: deptIds.length, fetched, active: activeCount, upserted, deactivated };
+}
+
+// 钉钉 v2/user/get 对不存在的员工返回该错误码（“找不到该用户”）。
+const DINGTALK_ERRCODE_USER_NOT_FOUND = 60121;
+const MAX_DEPARTURE_CHECKS_PER_SYNC = 200;
+
+// 离职事件处理失败/遗漏时的兜底：本地仍标记在职、但不在本次列表里的员工，逐个向钉钉确认——
+// 只有钉钉明确返回“用户不存在”或 active=false 才标记停用。列表里“缺人”本身不作为离职依据
+// （应用通讯录可见范围缩小时，在职员工也会不在列表里），无法确认（权限不足、网络错误等）一律不处理。
+// 只改 active 标记，保留 users/accounts（BOB 币余额与流水不能丢）。
+async function deactivateConfirmedDepartures(db, cfg, listedUsers) {
+  const rows = await db.all('SELECT userid FROM user_dingtalk_profiles WHERE active IS NULL OR active <> 0');
+  const candidates = (rows || [])
+    .map((row) => String(row?.userid || ''))
+    .filter((userid) => userid && !listedUsers.has(userid))
+    .slice(0, MAX_DEPARTURE_CHECKS_PER_SYNC);
+  let deactivated = 0;
+  for (const userid of candidates) {
+    const version = beginUserSnapshot();
+    let confirmed = false;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const raw = await getUserDetail(cfg, userid);
+      confirmed = !isActiveFlag(raw?.active);
+    } catch (err) {
+      confirmed = Number(err?.errcode) === DINGTALK_ERRCODE_USER_NOT_FOUND;
+    }
+    if (!confirmed) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const done = await withUserLock(userid, async () => {
+      if (isSuperseded(userid, version)) return false;
+      await db.run('UPDATE user_dingtalk_profiles SET active = 0, updated_at = unixepoch() WHERE userid = ?', [userid]);
+      commitVersion(userid, version);
+      invalidateUserProfileCache(userid);
+      return true;
+    });
+    if (done) deactivated += 1;
+  }
+  return deactivated;
 }
 
 // 同一员工的写操作按到达顺序串行：Stream 事件是并发处理的，
@@ -480,5 +521,7 @@ export function startDingtalkUserSyncScheduler({ db, cfg } = {}) {
       inFlight = false;
     }
   }
+  // 启动后也检查一次：周一 3:30–4:00 窗口内重启时不会因为等下一个整点检查而错过本周同步。
+  setTimeout(tick, 30 * 1000);
   setInterval(tick, 10 * 60 * 1000);
 }

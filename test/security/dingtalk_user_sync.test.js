@@ -427,3 +427,67 @@ test('全量同步写入某员工后，作废 getUserProfile 里该员工的缓�
   );
   clearUserProfileCache();
 });
+
+test('全量同步的离职兜底：只有钉钉明确确认离职才停用，可见范围/权限问题一律不处理', async () => {
+  clearUserProfileCache();
+  const db = makeDb({ activeProfiles: ['stay1', 'gone1', 'inactive1', 'hidden1', 'noperm1'] });
+  await withFetchStub(
+    async (url, body) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'stay1', name: '甲', active: true, dept_id_list: [1] }] } };
+      }
+      if (url.includes('/user/get')) {
+        if (body.userid === 'gone1') return { errcode: 60121, errmsg: '找不到该用户' };
+        if (body.userid === 'inactive1') return { errcode: 0, result: { name: '乙', active: false } };
+        if (body.userid === 'hidden1') return { errcode: 0, result: { name: '丙', active: true, dept_id_list: [9] } };
+        return { errcode: 60011, errmsg: '没有调用该接口的权限' };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const result = await syncAllDingtalkUsers(db, cfg);
+      assert.equal(result.deactivated, 2);
+      assert.deepEqual(db.log.order.filter((x) => x.startsWith('leave:')).sort(), ['leave:gone1', 'leave:inactive1']);
+    },
+  );
+});
+
+test('离职确认期间该员工有新事件到达（如重新入职）：放弃停用', async () => {
+  clearUserProfileCache();
+  const db = makeDb({ activeProfiles: ['sup1'] });
+  let userGetCalls = 0;
+  let lookupStarted = false;
+  await withFetchStub(
+    async (url) => {
+      if (url.includes('/gettoken')) return { errcode: 0, access_token: 't', expires_in: 7200 };
+      if (url.includes('/department/listsub')) return { errcode: 0, result: [] };
+      if (url.includes('/user/list')) {
+        return { errcode: 0, result: { has_more: false, list: [{ userid: 'other1', name: '丁', active: true, dept_id_list: [1] }] } };
+      }
+      if (url.includes('/user/get')) {
+        userGetCalls += 1;
+        if (userGetCalls === 1) {
+          lookupStarted = true;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return { errcode: 60121, errmsg: '找不到该用户' };
+        }
+        return { errcode: 0, result: { userid: 'sup1', name: '戊', active: true, dept_id_list: [1] } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    async () => {
+      const sync = syncAllDingtalkUsers(db, cfg);
+      // 等同步的离职确认查询真正开始后，再让该员工的重新入职事件到达
+      while (!lookupStarted) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await handleContactUserEvent(db, cfg, { topic: 'user_add_org', data: { UserId: ['sup1'] }, retryDelaysMs: [] });
+      const result = await sync;
+      assert.equal(result.deactivated, 0);
+      assert.deepEqual(db.log.order.filter((x) => x.endsWith(':sup1')), ['upsert:sup1']);
+    },
+  );
+});
