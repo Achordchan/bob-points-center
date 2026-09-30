@@ -449,15 +449,20 @@ export function invalidateUserProfileCache(userid) {
 }
 
 // 同一员工短时间内多次触发（登录、打卡事件、补偿任务）只查一次钉钉；并发相同请求合并。
+// freshFetch：这份资料是否由本次调用自己发起的请求取得。缓存命中或合并到别人进行中的请求时为 false——
+// 那份数据的取数时间早于本次调用，调用方不得把它当作“本次调用时刻的快照”写回本地库。
 export async function getUserProfile(cfg, userid) {
   if (!userid) {
     throw new Error('missing userid');
   }
   const key = `${getDingtalkCacheKey(cfg)}:${String(userid)}`;
   const cached = userProfileCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return { ...cached.value, deptIds: [...cached.value.deptIds] };
+  if (cached && Date.now() < cached.expiresAt) {
+    return { ...cached.value, deptIds: [...cached.value.deptIds], freshFetch: false };
+  }
 
   let entry = userProfileInflight.get(key);
+  let initiated = false;
   if (!entry) {
     const created = { promise: null };
     created.promise = fetchUserProfile(cfg, userid)
@@ -472,9 +477,10 @@ export async function getUserProfile(cfg, userid) {
       });
     userProfileInflight.set(key, created);
     entry = created;
+    initiated = true;
   }
   const value = await entry.promise;
-  return { ...value, deptIds: [...value.deptIds] };
+  return { ...value, deptIds: [...value.deptIds], freshFetch: initiated };
 }
 
 // 返回钉钉 user/get 的完整原始结果（不走缓存），供本地资料表落库使用。

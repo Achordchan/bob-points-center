@@ -364,7 +364,8 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
     const profileName = profile?.name ? String(profile.name).trim() : '';
     let written = false;
     let superseded = false;
-    if (profile?.raw) {
+    // 只有本次调用自己发起的请求取得的资料才写回：缓存命中/合并的请求，取数时间早于本次的版本号。
+    if (profile?.raw && profile.freshFetch) {
       // 姓名与部门在同一个按员工串行、带版本检查的写入里落库，供后台展示使用。
       // 不在这里单独改 users.name：进行中的旧请求返回时可能把刚被事件更新的新名字覆盖回去。
       try {

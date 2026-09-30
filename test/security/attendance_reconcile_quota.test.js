@@ -285,3 +285,37 @@ test('取数期间收到通讯录事件：这份资料不用于资格判定（�
   );
   clearUserProfileCache();
 });
+
+test('缓存命中或合并到别人请求得到的资料不写回本地库，只有本次自己发起的请求才写', async () => {
+  clearUserProfileCache();
+  const execs = [];
+  const db = {
+    ...makeCheckinDb({}),
+    async transaction(fn) {
+      return fn({ async run() {}, async exec(sql) { execs.push(sql); } });
+    },
+  };
+  const wbCfg = { dingtalk: { appKey: 'writeback-key', appSecret: 'writeback-secret' } };
+  await withFetchStub(
+    (url) => (url.includes('/gettoken')
+      ? { errcode: 0, access_token: 't', expires_in: 7200 }
+      : { errcode: 0, result: { userid: 'wb1', name: '张三', active: true, dept_id_list: [1] } }),
+    async (calls) => {
+      const first = await getUserProfile(wbCfg, 'wb1');
+      assert.equal(first.freshFetch, true);
+      const cached = await getUserProfile(wbCfg, 'wb1');
+      assert.equal(cached.freshFetch, false);
+
+      // 缓存已热：打卡路径拿到的是缓存里更早的数据，不得当作新快照写回
+      await resolveAttendanceUserProfile(db, wbCfg, 'wb1', { needDepartments: true });
+      assert.equal(execs.filter((sql) => /INSERT INTO user_dingtalk_profiles/.test(sql)).length, 0);
+      assert.equal(calls.filter((c) => c.url.includes('/user/get')).length, 1);
+
+      // 缓存冷：本次自己发起的请求，正常写回
+      clearUserProfileCache();
+      await resolveAttendanceUserProfile(db, wbCfg, 'wb1', { needDepartments: true });
+      assert.equal(execs.filter((sql) => /INSERT INTO user_dingtalk_profiles/.test(sql)).length, 1);
+    },
+  );
+  clearUserProfileCache();
+});
