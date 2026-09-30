@@ -10,6 +10,21 @@ let accessTokenCache = null;
 let jsapiTicketCache = null;
 let v1AccessTokenCache = null;
 
+// 钉钉对单应用有 QPS 限流（峰值 25 时出现过大量限流），统一把请求起始间隔拉开到 ≥100ms（≤10 QPS）。
+const MIN_REQUEST_GAP_MS = 100;
+let paceChain = Promise.resolve();
+let lastRequestStartedAt = 0;
+
+function paceDingtalkRequest() {
+  const slot = paceChain.then(async () => {
+    const wait = lastRequestStartedAt + MIN_REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastRequestStartedAt = Date.now();
+  });
+  paceChain = slot;
+  return slot;
+}
+
 async function httpJson(method, url, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
@@ -21,6 +36,7 @@ async function httpJson(method, url, body) {
     throw new Error('fetch not available, please use Node.js 18+');
   }
 
+  await paceDingtalkRequest();
   const resp = await fetch(url, opts);
   const text = await resp.text();
   let data;
@@ -46,6 +62,7 @@ async function httpJsonWithHeaders(method, url, { headers = {}, body } = {}) {
     throw new Error('fetch not available, please use Node.js 18+');
   }
 
+  await paceDingtalkRequest();
   const resp = await fetch(url, opts);
   const text = await resp.text();
   let data;
@@ -127,11 +144,11 @@ export async function queryDingtalkGroupRobot(cfg, { openConversationId, robotCo
   return resp?.body?.result && typeof resp.body.result === 'object' ? resp.body.result : null;
 }
 
-export async function getRootDepartmentProfile(cfg, { language = 'zh_CN' } = {}) {
+export async function getRootDepartmentProfile(cfg, { language = 'zh_CN', deptId = 1 } = {}) {
   const token = await getAccessToken(cfg);
   const url = `https://oapi.dingtalk.com/topapi/v2/department/get?access_token=${encodeURIComponent(token)}`;
   const data = await httpJson('POST', url, {
-    dept_id: 1,
+    dept_id: Number(deptId) || 1,
     language: String(language || 'zh_CN'),
   });
 
@@ -411,7 +428,48 @@ export async function getUserIdByOAuthCode(cfg, code) {
   return String(userid);
 }
 
+const USER_PROFILE_CACHE_MS = 10 * 60 * 1000;
+const userProfileCache = new Map();
+const userProfileInflight = new Map();
+
+export function clearUserProfileCache() {
+  userProfileCache.clear();
+  userProfileInflight.clear();
+}
+
+// 通讯录事件已确认该员工资料变化时，丢弃缓存，避免 10 分钟内读到旧部门。
+export function invalidateUserProfileCache(userid) {
+  const suffix = `:${String(userid || '')}`;
+  for (const key of [...userProfileCache.keys()]) {
+    if (key.endsWith(suffix)) userProfileCache.delete(key);
+  }
+}
+
+// 同一员工短时间内多次触发（登录、打卡事件、补偿任务）只查一次钉钉；并发相同请求合并。
 export async function getUserProfile(cfg, userid) {
+  if (!userid) {
+    throw new Error('missing userid');
+  }
+  const key = `${getDingtalkCacheKey(cfg)}:${String(userid)}`;
+  const cached = userProfileCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return { ...cached.value, deptIds: [...cached.value.deptIds] };
+
+  let pending = userProfileInflight.get(key);
+  if (!pending) {
+    pending = fetchUserProfile(cfg, userid)
+      .then((value) => {
+        userProfileCache.set(key, { value, expiresAt: Date.now() + USER_PROFILE_CACHE_MS });
+        return value;
+      })
+      .finally(() => userProfileInflight.delete(key));
+    userProfileInflight.set(key, pending);
+  }
+  const value = await pending;
+  return { ...value, deptIds: [...value.deptIds] };
+}
+
+// 返回钉钉 user/get 的完整原始结果（不走缓存），供本地资料表落库使用。
+export async function getUserDetail(cfg, userid) {
   if (!userid) {
     throw new Error('missing userid');
   }
@@ -422,18 +480,21 @@ export async function getUserProfile(cfg, userid) {
 
   assertDingtalkOk(data, 'user.get');
 
-  const result = data?.result || {};
-  const name = result?.name;
-  const avatar = result?.avatar;
+  return { userid: String(userid), ...(data?.result || {}) };
+}
+
+async function fetchUserProfile(cfg, userid) {
+  const result = await getUserDetail(cfg, userid);
   const deptIds = Array.isArray(result?.dept_id_list)
     ? result.dept_id_list.map((id) => String(id)).filter(Boolean)
     : [];
   return {
     userid: String(userid),
-    name: name ? String(name) : '',
-    avatar: avatar ? String(avatar) : '',
+    name: result?.name ? String(result.name) : '',
+    avatar: result?.avatar ? String(result.avatar) : '',
     title: result?.title ? String(result.title) : '',
     deptIds,
+    raw: result,
   };
 }
 

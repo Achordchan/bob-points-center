@@ -16,7 +16,6 @@ import {
   getUserProfile,
   hasDingtalkGroupOpenConversationId,
   listSubDepartments,
-  listUsersByDept,
   notableListRecords,
   queryDingtalkOpenGroupBaseInfo,
   queryDingtalkGroupRobot,
@@ -57,6 +56,7 @@ import {
 import { getClientIp, purgeExpiredAuditLogs, safeAppendAuditLog } from '../../services/auditLogService.js';
 import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcileAttendanceRewards } from '../../services/attendanceRewardService.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
+import { syncAllDingtalkUsers } from '../../services/dingtalkUserSyncService.js';
 import { invalidateMallProductsCache } from '../../services/mallProductsCache.js';
 import {
   decodeAdminRedeemCursor,
@@ -122,12 +122,9 @@ import {
   getAdminOAuthSecret,
   getAdminSessionPayload,
   getServerInfo,
-  isActiveFlag,
   isAdmin,
   isFixedAdmin,
-  listDingtalkDepartmentsTree,
   normalizeAdminReturnTo,
-  normalizeDingtalkUserProfile,
   normalizeGroupCardButtons,
   normalizeNotableProductRecordFields,
   normalizeUserSearchKeyword,
@@ -143,7 +140,6 @@ import {
   serializeOperationRows,
   sleep,
   toInt,
-  toJsonText,
   toOptionalInt,
   toPositiveInt,
 } from './shared.js';
@@ -1760,100 +1756,8 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
-
-      const departments = await listDingtalkDepartmentsTree(cfg);
-      const deptNameMap = new Map(departments.map((dept) => [String(dept.dept_id), String(dept.name || dept.dept_id)]));
-      deptNameMap.set('1', '根部门');
-      const deptIds = ['1', ...departments.map((dept) => String(dept.dept_id))];
-      const users = new Map();
-
-      let fetched = 0;
-      let activeCount = 0;
-
-      for (const deptId of deptIds) {
-        let cursor = 0;
-        for (;;) {
-          const page = await listUsersByDept(cfg, { deptId, cursor, size: 100 });
-          cursor = page.nextCursor;
-
-          for (const u of page.list) {
-            fetched += 1;
-            const userid = u?.userid ? String(u.userid) : '';
-            if (!userid) continue;
-            if (!isActiveFlag(u?.active)) continue;
-            activeCount += 1;
-
-            const profile = normalizeDingtalkUserProfile(u, deptNameMap);
-            const existing = users.get(userid);
-            if (!existing) {
-              users.set(userid, profile);
-            } else {
-              const deptSet = new Set([...(existing.dept_ids || []), ...(profile.dept_ids || [])]);
-              const dept_ids = [...deptSet];
-              users.set(userid, {
-                ...existing,
-                ...Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== '' && value !== null && value !== undefined)),
-                dept_ids,
-                dept_names: dept_ids.map((id) => deptNameMap.get(id) || '').filter(Boolean),
-              });
-            }
-          }
-
-          if (!page.hasMore) break;
-        }
-      }
-
-      await runInTransaction(db, async (tx) => {
-        for (const u of users.values()) {
-          await ensureAccount(tx, { userid: u.userid, name: u.name });
-          await tx.exec(
-            `INSERT INTO user_dingtalk_profiles(
-              userid, unionid, name, avatar, mobile, telephone, email, org_email, title, job_number, work_place, remark,
-              dept_ids, dept_names, extension, hired_date, active, is_admin, is_boss, leader_in_dept, exclusive_account, raw, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
-            ON CONFLICT(userid) DO UPDATE SET
-              unionid = EXCLUDED.unionid,
-              name = EXCLUDED.name,
-              avatar = EXCLUDED.avatar,
-              mobile = EXCLUDED.mobile,
-              telephone = EXCLUDED.telephone,
-              email = EXCLUDED.email,
-              org_email = EXCLUDED.org_email,
-              title = EXCLUDED.title,
-              job_number = EXCLUDED.job_number,
-              work_place = EXCLUDED.work_place,
-              remark = EXCLUDED.remark,
-              dept_ids = EXCLUDED.dept_ids,
-              dept_names = EXCLUDED.dept_names,
-              extension = EXCLUDED.extension,
-              hired_date = EXCLUDED.hired_date,
-              active = EXCLUDED.active,
-              is_admin = EXCLUDED.is_admin,
-              is_boss = EXCLUDED.is_boss,
-              leader_in_dept = EXCLUDED.leader_in_dept,
-              exclusive_account = EXCLUDED.exclusive_account,
-              raw = EXCLUDED.raw,
-              updated_at = EXCLUDED.updated_at`,
-            [
-              u.userid, u.unionid, u.name, u.avatar, u.mobile, u.telephone, u.email, u.org_email, u.title, u.job_number, u.work_place, u.remark,
-              toJsonText(u.dept_ids), toJsonText(u.dept_names), toJsonText(u.extension), u.hired_date, u.active, u.is_admin, u.is_boss,
-              toJsonText(u.leader_in_dept), u.exclusive_account, toJsonText(u.raw),
-            ],
-          );
-        }
-      });
-      if (users.size > 0) {
-        publishMallRealtimeEvent('balance_changed', { reason: 'users_sync' });
-        publishMallRealtimeEvent('charity_changed', { reason: 'users_sync' });
-      }
-
-      return res.json({
-        ok: true,
-        deptCount: deptIds.length,
-        fetched,
-        active: activeCount,
-        upserted: users.size,
-      });
+      const result = await syncAllDingtalkUsers(db, cfg);
+      return res.json({ ok: true, ...result });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
     }

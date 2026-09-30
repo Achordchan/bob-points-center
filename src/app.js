@@ -15,7 +15,13 @@ import { devAuthRouter, shouldEnableLocalDevAuth } from './routes/devAuth.js';
 import { startMallOpeningScheduler } from './services/mallOpeningScheduler.js';
 import { startAuctionSettleScheduler } from './services/auctionSettleScheduler.js';
 import { startDingtalkStream } from './services/dingtalkStreamService.js';
-import { handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './services/attendanceRewardService.js';
+import { clearAttendanceDepartmentCache, handleCheckinEvent, startAttendanceRewardReconcileScheduler } from './services/attendanceRewardService.js';
+import {
+  DINGTALK_CONTACT_DEPT_EVENTS,
+  DINGTALK_CONTACT_USER_EVENTS,
+  handleContactUserEvent,
+  startDingtalkUserSyncScheduler,
+} from './services/dingtalkUserSyncService.js';
 import { getClientIp, safeAppendAuditLog } from './services/auditLogService.js';
 import { clientIpKey, createRateLimiter } from './middleware/rateLimit.js';
 
@@ -168,6 +174,15 @@ export function createApp({ db, cfg } = {}) {
       // 兼容其他可能的 topic 写法
       attendance_checkin: ({ data, headers }) => handleCheckinEvent(db, cfg, { data, headers }),
       'attendance:CHECKIN': ({ data, headers }) => handleCheckinEvent(db, cfg, { data, headers }),
+      // 通讯录事件：入职/资料修改/离职实时更新本地资料；部门变更清空考勤部门缓存
+      ...Object.fromEntries(DINGTALK_CONTACT_USER_EVENTS.map((eventType) => [
+        eventType,
+        ({ data }) => handleContactUserEvent(db, cfg, { topic: eventType, data }),
+      ])),
+      ...Object.fromEntries(DINGTALK_CONTACT_DEPT_EVENTS.map((eventType) => [
+        eventType,
+        () => clearAttendanceDepartmentCache(),
+      ])),
       // 通配符兜底：打印所有未命中的事件，便于排查
       '*': ({ topic, data, headers }) => {
         // eslint-disable-next-line no-console
@@ -175,6 +190,7 @@ export function createApp({ db, cfg } = {}) {
       },
     });
     startAttendanceRewardReconcileScheduler({ db, cfg });
+    startDingtalkUserSyncScheduler({ db, cfg });
   } else if (cfg?.dingtalk?.streamEnabled === false) {
     // eslint-disable-next-line no-console
     console.warn('[DingtalkStream] 已通过 DINGTALK_STREAM_ENABLED=false 禁用 Stream 连接');
