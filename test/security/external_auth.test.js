@@ -10,6 +10,7 @@ import { mallRouter } from '../../src/routes/mall.js';
 import { ledgerRouter } from '../../src/routes/ledger.js';
 import { redeemRouter } from '../../src/routes/redeem.js';
 import { ensureAccount, getBalance, grantBob } from '../../src/services/ledgerService.js';
+import { grantWithNotify, grantBatchWithNotify } from '../../src/services/bobOpsService.js';
 
 import {
   authenticateExternalAccount,
@@ -434,6 +435,74 @@ test('业务 ensureAccount 不创建用户，只有可信初始化允许创建',
   await ensureAccount(db, { userid: 'ext_employee', createUser: true });
   assert.ok(writes.some(({ sql }) => sql.includes('INTO users')));
   assert.ok(writes.some(({ sql }) => sql.includes('INTO accounts')));
+});
+
+test('可信单笔/批量发币可初始化新钉钉员工，但不重建已清理外部账号', async (t) => {
+  const users = new Map();
+  const balances = new Map();
+  const writes = [];
+  let purgeOnLookup = false;
+  const db = {
+    async get(sql, params) {
+      const uid = params[0];
+      if (sql.includes('FROM system_settings')) return { value: JSON.stringify({ enabled: false }) };
+      if (sql.includes('FROM users')) {
+        const user = users.get(uid);
+        if (purgeOnLookup && user?.source === 'external') {
+          users.delete(uid);
+          balances.delete(uid);
+          purgeOnLookup = false;
+        }
+        return user;
+      }
+      if (sql.includes('SELECT userid FROM accounts')) return balances.has(uid) ? { userid: uid } : null;
+      if (sql.includes('SELECT balance FROM accounts')) return { balance: balances.get(uid) || 0 };
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+    async run(sql, params) {
+      writes.push({ sql, params });
+      if (sql.includes('INTO users') && !users.has(params[0])) users.set(params[0], { source: 'dingtalk' });
+      if (sql.includes('UPDATE users SET name')) users.get(params[1]).name = params[0];
+      if (sql.includes('INTO accounts') && !balances.has(params[0])) balances.set(params[0], 0);
+      if (sql.includes('SET balance = balance +')) balances.set(params[1], balances.get(params[1]) + params[0]);
+      return { changes: 1, lastID: writes.length };
+    },
+    async transaction(fn) { return fn(db); },
+  };
+  const lookedUp = [];
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    let data;
+    if (String(url).includes('/gettoken')) data = { errcode: 0, access_token: 'test-token', expires_in: 7200 };
+    else {
+      const { userid } = JSON.parse(options.body);
+      lookedUp.push(userid);
+      data = userid === 'purged_external'
+        ? { errcode: 60121, errmsg: 'user not found' }
+        : { errcode: 0, result: { userid, name: '新员工' } };
+    }
+    return { ok: true, async text() { return JSON.stringify(data); } };
+  };
+  t.after(() => { globalThis.fetch = fetch; });
+  const cfg = { dingtalk: { appKey: 'first-grant-test', appSecret: 'first-grant-test-secret' } };
+  const first = await grantWithNotify(db, cfg, { userid: 'first_employee', amount: 10 });
+  assert.equal(first.balance, 10);
+  assert.equal(users.get('first_employee').source, 'dingtalk');
+  const batch = await grantBatchWithNotify(db, cfg, { userids: ['second_employee', 'ext_sales'], amount: 5 });
+  assert.equal(batch.ok, true);
+  assert.equal(balances.get('second_employee'), 5);
+  assert.equal(balances.get('ext_sales'), 5, 'ext_ 前缀不妨碍经钉钉确认的员工建号');
+  await grantWithNotify(db, cfg, { userid: 'first_employee', amount: 2 });
+  assert.deepEqual(lookedUp, ['first_employee', 'second_employee', 'ext_sales'], '已有账号不重复调用钉钉');
+  users.set('active_external', { source: 'external' });
+  balances.set('active_external', 0);
+  assert.equal((await grantWithNotify(db, cfg, { userid: 'active_external', amount: 3 })).balance, 3);
+  const before = writes.length;
+  await assert.rejects(() => grantWithNotify(db, cfg, { userid: 'purged_external', amount: 1 }), /user not found/);
+  assert.equal(writes.length, before, '钉钉不认识的已清理外部账号不得写入');
+  purgeOnLookup = true;
+  await assert.rejects(() => grantWithNotify(db, cfg, { userid: 'active_external', amount: 1 }), /unauthorized/);
+  assert.equal(users.has('active_external'), false, '外部账号校验后发生清理也不能触发建号');
 });
 
 test('已通过认证的账本请求与清理交错时，返回 401 且不复活用户', async (t) => {

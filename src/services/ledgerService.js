@@ -101,7 +101,7 @@ export async function getBalance(db, { userid, name }) {
   return row?.balance ?? 0;
 }
 
-export async function grantBob(db, { userid, amount, reason, refId, name }) {
+export async function grantBob(db, { userid, amount, reason, refId, name, createUser = false }) {
   const delta = toInt(amount);
   if (delta === null || delta <= 0) {
     throw new Error('amount must be positive integer');
@@ -110,7 +110,7 @@ export async function grantBob(db, { userid, amount, reason, refId, name }) {
   const cleanReason = reason ? String(reason) : 'grant';
 
   const run = async (tx) => {
-    await ensureAccount(tx, { userid, name });
+    await ensureAccount(tx, { userid, name, createUser });
 
     const insert = await tx.run(
       'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
