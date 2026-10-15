@@ -246,18 +246,23 @@ export default function Users({ me }) {
   const roleCandidates = roleTarget?.userid
     ? [roleTarget]
     : selected.map((userid) => selectedUsers[userid] || rows.find((row) => row.userid === userid) || { userid });
-  // 外部账号不能分配后台角色（后端也会拒绝），这里直接排除。
-  const roleTargets = roleCandidates.filter((user) => !isExternalUser(user));
-  const roleExcludedCount = roleCandidates.length - roleTargets.length;
+  // 外部账号不能被分配后台角色（后端也会拒绝），但允许取消历史上误挂的角色，所以目标里保留它们，
+  // 只在分配（roleId 非空）时排除。
+  const roleTargets = roleCandidates;
+  const roleExternalCount = roleTargets.filter((user) => isExternalUser(user)).length;
+  const onlyExternalRoleTargets = roleTargets.length > 0 && roleExternalCount === roleTargets.length;
 
   const assignRole = async (roleId) => {
     const role = roles.find((item) => String(item.id) === String(roleId));
     const roleName = role?.name || '无后台角色';
-    const targets = roleTargets.filter((user) => !Number(user.is_fixed_admin));
+    const targets = roleTargets
+      .filter((user) => !Number(user.is_fixed_admin))
+      .filter((user) => !roleId || !isExternalUser(user));
     if (!targets.length) return message.warning('没有可修改角色的用户');
+    const skippedExternal = roleId ? roleExternalCount : 0;
     modal.confirm({
       title: '确认修改后台角色？',
-      content: `将把 ${targets.length} 个用户的后台角色改为「${roleName}」，权限会立即生效。`,
+      content: `将把 ${targets.length} 个用户的后台角色改为「${roleName}」，权限会立即生效。${skippedExternal ? `另有 ${skippedExternal} 位外部账号不能分配角色，已跳过。` : ''}`,
       okText: '确认修改',
       cancelText: '取消',
       onOk: async () => {
@@ -479,7 +484,7 @@ export default function Users({ me }) {
               { key: 'admin', label: '后台角色', children: detail.user?.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (detail.user?.role?.name ? <Tag color="blue">{detail.user.role.name}</Tag> : '普通用户') },
             ]} />
             <Space wrap>
-              {canAssignRole && !isExternalUser(detail.user) && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
+              {canAssignRole && (!isExternalUser(detail.user) || detail.user?.role) && !detail.user?.is_fixed_admin && <Button onClick={() => setRoleTarget(detail.user)}>修改后台角色</Button>}
               {canDelete && !detail.user?.is_fixed_admin && <Button danger onClick={() => openResetUser(detail.user)}>危险区：清空该用户业务数据</Button>}
             </Space>
           </Space> },
@@ -517,13 +522,13 @@ export default function Users({ me }) {
         footer={null}
       >
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
-          {roleExcludedCount > 0 && <Alert type="warning" showIcon message={`外部账号不能分配后台角色，已排除 ${roleExcludedCount} 人`} />}
+          {roleExternalCount > 0 && <Alert type="warning" showIcon message={`其中 ${roleExternalCount} 位外部账号不能分配后台角色，只能取消已有角色`} />}
           <Alert type="info" showIcon message={`将修改 ${roleTargets.length} 个用户的后台角色`} description={<div className="batch-recipient-list">{roleTargets.map((user) => <Tag key={user.userid}>{user.name ? `${user.name}（${user.userid}）` : user.userid}</Tag>)}</div>} />
           <Select
             placeholder="选择后台角色"
             disabled={!roleTargets.length}
             style={{ width: '100%' }}
-            options={[{ value: null, label: '普通用户：无后台角色' }, ...roles.map((role) => ({ value: role.id, label: role.name }))]}
+            options={[{ value: null, label: '普通用户：无后台角色' }, ...(onlyExternalRoleTargets ? [] : roles.map((role) => ({ value: role.id, label: role.name })))]}
             onChange={assignRole}
           />
         </Space>
