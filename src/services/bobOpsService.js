@@ -3,10 +3,9 @@ import { confirmRedeem } from './redeemService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { getUserDetail } from './dingtalkService.js';
 
-async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
+export async function getTrustedAccountOptions(db, cfg, userid) {
   const uid = String(userid || '').trim();
   if (!uid) throw new Error('missing userid');
-  if (!Number.isInteger(Number(amount)) || Number(amount) <= 0) throw new Error('amount must be positive integer');
   const user = await db.get('SELECT source FROM users WHERE userid = ? LIMIT 1', [uid]);
   let createUser = false;
   let name;
@@ -19,7 +18,13 @@ async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
   } else if (user.source === 'dingtalk') {
     createUser = true;
   }
-  return await grantBob(db, { userid: uid, amount, reason, refId, name, createUser });
+  return { userid: uid, name, createUser };
+}
+
+async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
+  if (!Number.isInteger(Number(amount)) || Number(amount) <= 0) throw new Error('amount must be positive integer');
+  const account = await getTrustedAccountOptions(db, cfg, userid);
+  return await grantBob(db, { ...account, amount, reason, refId });
 }
 
 export async function grantWithNotify(db, cfg, { userid, amount, reason, refId, awaitNotify } = {}) {

@@ -10,7 +10,7 @@ import { parseCookies } from '../services/adminSession.js';
 import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
 import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
-import { deductBatchWithNotify, deductWithNotify, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
+import { deductBatchWithNotify, deductWithNotify, getTrustedAccountOptions, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 function toInt(value) {
@@ -77,6 +77,7 @@ export function ledgerRouter() {
       res.status(400).json({ error: 'missing userid' });
       return null;
     }
+    req.bobToken = token;
     return userid;
   }
 
@@ -85,7 +86,10 @@ export function ledgerRouter() {
       const userid = await resolveQueryUserid(req, res);
       if (!userid) return;
       const db = req.app.locals.db;
-      const balance = await getBalance(db, { userid });
+      const account = req.bobToken
+        ? await getTrustedAccountOptions(db, req.app.locals.cfg, userid)
+        : { userid };
+      const balance = await getBalance(db, account);
       return res.json({ userid, balance });
     } catch (err) {
       const message = String(err?.message || err);
@@ -100,7 +104,10 @@ export function ledgerRouter() {
       const page = req.query.page ? Number(req.query.page) : 1;
       const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
       const db = req.app.locals.db;
-      const result = await listLedgerRecords(db, { userid, page, pageSize });
+      const account = req.bobToken
+        ? await getTrustedAccountOptions(db, req.app.locals.cfg, userid)
+        : { userid };
+      const result = await listLedgerRecords(db, { ...account, page, pageSize });
       return res.json(result);
     } catch (err) {
       const message = String(err?.message || err);

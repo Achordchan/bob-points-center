@@ -89,8 +89,8 @@ export async function ensureAccount(db, { userid, name, createUser = false }) {
   );
 }
 
-export async function getBalance(db, { userid, name }) {
-  await ensureAccount(db, { userid, name });
+export async function getBalance(db, { userid, name, createUser = false }) {
+  await ensureAccount(db, { userid, name, createUser });
 
   const row = await db.get(
     'SELECT balance FROM accounts WHERE userid = ?',
@@ -187,7 +187,7 @@ export async function deductBob(db, { userid, amount, reason, refId, name }) {
   return await run(db);
 }
 
-export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name }) {
+export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name, createUser = false }) {
   if (!userid) {
     throw new Error('missing userid');
   }
@@ -196,7 +196,7 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
   const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
   const offset = (p - 1) * ps;
 
-  await ensureAccount(db, { userid, name });
+  await ensureAccount(db, { userid, name, createUser });
 
   const rows = await db.all(
     `SELECT l.id, l.userid, l.delta, l.reason, l.ref_id, l.created_at,

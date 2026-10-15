@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
@@ -586,6 +587,78 @@ test('已通过认证的账本请求与清理交错时，返回 401 且不复活
   assert.equal(db.state.users.size, 0);
   assert.equal(db.state.inserts.length, 0);
   await assert.rejects(() => getBalance(db, { userid: 'race_external' }), /unauthorized/);
+});
+
+test('可信 Token 首次查余额可建钉钉账户，匿名/坏 Token/旧 Cookie 不可建号', async (t) => {
+  const db = createFakeDb();
+  const balances = new Map();
+  const token = 'trusted-balance-token';
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const get = db.get;
+  db.get = async (sql, params) => {
+    if (sql.includes('FROM bob_tokens')) return params[0] === tokenHash ? { id: 1 } : null;
+    if (sql.includes('SELECT source FROM users')) return db.state.users.get(params[0]);
+    if (sql.includes('SELECT balance FROM accounts')) return { balance: balances.get(params[0]) || 0 };
+    return get(sql, params);
+  };
+  db.all = async (sql) => {
+    assert.match(sql, /FROM ledger l/);
+    return [];
+  };
+  const run = db.run;
+  db.run = async (sql, params) => {
+    const result = await run(sql, params);
+    if (sql.includes('INTO users')) db.state.users.set(params[0], { source: 'dingtalk' });
+    if (sql.includes('INTO accounts') && db.state.users.has(params[0])) balances.set(params[0], 0);
+    return result;
+  };
+  const cfg = { webSessionSecret: 'trusted-balance-web', sessionGlobalVersion: 0, dingtalk: { appKey: 'balance-test', appSecret: 'test' } };
+  const app = express();
+  app.locals.db = db;
+  app.locals.cfg = cfg;
+  app.use('/ledger', ledgerRouter());
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  const nativeFetch = globalThis.fetch;
+  const lookedUp = [];
+  globalThis.fetch = async (url, options) => {
+    let data;
+    if (String(url).includes('/gettoken')) data = { errcode: 0, access_token: 'test-token', expires_in: 7200 };
+    else {
+      const { userid } = JSON.parse(options.body);
+      lookedUp.push(userid);
+      data = userid === 'purged_external'
+        ? { errcode: 60121, errmsg: 'user not found' }
+        : { errcode: 0, result: { userid, name: '首次查余额员工' } };
+    }
+    return { ok: true, async text() { return JSON.stringify(data); } };
+  };
+  t.after(async () => {
+    globalThis.fetch = nativeFetch;
+    await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  });
+  const request = async (userid, headers = {}, path = 'balance') => {
+    const response = await nativeFetch(`http://127.0.0.1:${server.address().port}/ledger/${path}?userid=${userid}`, { headers });
+    return { status: response.status, body: await response.json() };
+  };
+  assert.equal((await request('new_employee')).status, 401);
+  assert.equal((await request('new_employee', { 'X-BOB-Token': 'bad' })).status, 401);
+  const stale = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'purged_external', sv: 0 }, 3600)}`;
+  assert.equal((await request('new_employee', { Cookie: stale })).status, 401);
+  assert.equal(lookedUp.length, 0, '未通过 Token 认证不能触发身份核验');
+  const result = await request('ext_sales', { 'X-BOB-Token': token });
+  assert.equal(result.status, 200);
+  assert.equal(Number(result.body.balance), 0);
+  assert.ok(balances.has('ext_sales'));
+  assert.equal((await request('ext_sales', { 'X-BOB-Token': token })).status, 200);
+  assert.deepEqual(lookedUp, ['ext_sales'], '重复余额查询不再核验已有身份');
+  const records = await request('first_records_employee', { 'X-BOB-Token': token }, 'records');
+  assert.equal(records.status, 200);
+  assert.deepEqual(records.body.data, []);
+  assert.ok(balances.has('first_records_employee'), '同一可信查询链的流水首查也保留初始化行为');
+  assert.equal((await request('purged_external', { 'X-BOB-Token': token })).status, 500);
+  assert.equal(db.state.users.has('purged_external'), false);
 });
 
 test('注册与登录签发前强制刷新会话版本，新 Cookie 可立即使用且刷新失败不签发', async (t) => {
