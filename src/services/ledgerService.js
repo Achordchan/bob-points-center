@@ -248,6 +248,16 @@ export async function transferBob(db, {
     await ensureAccount(tx, { userid: fromId, name: fromName });
     await ensureAccount(tx, { userid: toId, name: toName });
 
+    // 外部活动账号与钉钉员工之间不允许转账：币流入员工账户后，活动结束清理批次时无法追回。
+    const sourceRows = await tx.all(
+      'SELECT userid, COALESCE(source, \'dingtalk\') AS source FROM users WHERE userid IN (?, ?)',
+      [fromId, toId],
+    );
+    const sourceOf = (uid) => String((sourceRows || []).find((r) => String(r.userid) === uid)?.source || 'dingtalk');
+    if (sourceOf(fromId) !== sourceOf(toId)) {
+      throw new Error('transfer_not_allowed_between_sources');
+    }
+
     // 始终按 userid 字典序加锁，避免 A→B 与 B→A 并发死锁。
     const lockOrder = [fromId, toId].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const uid of lockOrder) {

@@ -301,6 +301,9 @@ export function classifyAdminAudit(row = {}) {
   if (path.includes('/backup/import')) return { event_group: 'backup', event_label: '导入备份' };
   if (path.includes('/users/assign-role') || path.includes('/roles/')) return { event_group: 'role', event_label: '角色权限变更' };
   if (path.includes('/users/delete')) return { event_group: 'danger', event_label: '删除用户' };
+  if (path.includes('/external-login/purge')) return { event_group: 'danger', event_label: '清理外部账号' };
+  if (path.includes('/users/external/reset-password')) return { event_group: 'write', event_label: '重置外部账号密码' };
+  if (path.includes('/users/external/set-status')) return { event_group: 'write', event_label: '启停外部账号' };
   if (path.includes('/data/reset') || path.includes('/history/clear')) return { event_group: 'danger', event_label: '危险操作' };
   if (method === 'POST') return { event_group: 'write', event_label: '后台操作' };
   return { event_group: 'read', event_label: '查看' };

@@ -45,6 +45,28 @@ export function isExternalUserid(userid) {
   return String(userid || '').trim().startsWith(EXTERNAL_USERID_PREFIX);
 }
 
+/**
+ * 是否外部活动账号。来源以 users.source 为准：已有钉钉 userid 也可能以 ext_ 开头，不能按前缀猜。
+ * 账号不存在时按钉钉账号处理（与 COALESCE(source,'dingtalk') 的默认一致）。
+ */
+export async function isExternalUser(db, userid) {
+  const id = String(userid ?? '').trim();
+  if (!id) return false;
+  const row = await db.get('SELECT source FROM users WHERE userid = ? LIMIT 1', [id]);
+  return String(row?.source || DINGTALK_SOURCE) === EXTERNAL_SOURCE;
+}
+
+/** 批量版：返回给定 userid 中属于外部账号的集合。 */
+export async function getExternalUserids(db, userids) {
+  const ids = [...new Set((Array.isArray(userids) ? userids : []).map((x) => String(x ?? '').trim()).filter(Boolean))];
+  if (!ids.length) return new Set();
+  const rows = await db.all(
+    'SELECT userid FROM users WHERE source = ? AND userid = ANY(?::text[])',
+    [EXTERNAL_SOURCE, ids],
+  );
+  return new Set((rows || []).map((r) => String(r.userid)));
+}
+
 export function isUniqueViolation(err) {
   return String(err?.code || '') === '23505';
 }
@@ -328,4 +350,51 @@ export async function authenticateExternalAccount(db, { phone, password } = {}) 
 
     return { userid: String(row.userid), name: String(row.name || ''), phone: String(row.phone || '') };
   });
+}
+
+/**
+ * 后台重置外部账号密码，同时清零失败计数与锁定（现场忘记密码的唯一恢复路径）。
+ * 失败抛 ExternalAuthError（not_external_account / weak_password）。
+ * 已签发的会话不会被踢下线：会话版本是全局的，需要立即踢人请改用禁用账号。
+ */
+export async function resetExternalAccountPassword(db, { userid, password } = {}) {
+  const uid = String(userid ?? '').trim();
+  if (!isValidPassword(password)) {
+    throw new ExternalAuthError('weak_password', `密码长度需为 ${MIN_PASSWORD_LENGTH}-${MAX_PASSWORD_LENGTH} 位`);
+  }
+  const credentials = await hashPassword(password);
+  const result = await db.run(
+    `UPDATE external_accounts
+        SET password_hash = ?, password_salt = ?, failed_count = 0, locked_until = NULL, updated_at = unixepoch()
+      WHERE userid = ?`,
+    [credentials.hash, credentials.salt, uid],
+  );
+  if (!uid || Number(result?.changes || 0) < 1) {
+    throw new ExternalAuthError('not_external_account', '该用户不是外部活动账号');
+  }
+  return { userid: uid };
+}
+
+export const EXTERNAL_ACCOUNT_STATUSES = Object.freeze(['active', 'disabled']);
+
+/**
+ * 禁用/启用外部账号。禁用后无法登录，且已有会话在下一次请求时立即失效
+ * （isWebSessionValidLive 要求 external_accounts.status = 'active'）。
+ */
+export async function setExternalAccountStatus(db, { userid, status } = {}) {
+  const uid = String(userid ?? '').trim();
+  const next = String(status ?? '').trim();
+  if (!EXTERNAL_ACCOUNT_STATUSES.includes(next)) {
+    throw new ExternalAuthError('invalid_status', '状态只能是 active 或 disabled');
+  }
+  const result = await db.run(
+    `UPDATE external_accounts
+        SET status = ?, failed_count = 0, locked_until = NULL, updated_at = unixepoch()
+      WHERE userid = ?`,
+    [next, uid],
+  );
+  if (!uid || Number(result?.changes || 0) < 1) {
+    throw new ExternalAuthError('not_external_account', '该用户不是外部活动账号');
+  }
+  return { userid: uid, status: next };
 }

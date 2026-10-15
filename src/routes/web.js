@@ -19,6 +19,7 @@ import { clientIpKey, createRateLimiter } from '../middleware/rateLimit.js';
 import {
   authenticateExternalAccount,
   ExternalAuthError,
+  isExternalUser,
   registerExternalAccount,
 } from '../services/externalAccountService.js';
 import {
@@ -197,13 +198,20 @@ export function webRouter() {
     }
   });
 
-  router.get('/me', requireWebSession(), (req, res) => {
+  router.get('/me', requireWebSession(), async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({
-      userid: req.webSession?.userid || '',
-      name: req.webSession?.name || '',
-      avatar: '',
-    });
+    try {
+      // 来源以数据库为准（会话 Cookie 不带来源），前端据此隐藏外部账号不适用的入口。
+      const external = await isExternalUser(req.app?.locals?.db, req.webSession?.userid);
+      return res.json({
+        userid: req.webSession?.userid || '',
+        name: req.webSession?.name || '',
+        avatar: '',
+        source: external ? 'external' : 'dingtalk',
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
   });
 
   router.get('/oauth/start', (req, res) => {
@@ -264,12 +272,15 @@ export function webRouter() {
     }
   });
 
-  router.get('/logout', (req, res) => {
+  // 退出登录会改变状态，POST 才是正确语义；GET 保留给旧前端兼容。
+  const handleLogout = (req, res) => {
     const cfg = req.app?.locals?.cfg;
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', buildClearWebSessionCookie(cookieOptions(cfg)));
     return res.json({ ok: true });
-  });
+  };
+  router.get('/logout', handleLogout);
+  router.post('/logout', handleLogout);
 
   router.get('/ext/status', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');

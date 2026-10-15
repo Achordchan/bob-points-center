@@ -143,12 +143,17 @@ export function hasAdminPermission(access, permission) {
 }
 
 export function matchPathPermission(method, path) {
-  const p = String(path || '');
+  // Express 路由默认大小写不敏感（/users/DELETE 同样会命中 /users/delete 处理器），
+  // 而下面的规则是字面前缀匹配：不统一转小写，换个大小写就会漏过规则落到 /users 的 users:view 兜底。
+  const p = String(path || '').toLowerCase();
   const m = String(method || 'GET').toUpperCase();
   if (p.startsWith('/legacy')) return 'super';
   if (p.startsWith('/dashboard') || p.startsWith('/system/info')) return 'dashboard:view';
   if (p.startsWith('/users/assign-role') || p.startsWith('/roles') || p.startsWith('/permissions')) return 'super';
   if (p.startsWith('/users/set-admin')) return 'super';
+  // 精确匹配两个外部账号运维接口（容忍尾斜杠，Express 默认也会匹配）；不能用前缀，
+  // 否则 userid 以 external 开头的用户详情 GET /users/external_xxx 会被误判成 users:edit。
+  if (/^\/users\/external\/(reset-password|set-status)\/*$/.test(p)) return 'users:edit';
   if (p.startsWith('/users/sync')) return 'users:edit';
   if (p.startsWith('/users/notify')) return 'messages:edit';
   if (p.startsWith('/users/delete') || p.startsWith('/data/reset-user') || p.startsWith('/data/reset-all')) return 'super';

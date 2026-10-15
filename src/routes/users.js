@@ -32,7 +32,8 @@ export function usersRouter() {
       const total = Number(totalRow?.c) || 0;
 
       const rows = await db.all(
-        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(u.source, 'dingtalk') AS source,
+                COALESCE(a.balance, 0) AS balance, a.updated_at
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
          ${whereSql}

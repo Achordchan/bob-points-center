@@ -78,7 +78,8 @@ import {
   saveGroupCardSettings,
   saveNotifySettings,
 } from '../../services/systemSettings.js';
-import { getUserName, sendOrQueueNotify } from '../../services/notifyOpsService.js';
+import { EXTERNAL_NOTIFY_SKIPPED, getUserName, sendOrQueueNotify } from '../../services/notifyOpsService.js';
+import { getExternalUserids, isExternalUser } from '../../services/externalAccountService.js';
 import { requireAdminSession } from '../../middleware/requireAdminSession.js';
 import {
   ADMIN_PERMISSION_CATALOG,
@@ -569,6 +570,7 @@ export function adminRouter() {
   });
 
   router.post('/users/notify', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
     const cfg = req.app?.locals?.cfg;
     const ids = Array.isArray(req.body?.userids) ? req.body.userids : [];
     const userids = ids
@@ -592,22 +594,31 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const results = [];
+      // 外部活动账号没有钉钉身份，直接跳过且不算失败。
+      const externalUserids = await getExternalUserids(db, userids);
+      let sent = 0;
       for (let i = 0; i < userids.length; i += 1) {
         const userid = userids[i];
+        if (externalUserids.has(userid)) {
+          results.push({ ok: false, skipped: true, userid, error: EXTERNAL_NOTIFY_SKIPPED });
+          continue;
+        }
         const r = await sendRobotPrivateTextWithRetry(cfg, { userid, content });
         results.push(r.ok ? { ok: true, userid } : { ok: false, userid, error: r.error });
-        if (userids.length > 1) {
+        sent += 1;
+        if (userids.length > 1 && sent < userids.length - externalUserids.size) {
           await sleep(120);
         }
       }
-      const ok = results.every((x) => x.ok);
-      const failed = results.filter((x) => !x.ok);
-      const successCount = results.length - failed.length;
+      const skipped = results.filter((x) => x.skipped);
+      const failed = results.filter((x) => !x.ok && !x.skipped);
+      const successCount = results.filter((x) => x.ok).length;
       return res.json({
-        ok,
+        ok: failed.length === 0,
         count: results.length,
         success_count: successCount,
         failed_count: failed.length,
+        skipped_count: skipped.length,
         error: failed.length ? `私聊消息发送失败 ${failed.length} 人` : undefined,
         results,
       });
@@ -1137,6 +1148,7 @@ export function adminRouter() {
       res.setHeader('Cache-Control', 'no-store');
       const user = await db.get(
         `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at,
+                COALESCE(u.source, 'dingtalk') AS source, COALESCE(u.phone, '') AS phone,
                 r.id AS role_id, r.name AS role_name, r.permissions AS role_permissions, r.is_enabled AS role_enabled
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
@@ -1147,6 +1159,13 @@ export function adminRouter() {
         [userid],
       );
       if (!user) return res.status(404).json({ error: 'user not found' });
+      const externalAccount = user.source === 'external'
+        ? await db.get(
+          `SELECT COALESCE(batch_id, '') AS batch_id, COALESCE(status, 'active') AS status, last_login_at
+             FROM external_accounts WHERE userid = ? LIMIT 1`,
+          [userid],
+        )
+        : null;
       const ledgerResult = await listLedgerRecords(db, { userid, page: 1, pageSize: 120 });
       const ledger = ledgerResult.data || [];
       const redeems = await db.all(
@@ -1199,7 +1218,13 @@ export function adminRouter() {
       return res.json({
         ok: true,
         data: {
-          user: { ...user, is_admin: fixedAdmin || Number(user.is_admin) === 1 || role ? 1 : 0, is_fixed_admin: fixedAdmin ? 1 : 0, role },
+          user: {
+            ...user,
+            is_admin: fixedAdmin || Number(user.is_admin) === 1 || role ? 1 : 0,
+            is_fixed_admin: fixedAdmin ? 1 : 0,
+            role,
+            external: externalAccount ? { ...externalAccount, last_login_at: externalAccount.last_login_at ?? null } : null,
+          },
           account: { balance: Number(user.balance || 0), updated_at: user.updated_at },
           ledger,
           redeems: (redeems || []).map((row) => serializeAdminRedeemRow(row)),
@@ -1468,6 +1493,10 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
+      // 外部活动账号永远登录不了后台，授予管理员只会让批次清理静默跳过该账号；撤销仍允许。
+      if (isAdminFlag && await isExternalUser(db, userid)) {
+        return res.status(400).json({ error: '外部活动账号不能设为管理员' });
+      }
       const changed = await runInTransaction(db, async (tx) => {
         await lockAdminAccountProtection(tx);
         const r = await tx.run('UPDATE users SET is_admin = ? WHERE userid = ?', [isAdminFlag ? 1 : 0, userid]);
@@ -1580,8 +1609,10 @@ export function adminRouter() {
       req.auditLogPayload = { userid, roleId };
       const error = await runInTransaction(db, async (tx) => {
         await lockAdminAccountProtection(tx);
-        const user = await tx.get('SELECT userid FROM users WHERE userid = ? LIMIT 1', [userid]);
+        const user = await tx.get("SELECT userid, COALESCE(source, 'dingtalk') AS source FROM users WHERE userid = ? LIMIT 1", [userid]);
         if (!user) return 'user not found';
+        // 外部活动账号登录不了后台，挂角色只会让批次清理静默跳过它；取消角色（roleId 为空）仍允许。
+        if (roleId && user.source === 'external') return '外部活动账号不能分配后台角色';
         if (roleId) {
           const role = await tx.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
           if (!role || Number(role.is_enabled) !== 1) return '角色不存在或已停用';
@@ -1799,8 +1830,9 @@ export function adminRouter() {
           const group = [
             "LOWER(COALESCE(u.userid, '')) LIKE ?",
             "LOWER(COALESCE(u.name, '')) LIKE ?",
+            "COALESCE(u.phone, '') LIKE ?",
           ];
-          params.push(kw, kw);
+          params.push(kw, kw, kw);
           if (compactToken) {
             group.push("REPLACE(REPLACE(REPLACE(REPLACE(LOWER(COALESCE(u.userid, '') || COALESCE(u.name, '')), ' ', ''), '-', ''), '_', ''), '.', '') LIKE ?");
             params.push(`%${compactToken}%`);

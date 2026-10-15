@@ -760,7 +760,8 @@ export async function reconcileAttendanceRewards(db, cfg, { date, userids, notif
   await seedAttendanceRewardRecordsFromAudit(db, { date: range.date });
   let users = Array.isArray(userids) && userids.length > 0
     ? userids.map((x) => String(x || '').trim()).filter(Boolean)
-    : (await db.all('SELECT userid FROM users ORDER BY userid ASC')).map((row) => String(row?.userid || '')).filter(Boolean);
+    // 外部活动账号没有钉钉考勤，不能进入按次计量的 attendance/list 查询。
+    : (await db.all("SELECT userid FROM users WHERE COALESCE(source, 'dingtalk') <> 'external' ORDER BY userid ASC")).map((row) => String(row?.userid || '')).filter(Boolean);
 
   const totalUsers = users.length;
   if (skipRewardedUsers && settings.testMode !== true) {

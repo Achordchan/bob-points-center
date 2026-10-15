@@ -16,6 +16,11 @@ import {
   saveGroupCardSettings,
   saveNotifySettings,
 } from '../../services/systemSettings.js';
+import {
+  ExternalAuthError,
+  resetExternalAccountPassword,
+  setExternalAccountStatus,
+} from '../../services/externalAccountService.js';
 import { deleteUsersCompletely } from '../../services/userDataPurgeService.js';
 import { lockAdminAccountProtection } from '../../services/adminPermissionService.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
@@ -107,7 +112,8 @@ export function registerAdminSettingsRoutes(router) {
         const row = await db.get(
           `SELECT userid
            FROM users
-           WHERE LOWER(COALESCE(name, '')) LIKE LOWER(?) OR LOWER(userid) LIKE LOWER(?)
+           WHERE (LOWER(COALESCE(name, '')) LIKE LOWER(?) OR LOWER(userid) LIKE LOWER(?))
+             AND COALESCE(source, 'dingtalk') <> 'external'
            ORDER BY (name IS NULL), name COLLATE NOCASE, userid COLLATE NOCASE
            LIMIT 1`,
           [kw, kw],
@@ -637,6 +643,40 @@ export function registerAdminSettingsRoutes(router) {
       });
       return res.json({ ok: true, data });
     } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  // 外部账号运维：现场忘记密码时由工作人员重置；出问题的账号可禁用（立即踢下线）/ 重新启用。
+  router.post('/users/external/reset-password', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const userid = String(req.body?.userid ?? '').trim();
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      await resetExternalAccountPassword(db, { userid, password: req.body?.password });
+      // 审计只记目标账号，绝不记录密码。
+      req.auditLogPayload = { userid };
+      return res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof ExternalAuthError) {
+        return res.status(err.code === 'not_external_account' ? 404 : 400).json({ error: err.message, code: err.code });
+      }
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/users/external/set-status', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const userid = String(req.body?.userid ?? '').trim();
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await setExternalAccountStatus(db, { userid, status: req.body?.status });
+      req.auditLogPayload = { userid, status: data.status };
+      return res.json({ ok: true, data });
+    } catch (err) {
+      if (err instanceof ExternalAuthError) {
+        return res.status(err.code === 'not_external_account' ? 404 : 400).json({ error: err.message, code: err.code });
+      }
       return res.status(500).json({ error: String(err?.message || err) });
     }
   });

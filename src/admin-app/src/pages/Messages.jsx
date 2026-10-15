@@ -626,7 +626,7 @@ function NotifyTestPanel({ disabled, canSearchUsers }) {
   const [userOptions, setUserOptions] = useState([]);
   const searchUsers = async (keyword) => {
     if (!String(keyword || '').trim()) return;
-    const data = await api(`/admin/users?${qs({ keyword, page: 1, pageSize: 20 })}`);
+    const data = await api(`/admin/users?${qs({ keyword, page: 1, pageSize: 20, source: 'dingtalk' })}`);
     setUserOptions((data.data || []).map((row) => ({ value: row.userid, label: row.name ? `${row.name}（${row.userid}）` : row.userid, name: row.name || '' })));
   };
   const submit = async (values) => {

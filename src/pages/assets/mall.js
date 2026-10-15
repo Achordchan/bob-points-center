@@ -28,6 +28,7 @@
     richBoard: [],
     popularProducts: [],
     activeRichTab: 'wealth',
+    userSource: '',
     moreFaq: [],
     moreAnnouncements: [],
     moreMyFeedback: [],
@@ -933,6 +934,50 @@
     state.me = { ...prev, userid: uid, name: safeName || prev?.name || '' };
   }
 
+  function isExternalUser() {
+    return state.userSource === 'external';
+  }
+
+  // 记录会话来源（dingtalk / external）并按来源调整界面：
+  // 外部活动账号不展示大富翁榜、转账文案改为「其他活动参与者」、个人数据页显示退出登录。
+  function setUserSource(source) {
+    state.userSource = String(source || '').trim() === 'external' ? 'external' : 'dingtalk';
+    const external = isExternalUser();
+
+    setHidden('logoutRow', !external);
+    setHidden('logoutHelp', !external);
+    setText('transferSearchHelp', external ? '搜索其他活动参与者，请点击选择' : '会列出匹配的同事，请点击选择');
+    setText('transferHeroHelp', external ? '转账支持活动参与者之间互转 BOB 币。' : '转账支持同事之间互转 BOB 币。');
+
+    // 大富翁榜按余额排名并展示姓名，外部活动账号不参与：隐藏该子页签，仅保留热门商品下单榜。
+    setHidden('richTabWealth', external);
+    setHidden('richPanelWealth', external || state.activeRichTab !== 'wealth');
+    if (external && state.activeRichTab === 'wealth') {
+      state.activeRichTab = 'products';
+    }
+    setHidden('richSubnav', external);
+    if (state.activeMoreTab === 'rich') applyRichTabUi();
+    if (state.moreStats) renderMoreStats(state.moreStats);
+  }
+
+  async function handleLogout() {
+    const confirmed = await showConfirmDialog({
+      title: '退出登录',
+      message: '退出后需要重新输入手机号和密码登录，确定退出吗？',
+      confirmText: '退出登录',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      const resp = await fetch('/web/logout', { method: 'POST', credentials: 'same-origin' });
+      if (!resp.ok) throw new Error(`logout_failed_${resp.status}`);
+    } catch (_) {
+      showNotice('退出失败，请稍后重试', 'error');
+      return;
+    }
+    window.location.replace('/login');
+  }
+
   function setRealtimeNotice(text) {
     state.streamNotice = text ? String(text) : '';
     renderUserHint();
@@ -1574,6 +1619,7 @@
       const auth = await safeFetchJson(`/web/auth?code=${encodeURIComponent(authCode)}`);
       if (auth?.data?.userid) {
         setUserIdentity(auth?.data?.name, auth?.data?.avatar);
+        setUserSource(auth?.data?.source);
         syncMeIdentity({ userid: auth?.data?.userid, name: auth?.data?.name });
         bindAnnouncementGate();
         if (!(await waitForAnnouncementAccess())) return false;
@@ -2736,12 +2782,13 @@
       btn.classList.toggle('active', tab === state.activeRichTab);
     });
     
-    setHidden('richPanelWealth', state.activeRichTab !== 'wealth');
+    setHidden('richPanelWealth', isExternalUser() || state.activeRichTab !== 'wealth');
     setHidden('richPanelProducts', state.activeRichTab !== 'products');
   }
 
   function switchRichTab(name) {
-    const next = name === 'wealth' || name === 'products' ? name : 'wealth';
+    let next = name === 'wealth' || name === 'products' ? name : 'wealth';
+    if (isExternalUser() && next === 'wealth') next = 'products';
     state.activeRichTab = next;
     applyRichTabUi();
     
@@ -3069,6 +3116,7 @@
     if (msg === 'cannot transfer to self') return '不能给自己转账';
     if (msg === 'missing to userid') return '缺少对方 userid';
     if (msg === 'amount must be positive integer') return '转账数量需为正整数';
+    if (msg === 'transfer_not_allowed_between_sources') return '外部活动账号只能与外部活动账号互转';
     return msg || '转账失败';
   }
 
@@ -3673,9 +3721,9 @@
       { label: '当前余额', value: `${Number(data.balance ?? 0)} BOB` },
       { label: '待核销订单', value: String(Number(data.pending_orders ?? 0)) },
       { label: '已核销订单', value: String(Number(data.fulfilled_orders ?? 0)) },
-      { label: '排行榜名次', value: data.rich_rank ? `第 ${Number(data.rich_rank)} 名` : '-' },
+      { label: '排行榜名次', value: data.rich_rank ? `第 ${Number(data.rich_rank)} 名` : '-', hidden: isExternalUser() },
       { label: '累计反馈', value: String(Number(data.feedback_count ?? 0)) },
-    ];
+    ].filter((x) => !x.hidden);
     box.innerHTML = items
       .map((x) => `<div class="moreStatsItem"><div class="moreStatsLabel">${escapeHtml(x.label)}</div><div class="moreStatsValue">${escapeHtml(x.value)}</div></div>`)
       .join('');
@@ -4002,6 +4050,7 @@
   }
 
   async function loadRichBoard(seq) {
+    if (isExternalUser()) return [];
     if (!state.richBoard || state.richBoard.length === 0) {
       const el = document.getElementById('richBoardList');
       if (el) el.innerHTML = '<div class="listLoading">正在加载排行榜…</div>';
@@ -4668,7 +4717,7 @@
     else if (ref !== '-') hint = `参考价 ${ref} BOB 币`;
 
     setText('marketListModalTitle', `上架：${name}`);
-    setText('marketListModalSub', '设定价格后其他同事可以购买。');
+    setText('marketListModalSub', '设定价格后其他用户可以购买。');
     setText('marketListErr', '');
     setHidden('marketPickList', true);
     setHidden('marketListPriceSection', false);
@@ -4922,6 +4971,7 @@
           }
 
           setUserIdentity(name, auth.data?.avatar);
+          setUserSource(auth.data?.source);
           syncMeIdentity({ userid, name });
           bindAnnouncementGate();
           await waitForAnnouncementAccess();
@@ -5088,6 +5138,9 @@
               switchRichTab(t);
             });
           });
+
+          const btnLogout = document.getElementById('btnLogout');
+          if (btnLogout) btnLogout.addEventListener('click', () => handleLogout());
 
           startRedPacketTimer();
           startAuctionTimer();
