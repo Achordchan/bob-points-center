@@ -1,6 +1,6 @@
 import { parseCookies } from '../services/adminSession.js';
-import { verifyWebSessionToken } from '../services/webSession.js';
-import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
+import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
+import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 
 export function requireWebSession() {
   return async function requireWebSessionMiddleware(req, res, next) {
@@ -14,12 +14,11 @@ export function requireWebSession() {
     let payload;
     try {
       payload = verifyWebSessionToken(secret, token);
+      if (!payload || !(await isWebSessionValidLive(payload, db, cfg))) {
+        return res.status(401).json({ error: 'unauthorized' });
+      }
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
-    }
-
-    if (!payload || !(await isSessionVersionValidLive(payload, db, cfg))) {
-      return res.status(401).json({ error: 'unauthorized' });
     }
 
     req.webSession = payload;

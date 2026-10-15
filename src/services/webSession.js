@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { isExternalUserid } from './externalAccountService.js';
+import { isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 
 function b64urlEncode(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -57,6 +59,21 @@ export function verifyWebSessionToken(secret, token) {
   if (!payload?.exp || now >= payload.exp) return null;
   if (payload?.aud !== 'web') return null;
   return payload;
+}
+
+export async function isWebSessionValidLive(payload, db, cfg) {
+  if (!payload?.userid || !(await isSessionVersionValidLive(payload, db, cfg))) return false;
+  if (!isExternalUserid(payload.userid)) return true;
+  if (!db) return false;
+  // 旧 Cookie 没有来源字段，按外部 userid 命名空间识别；不缓存，清理/停用后立即拒绝。
+  const account = await db.get(
+    `SELECT a.userid FROM external_accounts a
+       JOIN users u ON u.userid = a.userid
+      WHERE a.userid = ? AND a.status = 'active' AND u.source = 'external'
+      LIMIT 1`,
+    [String(payload.userid)],
+  );
+  return Boolean(account);
 }
 
 function cookieSecureFlag(options) {

@@ -7,8 +7,8 @@ import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { parseCookies } from '../services/adminSession.js';
-import { verifyWebSessionToken } from '../services/webSession.js';
-import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
+import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
+import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { toBool } from '../services/notifyOpsService.js';
 import { redeemConfirmWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
@@ -98,7 +98,7 @@ export function redeemRouter() {
       const token = cookies.bob_web_session;
       const secret = webSessionSigningSecret(cfg);
       const payload = verifyWebSessionToken(secret, token);
-      if (payload?.userid && (await isSessionVersionValidLive(payload, db, cfg))) req.webSession = payload;
+      if (payload?.userid && (await isWebSessionValidLive(payload, db, cfg))) req.webSession = payload;
     } catch {
       // optional
     }

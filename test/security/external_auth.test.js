@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import express from 'express';
+import { createWebSessionToken } from '../../src/services/webSession.js';
+import { webRouter } from '../../src/routes/web.js';
+import { mallRouter } from '../../src/routes/mall.js';
+import { ledgerRouter } from '../../src/routes/ledger.js';
+import { redeemRouter } from '../../src/routes/redeem.js';
 
 import {
   authenticateExternalAccount,
@@ -55,6 +61,8 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     account: account ? { failed_count: 0, locked_until: null, status: 'active', ...account } : null,
     dingtalkUser,
     userByPhone,
+    userExists: true,
+    userSource: 'external',
     inserts: [],
     updates: [],
     queries: [],
@@ -81,7 +89,11 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
         return { locked_until: state.account.locked_until };
       }
       if (sql.includes('FROM user_dingtalk_profiles')) return dingtalkUser;
-      if (sql.includes('FROM external_accounts')) return state.account;
+      if (sql.includes('FROM external_accounts')) {
+        if (sql.includes("a.status = 'active'")
+          && (!state.userExists || state.userSource !== 'external' || state.account?.status !== 'active')) return null;
+        return state.account;
+      }
       if (sql.includes('FROM users WHERE phone')) return userByPhone;
       return null;
     },
@@ -336,6 +348,54 @@ test('停用账号拒绝登录', async () => {
     () => authenticateExternalAccount(createFakeDb({ account }), { phone: '13800000000', password: '123456' }),
     (err) => { assertAuthError(err, 'account_disabled'); return true; },
   );
+});
+
+test('外部旧 Cookie 在停用或清理后被所有会话入口拒绝，且不重建用户', async (t) => {
+  const db = createFakeDb({ account: { userid: 'ext_session', status: 'active' } });
+  const cfg = { webSessionSecret: 'external-session-test', sessionGlobalVersion: 0 };
+  const app = express();
+  app.locals.db = db;
+  app.locals.cfg = cfg;
+  app.use('/web', webRouter());
+  app.use('/mall', mallRouter());
+  app.use('/ledger', ledgerRouter());
+  app.use('/redeem', redeemRouter());
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  t.after(() => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  // 与已签发的旧 Cookie 相同，不加新的来源/撤销字段。
+  const cookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'ext_session', sv: 0 }, 604800)}`;
+  const request = async (path, value = cookie) => {
+    const response = await fetch(base + path, { headers: { Cookie: value } });
+    await response.text();
+    return response.status;
+  };
+  assert.equal(await request('/web/me'), 200);
+  db.state.account.status = 'disabled';
+  assert.equal(await request('/web/me'), 401);
+  db.state.account.status = 'active';
+  db.state.userSource = 'dingtalk';
+  assert.equal(await request('/web/me'), 401);
+  db.state.userSource = 'external';
+  db.state.userExists = false;
+  assert.equal(await request('/web/me'), 401);
+  db.state.userExists = true;
+  assert.equal(await request('/web/me'), 200);
+  db.state.account = null;
+  for (const path of ['/web/me', '/mall/me', '/ledger/balance', '/ledger/records', '/redeem']) {
+    assert.equal(await request(path), 401, `${path} 不得接受清理前的 Cookie`);
+  }
+  assert.equal(db.state.inserts.length, 0, '不得通过 ensureAccount 重建 users/accounts');
+  const employeeCookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'employee', sv: 0 }, 604800)}`;
+  assert.equal(await request('/web/me', employeeCookie), 200, '不影响钉钉员工会话');
+  const get = db.get;
+  db.get = async (sql, params) => {
+    if (sql.includes('FROM external_accounts')) throw new Error('account lookup unavailable');
+    return get(sql, params);
+  };
+  assert.equal(await request('/web/me'), 500, '账号状态读取失败时不得放行');
 });
 
 test('注册接口要求显式同意告知且默认关闭（fail-closed）', () => {

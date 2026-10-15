@@ -7,8 +7,8 @@ import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { parseCookies } from '../services/adminSession.js';
-import { verifyWebSessionToken } from '../services/webSession.js';
-import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
+import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
+import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
 import { deductBatchWithNotify, deductWithNotify, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
@@ -38,7 +38,7 @@ export function ledgerRouter() {
       const token = cookies.bob_web_session;
       const secret = webSessionSigningSecret(cfg);
       const payload = verifyWebSessionToken(secret, token);
-      if (payload?.userid && (await isSessionVersionValidLive(payload, db, cfg))) req.webSession = payload;
+      if (payload?.userid && (await isWebSessionValidLive(payload, db, cfg))) req.webSession = payload;
     } catch {
       // optional
     }
