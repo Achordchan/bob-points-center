@@ -6,6 +6,7 @@ import {
   getAdminAccess,
   hasAdminPermission,
   isSuperAdminSession,
+  lockAdminAccountProtection,
   normalizePermissions,
   serializeRole,
 } from '../../services/adminPermissionService.js';
@@ -879,6 +880,7 @@ export function registerAdminBackupRoutes(router) {
 
     try {
       const report = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
         const report = {};
         let failedTable = null;
         let failedIndex = null;

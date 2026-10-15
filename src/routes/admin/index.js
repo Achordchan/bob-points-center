@@ -86,6 +86,7 @@ import {
   getAdminAccess,
   hasAdminPermission,
   isSuperAdminSession,
+  lockAdminAccountProtection,
   normalizePermissions,
   serializeRole,
 } from '../../services/adminPermissionService.js';
@@ -1467,23 +1468,26 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const r = await db.run('UPDATE users SET is_admin = ? WHERE userid = ?', [isAdminFlag ? 1 : 0, userid]);
-      if (!r?.changes) {
-        return res.status(400).json({ error: 'user not found' });
-      }
-      if (isAdminFlag) {
-        const role = await db.get("SELECT id FROM admin_roles WHERE code = 'admin' LIMIT 1");
-        if (role?.id) {
-          await db.exec(
-            `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
-             VALUES(?, ?, ?, ?, unixepoch())
-             ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
-            [userid, role.id, req.adminSession?.userid || '', req.adminSession?.name || ''],
-          );
+      const changed = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const r = await tx.run('UPDATE users SET is_admin = ? WHERE userid = ?', [isAdminFlag ? 1 : 0, userid]);
+        if (!r?.changes) return false;
+        if (isAdminFlag) {
+          const role = await tx.get("SELECT id FROM admin_roles WHERE code = 'admin' LIMIT 1");
+          if (role?.id) {
+            await tx.exec(
+              `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+               VALUES(?, ?, ?, ?, unixepoch())
+               ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+              [userid, role.id, req.adminSession?.userid || '', req.adminSession?.name || ''],
+            );
+          }
+        } else {
+          await tx.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
         }
-      } else {
-        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
-      }
+        return true;
+      });
+      if (!changed) return res.status(400).json({ error: 'user not found' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1547,13 +1551,17 @@ export function adminRouter() {
     if (!id) return res.status(400).json({ error: 'missing id' });
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const role = await db.get('SELECT id, is_builtin FROM admin_roles WHERE id = ? LIMIT 1', [id]);
-      if (!role) return res.status(404).json({ error: '角色不存在' });
-      if (Number(role.is_builtin) === 1) return res.status(400).json({ error: '系统内置角色不能停用' });
-      const count = await db.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
-      if (Number(count?.c || 0) > 0) return res.status(400).json({ error: '该角色已有用户使用，请先调整用户角色' });
-      const r = await db.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
-      if (!r?.changes) return res.status(404).json({ error: '角色不存在' });
+      const result = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const role = await tx.get('SELECT id, is_builtin FROM admin_roles WHERE id = ? LIMIT 1', [id]);
+        if (!role) return { status: 404, error: '角色不存在' };
+        if (Number(role.is_builtin) === 1) return { status: 400, error: '系统内置角色不能停用' };
+        const count = await tx.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
+        if (Number(count?.c || 0) > 0) return { status: 400, error: '该角色已有用户使用，请先调整用户角色' };
+        await tx.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
+        return null;
+      });
+      if (result) return res.status(result.status).json({ error: result.error });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1570,20 +1578,27 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       req.auditLogPayload = { userid, roleId };
-      if (roleId) {
-        const role = await db.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
-        if (!role || Number(role.is_enabled) !== 1) return res.status(400).json({ error: '角色不存在或已停用' });
-        await db.exec(
-          `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
-           VALUES(?, ?, ?, ?, unixepoch())
-           ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
-          [userid, roleId, req.adminSession?.userid || '', req.adminSession?.name || ''],
-        );
-        await db.run('UPDATE users SET is_admin = 1 WHERE userid = ?', [userid]);
-      } else {
-        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
-        await db.run('UPDATE users SET is_admin = 0 WHERE userid = ?', [userid]);
-      }
+      const error = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const user = await tx.get('SELECT userid FROM users WHERE userid = ? LIMIT 1', [userid]);
+        if (!user) return 'user not found';
+        if (roleId) {
+          const role = await tx.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
+          if (!role || Number(role.is_enabled) !== 1) return '角色不存在或已停用';
+          await tx.exec(
+            `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+             VALUES(?, ?, ?, ?, unixepoch())
+             ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+            [userid, roleId, req.adminSession?.userid || '', req.adminSession?.name || ''],
+          );
+          await tx.run('UPDATE users SET is_admin = 1 WHERE userid = ?', [userid]);
+        } else {
+          await tx.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
+          await tx.run('UPDATE users SET is_admin = 0 WHERE userid = ?', [userid]);
+        }
+        return null;
+      });
+      if (error) return res.status(400).json({ error });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });

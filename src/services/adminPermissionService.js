@@ -88,6 +88,11 @@ export function isSuperAdminSession(cfg, payload = {}) {
   return Boolean(uid && allow.includes(uid));
 }
 
+// 调用方须处于事务中；先锁保护状态，再锁业务行，避免清理使用过期的管理员名单。
+export async function lockAdminAccountProtection(tx) {
+  await tx.exec('SELECT pg_advisory_xact_lock(71010, 1)', []);
+}
+
 export async function ensureAdminRoles(db) {
   if (!db) return;
   for (const role of ROLE_DEFAULTS) {

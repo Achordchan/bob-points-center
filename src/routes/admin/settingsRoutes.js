@@ -17,6 +17,7 @@ import {
   saveNotifySettings,
 } from '../../services/systemSettings.js';
 import { deleteUsersCompletely } from '../../services/userDataPurgeService.js';
+import { lockAdminAccountProtection } from '../../services/adminPermissionService.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
 import { runInTransaction } from './shared.js';
 import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcileAttendanceRewards } from '../../services/attendanceRewardService.js';
@@ -655,25 +656,25 @@ export function registerAdminSettingsRoutes(router) {
       const protectUserids = (Array.isArray(cfg?.adminUserids) ? cfg.adminUserids : [])
         .map((id) => String(id || '').trim())
         .filter(Boolean);
-      const rows = await db.all(
-        `SELECT a.userid
-           FROM external_accounts a
-           JOIN users u ON u.userid = a.userid
-          WHERE COALESCE(a.batch_id, '') = ?
-            AND COALESCE(u.is_admin, 0) = 0
-            AND NOT EXISTS (
-              SELECT 1 FROM admin_user_roles ur
-              JOIN admin_roles r ON r.id = ur.role_id
-              WHERE ur.userid = a.userid AND r.is_enabled = 1
-            )
-          ORDER BY a.userid`,
-        [batchId],
-      );
-      const userids = (rows || []).map((row) => String(row.userid || '')).filter(Boolean);
-      if (!userids.length) {
-        return res.json({ ok: true, batch_id: batchId, deleted: 0, counts: {} });
-      }
-      const result = await runInTransaction(db, async (tx) => deleteUsersCompletely(tx, userids, { protectUserids }));
+      const result = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const rows = await tx.all(
+          `SELECT a.userid
+             FROM external_accounts a
+             JOIN users u ON u.userid = a.userid
+            WHERE COALESCE(a.batch_id, '') = ?
+              AND COALESCE(u.is_admin, 0) = 0
+              AND NOT EXISTS (
+                SELECT 1 FROM admin_user_roles ur
+                JOIN admin_roles r ON r.id = ur.role_id
+                WHERE ur.userid = a.userid AND r.is_enabled = 1
+              )
+            ORDER BY a.userid`,
+          [batchId],
+        );
+        const userids = (rows || []).map((row) => String(row.userid || '')).filter(Boolean);
+        return await deleteUsersCompletely(tx, userids, { protectUserids });
+      });
       if (Number(result?.deleted_users || 0) > 0) {
         publishMallRealtimeEvent('balance_changed', { reason: 'external_purge' });
         publishMallRealtimeEvent('charity_changed', { reason: 'external_purge' });

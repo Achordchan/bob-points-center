@@ -11,6 +11,7 @@ import { ledgerRouter } from '../../src/routes/ledger.js';
 import { redeemRouter } from '../../src/routes/redeem.js';
 import { ensureAccount, getBalance, grantBob } from '../../src/services/ledgerService.js';
 import { grantWithNotify, grantBatchWithNotify } from '../../src/services/bobOpsService.js';
+import { registerAdminSettingsRoutes } from '../../src/routes/admin/settingsRoutes.js';
 
 import {
   authenticateExternalAccount,
@@ -656,6 +657,67 @@ test('外部批次清理排除启用角色管理员，且保留显式管理员�
   assert.match(purge, /COALESCE\(u\.is_admin, 0\) = 0/);
   assert.match(purge, /NOT EXISTS \([\s\S]*?FROM admin_user_roles ur[\s\S]*?JOIN admin_roles r[\s\S]*?ur\.userid = a\.userid AND r\.is_enabled = 1/);
   assert.match(purge, /deleteUsersCompletely\(tx, userids, \{ protectUserids \}\)/);
+});
+
+test('批次清理在事务锁后选目标，授权先提交的管理员不进入任何删除', async () => {
+  let purgeHandler;
+  const router = {
+    get() {},
+    post(path, ...handlers) { if (path === '/settings/external-login/purge') purgeHandler = handlers.at(-1); },
+  };
+  registerAdminSettingsRoutes(router);
+  let lockRequested;
+  const waiting = new Promise((resolve) => { lockRequested = resolve; });
+  let release;
+  const grantCommitted = new Promise((resolve) => { release = resolve; });
+  let protectedAdmin = false;
+  const operations = [];
+  const db = {
+    async all() { assert.fail('禁止在事务外读取清理名单'); },
+    async transaction(fn) {
+      operations.push('begin');
+      const result = await fn({
+        async exec(sql) {
+          assert.match(sql, /pg_advisory_xact_lock/);
+          operations.push('lock_wait');
+          lockRequested();
+          await grantCommitted;
+          operations.push('locked');
+        },
+        async all(sql) {
+          assert.match(sql, /NOT EXISTS[\s\S]*admin_user_roles/);
+          operations.push('select');
+          return protectedAdmin ? [] : [{ userid: 'external_now_admin' }];
+        },
+        async run() { assert.fail('受保护管理员不应进入业务清理'); },
+      });
+      operations.push('commit');
+      return result;
+    },
+  };
+  const response = {
+    statusCode: 200,
+    setHeader() {},
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+  const pending = purgeHandler({
+    body: { batch_id: 'race', confirm: 'DELETE' },
+    app: { locals: { db, cfg: { adminUserids: [] } } },
+  }, response);
+  await waiting;
+  protectedAdmin = true;
+  release();
+  await pending;
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.deleted, 0);
+  assert.deepEqual(operations, ['begin', 'lock_wait', 'locked', 'select', 'commit']);
+  const adminSource = readFileSync(fileURLToPath(new URL('../../src/routes/admin/index.js', import.meta.url)), 'utf8');
+  for (const route of ['/users/set-admin', '/users/assign-role', '/roles/disable']) {
+    const block = adminSource.slice(adminSource.indexOf(`router.post('${route}'`)).split('\n  router.')[0];
+    assert.match(block, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
+  }
+  assert.match(backupRoutesSource, /const report = await runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
 });
 
 test('登录页手机号去除支持的前缀与分隔符，但不截坏非法号码', () => {
