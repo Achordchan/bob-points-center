@@ -10,7 +10,7 @@ import {
 import { beginUserSnapshot, persistDingtalkUserDetail } from '../services/dingtalkUserSyncService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
-import { cookieOptions, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
+import { cookieOptions, refreshSessionGlobalVersion, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
 import { getExternalLoginSettings, getSiteVisibilitySettings } from '../services/systemSettings.js';
 import { parseCookies } from '../services/adminSession.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
@@ -78,6 +78,7 @@ async function establishWebSession(req, res, userid) {
   const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
   await ensureAccount(db, { userid: finalUserid, name: finalName });
 
+  await refreshSessionGlobalVersion(db, cfg, { force: true, throwOnError: true });
   const sessionSecret = webSessionSigningSecret(cfg);
   const sessionTtlSeconds = 86400 * 7;
   const token = createWebSessionToken(
@@ -107,8 +108,10 @@ const EXTERNAL_AUTH_STATUS = {
  * 外部账号登录成功后签发与钉钉免登完全相同的 web 会话：
  * 业务侧（商城、核销、拍卖、红包）无需区分账号来源。
  */
-function establishExternalWebSession(req, res, { userid, name }) {
+async function establishExternalWebSession(req, res, { userid, name }) {
   const cfg = req.app?.locals?.cfg;
+  const db = req.app?.locals?.db;
+  await refreshSessionGlobalVersion(db, cfg, { force: true, throwOnError: true });
   const ttlSeconds = 86400 * 7;
   const token = createWebSessionToken(
     webSessionSigningSecret(cfg),
@@ -309,7 +312,7 @@ export function webRouter() {
         password: req.body?.password,
         batchId: settings.batch_id,
       });
-      establishExternalWebSession(req, res, account);
+      await establishExternalWebSession(req, res, account);
       return { userid: account.userid, name: account.name };
     });
   });
@@ -322,7 +325,7 @@ export function webRouter() {
         phone: req.body?.phone,
         password: req.body?.password,
       });
-      establishExternalWebSession(req, res, account);
+      await establishExternalWebSession(req, res, account);
       return { userid: account.userid, name: account.name };
     });
   });

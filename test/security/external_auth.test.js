@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import express from 'express';
-import { createWebSessionToken } from '../../src/services/webSession.js';
+import { createWebSessionToken, verifyWebSessionToken } from '../../src/services/webSession.js';
 import { webRouter } from '../../src/routes/web.js';
 import { mallRouter } from '../../src/routes/mall.js';
 import { ledgerRouter } from '../../src/routes/ledger.js';
@@ -61,8 +61,9 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     account: account ? { failed_count: 0, locked_until: null, status: 'active', ...account } : null,
     dingtalkUser,
     userByPhone,
-    userExists: true,
-    userSource: 'external',
+    users: new Map(account ? [[account.userid, { source: 'external' }]] : []),
+    sessionVersion: 0,
+    externalLoginSettings: null,
     inserts: [],
     updates: [],
     queries: [],
@@ -88,12 +89,20 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
         }
         return { locked_until: state.account.locked_until };
       }
-      if (sql.includes('FROM user_dingtalk_profiles')) return dingtalkUser;
-      if (sql.includes('FROM external_accounts')) {
-        if (sql.includes("a.status = 'active'")
-          && (!state.userExists || state.userSource !== 'external' || state.account?.status !== 'active')) return null;
-        return state.account;
+      if (sql.includes('FROM system_settings')) {
+        if (params[0] === 'session_global_version') return { value: String(state.sessionVersion) };
+        if (params[0] === 'external_login_settings' && state.externalLoginSettings) {
+          return { value: JSON.stringify(state.externalLoginSettings) };
+        }
+        return null;
       }
+      if (sql.includes('FROM users u') && sql.includes('LEFT JOIN external_accounts')) {
+        const user = state.users.get(params[0]);
+        if (!user) return null;
+        return { ...user, external_status: state.account?.userid === params[0] ? state.account.status : null };
+      }
+      if (sql.includes('FROM user_dingtalk_profiles')) return dingtalkUser;
+      if (sql.includes('FROM external_accounts')) return state.account;
       if (sql.includes('FROM users WHERE phone')) return userByPhone;
       return null;
     },
@@ -104,6 +113,14 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
         state.account.locked_until = null;
       }
       if (sql.startsWith('INSERT INTO')) state.inserts.push({ sql, params });
+      if (sql.startsWith('INSERT INTO users')) state.users.set(params[0], { source: params[2] });
+      if (sql.startsWith('INSERT INTO external_accounts')) {
+        state.account = {
+          userid: params[0], phone: params[1], name: params[2],
+          password_hash: params[3], password_salt: params[4], batch_id: params[5],
+          status: 'active', failed_count: 0, locked_until: null,
+        };
+      }
       return { changes: 1, lastID: 1 };
     },
     async all() {
@@ -376,26 +393,77 @@ test('外部旧 Cookie 在停用或清理后被所有会话入口拒绝，且不
   db.state.account.status = 'disabled';
   assert.equal(await request('/web/me'), 401);
   db.state.account.status = 'active';
-  db.state.userSource = 'dingtalk';
+  db.state.users.set('ext_session', { source: 'unknown' });
   assert.equal(await request('/web/me'), 401);
-  db.state.userSource = 'external';
-  db.state.userExists = false;
+  db.state.users.delete('ext_session');
   assert.equal(await request('/web/me'), 401);
-  db.state.userExists = true;
+  db.state.users.set('ext_session', { source: 'external' });
   assert.equal(await request('/web/me'), 200);
   db.state.account = null;
   for (const path of ['/web/me', '/mall/me', '/ledger/balance', '/ledger/records', '/redeem']) {
     assert.equal(await request(path), 401, `${path} 不得接受清理前的 Cookie`);
   }
   assert.equal(db.state.inserts.length, 0, '不得通过 ensureAccount 重建 users/accounts');
-  const employeeCookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'employee', sv: 0 }, 604800)}`;
-  assert.equal(await request('/web/me', employeeCookie), 200, '不影响钉钉员工会话');
+  for (const userid of ['employee', 'ext_sales', 'ext_0123456789abcdef']) {
+    db.state.users.set(userid, { source: 'dingtalk' });
+    const employeeCookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid, sv: 0 }, 604800)}`;
+    assert.equal(await request('/web/me', employeeCookie), 200, `不影响已有钉钉员工 ${userid}`);
+  }
+  // 外部账号即使不是 ext_ 前缀，也必须检查凭据状态。
+  db.state.users.set('legacy_external', { source: 'external' });
+  const legacyCookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'legacy_external', sv: 0 }, 604800)}`;
+  assert.equal(await request('/web/me', legacyCookie), 401);
   const get = db.get;
   db.get = async (sql, params) => {
-    if (sql.includes('FROM external_accounts')) throw new Error('account lookup unavailable');
+    if (sql.includes('LEFT JOIN external_accounts')) throw new Error('account lookup unavailable');
     return get(sql, params);
   };
   assert.equal(await request('/web/me'), 500, '账号状态读取失败时不得放行');
+});
+
+test('注册与登录签发前强制刷新会话版本，新 Cookie 可立即使用且刷新失败不签发', async (t) => {
+  const db = createFakeDb();
+  db.state.externalLoginSettings = { enabled: true, batch_id: 'session-version-test' };
+  db.state.sessionVersion = 7;
+  const cfg = { webSessionSecret: 'session-version-test', sessionGlobalVersion: 0 };
+  const app = express();
+  app.use(express.json());
+  app.locals.db = db;
+  app.locals.cfg = cfg;
+  app.use('/web', webRouter());
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  t.after(() => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const body = { name: '会话测试', phone: '13800000001', password: '123', consent: true };
+  for (const [path, version] of [['/web/ext/register', 7], ['/web/ext/login', 8]]) {
+    db.state.sessionVersion = version;
+    assert.notEqual(cfg.sessionGlobalVersion, version, '模拟实例内版本落后于数据库');
+    const response = await fetch(base + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    await response.text();
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie);
+    const payload = verifyWebSessionToken(cfg.webSessionSecret, cookie.slice('bob_web_session='.length));
+    assert.equal(payload.sv, version, '必须跳过刷新节流，签入最新版本');
+    const me = await fetch(base + '/web/me', { headers: { Cookie: cookie } });
+    await me.text();
+    assert.equal(me.status, 200, '刚签发的 Cookie 必须能立即认证');
+  }
+  const get = db.get;
+  db.get = async (sql, params) => {
+    if (params?.[0] === 'session_global_version') throw new Error('session version unavailable');
+    return get(sql, params);
+  };
+  const failed = await fetch(base + '/web/ext/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  await failed.text();
+  assert.equal(failed.status, 500);
+  assert.equal(failed.headers.get('set-cookie'), null, '读取版本失败不能签发过期版本 Cookie');
 });
 
 test('注册接口要求显式同意告知且默认关闭（fail-closed）', () => {

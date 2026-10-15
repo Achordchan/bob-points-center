@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { isExternalUserid } from './externalAccountService.js';
 import { isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 
 function b64urlEncode(buf) {
@@ -63,17 +62,17 @@ export function verifyWebSessionToken(secret, token) {
 
 export async function isWebSessionValidLive(payload, db, cfg) {
   if (!payload?.userid || !(await isSessionVersionValidLive(payload, db, cfg))) return false;
-  if (!isExternalUserid(payload.userid)) return true;
   if (!db) return false;
-  // 旧 Cookie 没有来源字段，按外部 userid 命名空间识别；不缓存，清理/停用后立即拒绝。
-  const account = await db.get(
-    `SELECT a.userid FROM external_accounts a
-       JOIN users u ON u.userid = a.userid
-      WHERE a.userid = ? AND a.status = 'active' AND u.source = 'external'
-      LIMIT 1`,
+  // 来源以持久化记录为准，已有钉钉 userid 也可能以 ext_ 开头；旧 Cookie 无需补字段。
+  // 不缓存账号状态：用户被清理后不能凭旧 Cookie 进入 ensureAccount 重建记录。
+  const user = await db.get(
+    `SELECT u.source, a.status AS external_status FROM users u
+       LEFT JOIN external_accounts a ON a.userid = u.userid
+      WHERE u.userid = ? LIMIT 1`,
     [String(payload.userid)],
   );
-  return Boolean(account);
+  return Boolean(user && (user.source === 'dingtalk'
+    || (user.source === 'external' && user.external_status === 'active')));
 }
 
 function cookieSecureFlag(options) {
