@@ -82,6 +82,52 @@ export async function saveSiteVisibilitySettings(db, input) {
   return normalized;
 }
 
+/**
+ * 对外活动外部账号注册开关。
+ * 默认关闭（fail-closed）：未显式打开时，/web/ext/register 一律拒绝。
+ * batch_id 用于给本批注册打标，活动结束后按批次筛选清理。
+ */
+const DEFAULT_EXTERNAL_LOGIN_SETTINGS = {
+  enabled: false,
+  batch_id: '',
+  message: '',
+};
+
+function cleanShortText(value, maxLength) {
+  const text = value === null || value === undefined ? '' : String(value).trim();
+  return text.slice(0, maxLength);
+}
+
+export function normalizeExternalLoginSettings(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  return {
+    enabled: toBool(src.enabled, DEFAULT_EXTERNAL_LOGIN_SETTINGS.enabled),
+    batch_id: cleanShortText(src.batch_id, 64),
+    message: cleanShortText(src.message, 200),
+  };
+}
+
+export async function getExternalLoginSettings(db) {
+  if (!db) return DEFAULT_EXTERNAL_LOGIN_SETTINGS;
+  const row = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', ['external_login_settings']);
+  if (!row?.value) return DEFAULT_EXTERNAL_LOGIN_SETTINGS;
+  try {
+    return normalizeExternalLoginSettings(JSON.parse(String(row.value)));
+  } catch {
+    return DEFAULT_EXTERNAL_LOGIN_SETTINGS;
+  }
+}
+
+export async function saveExternalLoginSettings(db, input) {
+  if (!db) return DEFAULT_EXTERNAL_LOGIN_SETTINGS;
+  const normalized = normalizeExternalLoginSettings(input);
+  await db.exec(
+    'INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()',
+    ['external_login_settings', JSON.stringify(normalized)],
+  );
+  return normalized;
+}
+
 const DEFAULT_GROUP_CARD_SETTINGS = {
   enabled: true,
   channelPresets: [

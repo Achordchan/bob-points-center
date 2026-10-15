@@ -86,6 +86,7 @@ import {
   getAdminAccess,
   hasAdminPermission,
   isSuperAdminSession,
+  lockAdminAccountProtection,
   normalizePermissions,
   serializeRole,
 } from '../../services/adminPermissionService.js';
@@ -986,7 +987,7 @@ export function adminRouter() {
       const cached = await db.get('SELECT name FROM users WHERE userid = ?', [userid]);
       const cachedName = cached?.name ? String(cached.name) : '';
       const profile = cachedName ? { userid, name: cachedName } : await getUserProfile(cfg, userid);
-      await ensureAccount(db, { userid: profile.userid, name: profile.name });
+      await ensureAccount(db, { userid: profile.userid, name: profile.name, createUser: true });
 
       if (!(await isAdmin(db, cfg, profile.userid))) {
         safeAppendAuditLog(db, {
@@ -1467,23 +1468,26 @@ export function adminRouter() {
 
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const r = await db.run('UPDATE users SET is_admin = ? WHERE userid = ?', [isAdminFlag ? 1 : 0, userid]);
-      if (!r?.changes) {
-        return res.status(400).json({ error: 'user not found' });
-      }
-      if (isAdminFlag) {
-        const role = await db.get("SELECT id FROM admin_roles WHERE code = 'admin' LIMIT 1");
-        if (role?.id) {
-          await db.exec(
-            `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
-             VALUES(?, ?, ?, ?, unixepoch())
-             ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
-            [userid, role.id, req.adminSession?.userid || '', req.adminSession?.name || ''],
-          );
+      const changed = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const r = await tx.run('UPDATE users SET is_admin = ? WHERE userid = ?', [isAdminFlag ? 1 : 0, userid]);
+        if (!r?.changes) return false;
+        if (isAdminFlag) {
+          const role = await tx.get("SELECT id FROM admin_roles WHERE code = 'admin' LIMIT 1");
+          if (role?.id) {
+            await tx.exec(
+              `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+               VALUES(?, ?, ?, ?, unixepoch())
+               ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+              [userid, role.id, req.adminSession?.userid || '', req.adminSession?.name || ''],
+            );
+          }
+        } else {
+          await tx.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
         }
-      } else {
-        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
-      }
+        return true;
+      });
+      if (!changed) return res.status(400).json({ error: 'user not found' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1547,13 +1551,17 @@ export function adminRouter() {
     if (!id) return res.status(400).json({ error: 'missing id' });
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const role = await db.get('SELECT id, is_builtin FROM admin_roles WHERE id = ? LIMIT 1', [id]);
-      if (!role) return res.status(404).json({ error: '角色不存在' });
-      if (Number(role.is_builtin) === 1) return res.status(400).json({ error: '系统内置角色不能停用' });
-      const count = await db.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
-      if (Number(count?.c || 0) > 0) return res.status(400).json({ error: '该角色已有用户使用，请先调整用户角色' });
-      const r = await db.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
-      if (!r?.changes) return res.status(404).json({ error: '角色不存在' });
+      const result = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const role = await tx.get('SELECT id, is_builtin FROM admin_roles WHERE id = ? LIMIT 1', [id]);
+        if (!role) return { status: 404, error: '角色不存在' };
+        if (Number(role.is_builtin) === 1) return { status: 400, error: '系统内置角色不能停用' };
+        const count = await tx.get('SELECT COUNT(1) AS c FROM admin_user_roles WHERE role_id = ?', [id]);
+        if (Number(count?.c || 0) > 0) return { status: 400, error: '该角色已有用户使用，请先调整用户角色' };
+        await tx.run('UPDATE admin_roles SET is_enabled = 0, updated_at = unixepoch() WHERE id = ?', [id]);
+        return null;
+      });
+      if (result) return res.status(result.status).json({ error: result.error });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1570,20 +1578,27 @@ export function adminRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       req.auditLogPayload = { userid, roleId };
-      if (roleId) {
-        const role = await db.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
-        if (!role || Number(role.is_enabled) !== 1) return res.status(400).json({ error: '角色不存在或已停用' });
-        await db.exec(
-          `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
-           VALUES(?, ?, ?, ?, unixepoch())
-           ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
-          [userid, roleId, req.adminSession?.userid || '', req.adminSession?.name || ''],
-        );
-        await db.run('UPDATE users SET is_admin = 1 WHERE userid = ?', [userid]);
-      } else {
-        await db.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
-        await db.run('UPDATE users SET is_admin = 0 WHERE userid = ?', [userid]);
-      }
+      const error = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        const user = await tx.get('SELECT userid FROM users WHERE userid = ? LIMIT 1', [userid]);
+        if (!user) return 'user not found';
+        if (roleId) {
+          const role = await tx.get('SELECT id, is_enabled FROM admin_roles WHERE id = ?', [roleId]);
+          if (!role || Number(role.is_enabled) !== 1) return '角色不存在或已停用';
+          await tx.exec(
+            `INSERT INTO admin_user_roles(userid, role_id, assigned_by, assigned_name, assigned_at)
+             VALUES(?, ?, ?, ?, unixepoch())
+             ON CONFLICT(userid) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_by = EXCLUDED.assigned_by, assigned_name = EXCLUDED.assigned_name, assigned_at = EXCLUDED.assigned_at`,
+            [userid, roleId, req.adminSession?.userid || '', req.adminSession?.name || ''],
+          );
+          await tx.run('UPDATE users SET is_admin = 1 WHERE userid = ?', [userid]);
+        } else {
+          await tx.run('DELETE FROM admin_user_roles WHERE userid = ?', [userid]);
+          await tx.run('UPDATE users SET is_admin = 0 WHERE userid = ?', [userid]);
+        }
+        return null;
+      });
+      if (error) return res.status(400).json({ error });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: String(err?.message || err) });
@@ -1735,7 +1750,7 @@ export function adminRouter() {
       const cachedName = cached?.name ? String(cached.name) : '';
       const profile = cachedName ? { userid, name: cachedName } : await getUserProfile(cfg, userid);
 
-      await ensureAccount(db, { userid: profile.userid, name: profile.name });
+      await ensureAccount(db, { userid: profile.userid, name: profile.name, createUser: true });
 
       if (!(await isAdmin(db, cfg, profile.userid))) {
         return res.status(403).json({ error: 'forbidden', userid: profile.userid, name: profile.name });
@@ -1794,15 +1809,25 @@ export function adminRouter() {
         }
       }
 
+      // 来源筛选：区分钉钉员工与对外活动外部账号（按批次清理外部账号时使用）。
+      const sourceFilter = String(req.query.source || '').trim().toLowerCase();
+      if (sourceFilter === 'external' || sourceFilter === 'dingtalk') {
+        where.push("COALESCE(u.source, 'dingtalk') = ?");
+        params.push(sourceFilter);
+      }
+
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const totalRow = await db.get(`SELECT COUNT(1) AS c FROM users u ${whereSql}`, params);
       const total = Number(totalRow?.c) || 0;
 
       const rows = await db.all(
-        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at,
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(u.source, 'dingtalk') AS source,
+                u.phone, COALESCE(a.balance, 0) AS balance, a.updated_at,
+                ea.batch_id, ea.last_login_at, ea.status AS external_status,
                 r.id AS role_id, r.name AS role_name, r.is_enabled AS role_enabled
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
+         LEFT JOIN external_accounts ea ON ea.userid = u.userid
          LEFT JOIN admin_user_roles ur ON ur.userid = u.userid
          LEFT JOIN admin_roles r ON r.id = ur.role_id
          ${whereSql}

@@ -342,6 +342,164 @@ function SiteVisibilityControl({ canEdit }) {
   </Card>;
 }
 
+function ExternalLoginControl({ canEdit, isSuperAdmin }) {
+  const { message, modal } = App.useApp();
+  const [form] = Form.useForm();
+  const [row, setRow] = useState({ enabled: false, batch_id: '', message: '' });
+  const [summary, setSummary] = useState({ total: 0, active: 0, logged_in: 0 });
+  const [batches, setBatches] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [purging, setPurging] = useState('');
+  const enabled = row?.enabled === true;
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await api('/admin/settings/external-login');
+      const next = data.data?.settings || { enabled: false, batch_id: '', message: '' };
+      setRow(next);
+      setSummary(data.data?.summary || { total: 0, active: 0, logged_in: 0 });
+      setBatches(data.data?.batches || []);
+      form.setFieldsValue({
+        enabled: next.enabled === true,
+        batch_id: next.batch_id || '',
+        message: next.message || '',
+      });
+    } catch (err) {
+      message.error(err.message || '外部账号设置加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async (values) => {
+    setSaving(true);
+    try {
+      const data = await api('/admin/settings/external-login', {
+        method: 'POST',
+        body: {
+          enabled: values.enabled === true,
+          batch_id: values.batch_id || '',
+          message: values.message || '',
+        },
+      });
+      const next = data.data || {};
+      setRow(next);
+      form.setFieldsValue({
+        enabled: next.enabled === true,
+        batch_id: next.batch_id || '',
+        message: next.message || '',
+      });
+      message.success(next.enabled ? '外部账号注册已开放' : '外部账号注册已关闭');
+    } catch (err) {
+      message.error(err.message || '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const purge = (batchId) => {
+    let confirmText = '';
+    modal.confirm({
+      title: `清理批次「${batchId || '未分批'}」的外部账号？`,
+      content: (
+        <Space direction="vertical" size={8}>
+          <Typography.Text type="danger">将删除该批次全部外部账号，连带清除其流水、订单、竞拍与公益记录，且不可恢复。</Typography.Text>
+          <Typography.Text type="secondary">建议先导出用户与订单数据留档。请输入 DELETE 确认：</Typography.Text>
+          <Input placeholder="DELETE" onChange={(e) => { confirmText = e.target.value; }} />
+        </Space>
+      ),
+      okText: '确认清理',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        if (String(confirmText || '').trim().toUpperCase() !== 'DELETE') {
+          message.warning('请输入 DELETE 以确认');
+          return Promise.reject(new Error('confirmation_required'));
+        }
+        setPurging(batchId);
+        try {
+          const data = await api('/admin/settings/external-login/purge', {
+            method: 'POST',
+            body: { batch_id: batchId, confirm: 'DELETE' },
+          });
+          message.success(`已清理 ${data.deleted || 0} 个外部账号`);
+          await load();
+        } catch (err) {
+          message.error(err.message || '清理失败');
+        } finally {
+          setPurging('');
+        }
+      },
+    });
+  };
+
+  return <Card
+    title="对外活动账号（外部用户注册）"
+    loading={loading}
+    extra={<Tag color={enabled ? 'green' : 'red'}>{enabled ? '注册已开放' : '注册已关闭'}</Tag>}
+  >
+    <Alert
+      type="info"
+      showIcon
+      style={{ marginBottom: 16 }}
+      message="外部用户在浏览器 / 微信中打开活动链接，用「真实姓名 + 手机号 + 密码」自助注册。手机号命中钉钉在册员工时会自动引导其使用钉钉登录，不会重复建号。"
+    />
+    <Form form={form} layout="vertical" onFinish={save} initialValues={{ enabled: false, batch_id: '', message: '' }}>
+      <Form.Item name="enabled" label="开放自助注册" valuePropName="checked" extra="关闭后仅影响注册，已注册用户仍可登录兑换。">
+        <Switch disabled={!canEdit} checkedChildren="开放" unCheckedChildren="关闭" />
+      </Form.Item>
+      <Form.Item name="batch_id" label="活动批次标识" extra="每次活动换一个名字（例如 2026秋季校园行），活动结束后可按批次清理账号。留空记为 default。">
+        <Input disabled={!canEdit} maxLength={64} placeholder="例如：2026秋季校园行" />
+      </Form.Item>
+      <Form.Item name="message" label="注册关闭时展示的提示" extra="仅在关闭注册时展示给外部用户。">
+        <Input maxLength={200} disabled={!canEdit} placeholder="例如：本次活动注册已结束，请联系现场工作人员。" />
+      </Form.Item>
+      <Space>
+        <Button onClick={load} loading={loading}>刷新</Button>
+        {canEdit && <Button type="primary" htmlType="submit" loading={saving}>保存设置</Button>}
+      </Space>
+    </Form>
+
+    <Descriptions size="small" column={3} style={{ marginTop: 20 }}>
+      <Descriptions.Item label="外部账号总数">{summary.total || 0}</Descriptions.Item>
+      <Descriptions.Item label="可用账号">{summary.active || 0}</Descriptions.Item>
+      <Descriptions.Item label="已登录过">{summary.logged_in || 0}</Descriptions.Item>
+    </Descriptions>
+
+    <Table
+      size="small"
+      rowKey={(r) => String(r.batch_id || '')}
+      style={{ marginTop: 12 }}
+      dataSource={batches}
+      pagination={false}
+      locale={{ emptyText: '还没有外部账号' }}
+      columns={[
+        { title: '批次', dataIndex: 'batch_id', render: (v) => v || '未分批' },
+        { title: '账号数', dataIndex: 'count', width: 90 },
+        { title: '最近注册', dataIndex: 'last_at', width: 180, render: (v) => (v ? formatTs(v) : '-') },
+        ...(isSuperAdmin ? [{
+          title: '操作',
+          width: 110,
+          render: (_, r) => (
+            <Button
+              danger
+              size="small"
+              type="link"
+              loading={purging === r.batch_id}
+              onClick={() => purge(r.batch_id)}
+            >
+              清理批次
+            </Button>
+          ),
+        }] : []),
+      ]}
+    />
+  </Card>;
+}
+
 function ImageOptimization({ canEdit }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
@@ -443,7 +601,7 @@ export default function Integrations({ me }) {
   const canExport = hasPermission(me, 'integrations:export');
   const canImport = me?.isSuperAdmin === true;
   return <Tabs items={[
-    { key: 'settings', label: '系统设置', children: <SiteVisibilityControl canEdit={canEdit} /> },
+    { key: 'settings', label: '系统设置', children: <Space direction="vertical" size={16} style={{ width: '100%' }}><SiteVisibilityControl canEdit={canEdit} /><ExternalLoginControl canEdit={canEdit} isSuperAdmin={me?.isSuperAdmin === true} /></Space> },
     { key: 'token', label: 'BOB Token', children: <Tokens canEdit={canEdit} /> },
     { key: 'backup', label: '备份', children: <Backup canExport={canExport} canImport={canImport} /> },
     { key: 'images', label: '图片优化', children: <ImageOptimization canEdit={canEdit} /> },

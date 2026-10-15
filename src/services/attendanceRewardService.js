@@ -378,7 +378,7 @@ export async function resolveAttendanceUserProfile(db, cfg, userid, { needDepart
       }
     }
     // 没有成功写入时仅保证账户存在（不改名），发奖流程依赖它。
-    if (!written) await ensureAccount(db, { userid, name: '' });
+    if (!written) await ensureAccount(db, { userid, name: '', createUser: true });
     // 取数期间有通讯录事件到达：这份资料可能已过期，不用于资格判定，稍后重判。
     // 对每个调用者独立判断（包括缓存命中、合并到他人请求的调用者），与是否写库无关。
     if (profile?.invalidated || persistSuperseded || isUserSnapshotSuperseded(userid, snapshotVersion)) return { name: profileName || localName || '', deptIds: [] };

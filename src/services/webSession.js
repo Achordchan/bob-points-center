@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isSessionVersionValidLive } from '../utils/sessionCrypto.js';
 
 function b64urlEncode(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -57,6 +58,21 @@ export function verifyWebSessionToken(secret, token) {
   if (!payload?.exp || now >= payload.exp) return null;
   if (payload?.aud !== 'web') return null;
   return payload;
+}
+
+export async function isWebSessionValidLive(payload, db, cfg) {
+  if (!payload?.userid || !(await isSessionVersionValidLive(payload, db, cfg))) return false;
+  if (!db) return false;
+  // 来源以持久化记录为准，已有钉钉 userid 也可能以 ext_ 开头；旧 Cookie 无需补字段。
+  // 不缓存账号状态：用户被清理后不能凭旧 Cookie 进入 ensureAccount 重建记录。
+  const user = await db.get(
+    `SELECT u.source, a.status AS external_status FROM users u
+       LEFT JOIN external_accounts a ON a.userid = u.userid
+      WHERE u.userid = ? LIMIT 1`,
+    [String(payload.userid)],
+  );
+  return Boolean(user && (user.source === 'dingtalk'
+    || (user.source === 'external' && user.external_status === 'active')));
 }
 
 function cookieSecureFlag(options) {

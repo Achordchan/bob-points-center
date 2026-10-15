@@ -88,6 +88,11 @@ export function isSuperAdminSession(cfg, payload = {}) {
   return Boolean(uid && allow.includes(uid));
 }
 
+// 调用方须处于事务中；先锁保护状态，再锁业务行，避免清理使用过期的管理员名单。
+export async function lockAdminAccountProtection(tx) {
+  await tx.exec('SELECT pg_advisory_xact_lock(71010, 1)', []);
+}
+
 export async function ensureAdminRoles(db) {
   if (!db) return;
   for (const role of ROLE_DEFAULTS) {
@@ -168,6 +173,9 @@ export function matchPathPermission(method, path) {
   }
   if (p.startsWith('/image-optimization/upload')) return ['integrations:edit', 'commerce:edit', 'activities:edit', 'content:edit'];
   if (p.startsWith('/resources')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
+  // 外部活动账号：清理会连带删除业务数据，仅超级管理员可执行。
+  if (p.startsWith('/settings/external-login/purge')) return 'super';
+  if (p.startsWith('/settings/external-login')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/site-visibility') || p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
   if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export'; // full 另在 handler 校验 super

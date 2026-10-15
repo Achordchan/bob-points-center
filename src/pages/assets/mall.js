@@ -1558,7 +1558,7 @@
       state.reauthInFlight = true;
       const returnTo = window.location.pathname + window.location.search + window.location.hash;
       const params = new URLSearchParams({ redirect: returnTo });
-      window.location.replace(`/web/oauth/start?${params.toString()}`);
+      window.location.replace(`/login?${params.toString()}`);
       return false;
     }
     state.reauthInFlight = true;
@@ -4869,9 +4869,10 @@
       && Boolean(window.dd?.runtime?.permission?.requestAuthCode);
 
     if (!inDingtalk && !hasSession) {
+      // 浏览器/微信内打开：进入活动登录页（外部用户注册登录，员工可切钉钉登录）。
       const returnTo = window.location.pathname + window.location.search + window.location.hash;
       const params = new URLSearchParams({ redirect: returnTo });
-      window.location.replace(`/web/oauth/start?${params.toString()}`);
+      window.location.replace(`/login?${params.toString()}`);
       return;
     }
 

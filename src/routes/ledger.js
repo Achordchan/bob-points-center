@@ -7,10 +7,10 @@ import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
 import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAccess.js';
 import { parseCookies } from '../services/adminSession.js';
-import { verifyWebSessionToken } from '../services/webSession.js';
-import { isSessionVersionValidLive, webSessionSigningSecret } from '../utils/sessionCrypto.js';
+import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
+import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
-import { deductBatchWithNotify, deductWithNotify, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
+import { deductBatchWithNotify, deductWithNotify, getTrustedAccountOptions, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 function toInt(value) {
@@ -38,7 +38,7 @@ export function ledgerRouter() {
       const token = cookies.bob_web_session;
       const secret = webSessionSigningSecret(cfg);
       const payload = verifyWebSessionToken(secret, token);
-      if (payload?.userid && (await isSessionVersionValidLive(payload, db, cfg))) req.webSession = payload;
+      if (payload?.userid && (await isWebSessionValidLive(payload, db, cfg))) req.webSession = payload;
     } catch {
       // optional
     }
@@ -77,6 +77,7 @@ export function ledgerRouter() {
       res.status(400).json({ error: 'missing userid' });
       return null;
     }
+    req.bobToken = token;
     return userid;
   }
 
@@ -85,10 +86,14 @@ export function ledgerRouter() {
       const userid = await resolveQueryUserid(req, res);
       if (!userid) return;
       const db = req.app.locals.db;
-      const balance = await getBalance(db, { userid });
+      const account = req.bobToken
+        ? await getTrustedAccountOptions(db, req.app.locals.cfg, userid)
+        : { userid };
+      const balance = await getBalance(db, account);
       return res.json({ userid, balance });
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === 'unauthorized' ? 401 : 500).json({ error: message });
     }
   });
 
@@ -99,10 +104,14 @@ export function ledgerRouter() {
       const page = req.query.page ? Number(req.query.page) : 1;
       const pageSize = req.query.page_size ? Number(req.query.page_size) : 20;
       const db = req.app.locals.db;
-      const result = await listLedgerRecords(db, { userid, page, pageSize });
+      const account = req.bobToken
+        ? await getTrustedAccountOptions(db, req.app.locals.cfg, userid)
+        : { userid };
+      const result = await listLedgerRecords(db, { ...account, page, pageSize });
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === 'unauthorized' ? 401 : 500).json({ error: message });
     }
   });
 

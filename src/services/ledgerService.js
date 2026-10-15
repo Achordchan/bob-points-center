@@ -52,7 +52,7 @@ function withDisplayReason(row = {}) {
   };
 }
 
-export async function ensureAccount(db, { userid, name }) {
+export async function ensureAccount(db, { userid, name, createUser = false }) {
   const uid = userid === null || userid === undefined ? '' : String(userid).trim();
   if (!uid) {
     throw new Error('missing userid');
@@ -61,10 +61,19 @@ export async function ensureAccount(db, { userid, name }) {
   // Do not persist userid placeholders as the user's canonical name.
   const displayName = rawDisplayName && rawDisplayName !== uid ? rawDisplayName : '';
 
-  await db.run(
-    'INSERT OR IGNORE INTO users(userid, name) VALUES(?, ?)',
-    [uid, null],
-  );
+  // 只有可信的钉钉资料入库能创建用户；业务请求不得复活已被清理的用户。
+  if (createUser) {
+    await db.run(
+      'INSERT OR IGNORE INTO users(userid, name) VALUES(?, ?)',
+      [uid, null],
+    );
+  } else {
+    const user = await db.get(
+      'SELECT userid FROM users WHERE userid = ? LIMIT 1',
+      [uid],
+    );
+    if (!user) throw new Error('unauthorized');
+  }
 
   if (displayName) {
     await db.run(
@@ -73,14 +82,15 @@ export async function ensureAccount(db, { userid, name }) {
     );
   }
 
+  // 仅从仍存在的 users 补齐账户；SELECT 与 INSERT 为一条语句，FK 保证并发删除时不留孤儿。
   await db.run(
-    'INSERT OR IGNORE INTO accounts(userid, balance) VALUES(?, 0)',
+    'INSERT OR IGNORE INTO accounts(userid, balance) SELECT userid, 0 FROM users WHERE userid = ?',
     [uid],
   );
 }
 
-export async function getBalance(db, { userid, name }) {
-  await ensureAccount(db, { userid, name });
+export async function getBalance(db, { userid, name, createUser = false }) {
+  await ensureAccount(db, { userid, name, createUser });
 
   const row = await db.get(
     'SELECT balance FROM accounts WHERE userid = ?',
@@ -90,7 +100,7 @@ export async function getBalance(db, { userid, name }) {
   return row?.balance ?? 0;
 }
 
-export async function grantBob(db, { userid, amount, reason, refId, name }) {
+export async function grantBob(db, { userid, amount, reason, refId, name, createUser = false }) {
   const delta = toInt(amount);
   if (delta === null || delta <= 0) {
     throw new Error('amount must be positive integer');
@@ -99,7 +109,7 @@ export async function grantBob(db, { userid, amount, reason, refId, name }) {
   const cleanReason = reason ? String(reason) : 'grant';
 
   const run = async (tx) => {
-    await ensureAccount(tx, { userid, name });
+    await ensureAccount(tx, { userid, name, createUser });
 
     const insert = await tx.run(
       'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
@@ -177,7 +187,7 @@ export async function deductBob(db, { userid, amount, reason, refId, name }) {
   return await run(db);
 }
 
-export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name }) {
+export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name, createUser = false }) {
   if (!userid) {
     throw new Error('missing userid');
   }
@@ -186,7 +196,7 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
   const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
   const offset = (p - 1) * ps;
 
-  await ensureAccount(db, { userid, name });
+  await ensureAccount(db, { userid, name, createUser });
 
   const rows = await db.all(
     `SELECT l.id, l.userid, l.delta, l.reason, l.ref_id, l.created_at,

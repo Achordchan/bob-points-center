@@ -6,6 +6,7 @@ import {
   getAdminAccess,
   hasAdminPermission,
   isSuperAdminSession,
+  lockAdminAccountProtection,
   normalizePermissions,
   serializeRole,
 } from '../../services/adminPermissionService.js';
@@ -45,6 +46,7 @@ export function registerAdminBackupRoutes(router) {
   const FULL_TABLES = [
     'users',
     'accounts',
+    'external_accounts',
     'bob_tokens',
     'ledger',
     'redeems',
@@ -397,9 +399,9 @@ export function registerAdminBackupRoutes(router) {
     }
 
     // overwrite 必须包含该模式下的完整表集合；缺失表不得被当成空数组后 DELETE。
-    // 例外：拍卖表晚于备份版本号引入，早于该功能的旧全量备份（v1 或拍卖前的 v2）
-    // 都不含这两张表，不能因此拒绝旧备份恢复；缺失时按空处理、不清空库中现有拍卖数据。
-    const optionalFullTables = new Set(['auction_activities', 'auction_bids']);
+    // 例外：拍卖表与外部账号表晚于备份版本号引入，早于该功能的旧全量备份（v1 或对应功能之前的 v2）
+    // 都不含这些表，不能因此拒绝旧备份恢复；仍需校验快照内的关联数据完整性。
+    const optionalFullTables = new Set(['auction_activities', 'auction_bids', 'external_accounts']);
     const expectedTables = versionTables.filter((name) => !optionalFullTables.has(name));
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
@@ -683,6 +685,30 @@ export function registerAdminBackupRoutes(router) {
             pushPreflight('content_announcement_acknowledgements', index, '强制确认公告不允许 dismissed');
           }
         });
+
+        // 外部账号必须带凭据且能对上本批 users：缺凭据恢复后无法登录，手机号唯一还会挡住重新注册。
+        if (backupMode === 'full') {
+          const externalAccounts = requireArray('external_accounts') || [];
+          const usersById = new Map(users.map((row) => [String(row?.userid || ''), row]));
+          const externalByUserid = new Map(externalAccounts.map((row) => [String(row?.userid || ''), row]));
+          users.forEach((row, index) => {
+            if (row?.source === 'external' && !externalByUserid.has(String(row.userid))) {
+              pushPreflight('users', index, '外部用户缺少关联密码凭据');
+            }
+          });
+          externalAccounts.forEach((row, index) => {
+            if (!row?.userid || !row?.phone) pushPreflight('external_accounts', index, '缺少 userid/phone');
+            if (!row?.password_hash || !row?.password_salt) {
+              pushPreflight('external_accounts', index, '缺少密码凭据');
+            }
+            const user = usersById.get(String(row?.userid || ''));
+            if (!user) {
+              pushPreflight('external_accounts', index, '找不到关联用户');
+            } else if (user.source !== 'external' || String(user.phone || '') !== String(row.phone || '')) {
+              pushPreflight('external_accounts', index, '关联用户来源或手机号不一致');
+            }
+          });
+        }
       }
 
       if (backupMode === 'full') {
@@ -854,6 +880,7 @@ export function registerAdminBackupRoutes(router) {
 
     try {
       const report = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
         const report = {};
         let failedTable = null;
         let failedIndex = null;
@@ -1349,6 +1376,7 @@ export function registerAdminBackupRoutes(router) {
                 'user_feedback',
                 'content_announcement_acknowledgements',
                 'bob_tokens',
+                'external_accounts',
                 'accounts',
                 'users',
               ];
@@ -1366,8 +1394,20 @@ export function registerAdminBackupRoutes(router) {
                 // eslint-disable-next-line no-await-in-loop
                 await execOrThrow(
                   tx,
-                  'INSERT INTO users(userid, name, is_admin, created_at) VALUES($1,$2,$3,$4) ON CONFLICT(userid) DO UPDATE SET name=excluded.name, is_admin=excluded.is_admin',
-                  [row.userid, row.name ?? null, row.is_admin ?? 0, row.created_at ?? nowTs()],
+                  `INSERT INTO users(userid, name, is_admin, source, phone, created_at)
+                   VALUES($1,$2,$3,$4,$5,$6)
+                   ON CONFLICT(userid) DO UPDATE SET
+                     name=excluded.name, is_admin=excluded.is_admin,
+                     source=excluded.source, phone=excluded.phone`,
+                  [
+                    row.userid,
+                    row.name ?? null,
+                    row.is_admin ?? 0,
+                    // 旧备份没有 source/phone 列时按钉钉员工恢复；外部用户保留来源与手机号。
+                    String(row.source || '') === 'external' ? 'external' : 'dingtalk',
+                    row.phone ? String(row.phone) : null,
+                    row.created_at ?? nowTs(),
+                  ],
                   `users[${i}]`,
                 );
                 count++;
@@ -1518,6 +1558,58 @@ export function registerAdminBackupRoutes(router) {
               }
             }
             report.accounts = count;
+          }
+
+          // external_accounts（对外活动账号凭据）
+          // 必须与 users 同批恢复：只恢复 users 会留下「有余额但无法登录、且手机号唯一挡住重新注册」的账号。
+          // 旧备份没有外部用户时可省略该数组；覆盖导入仍按 users 的快照恢复。
+          {
+            const rows = requireArray('external_accounts') || [];
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row?.userid || !row?.phone || !row?.password_hash || !row?.password_salt) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(
+                  tx,
+                  `INSERT INTO external_accounts(
+                     userid, phone, name, password_hash, password_salt, status, batch_id,
+                     failed_count, locked_until, last_login_at, created_at, updated_at
+                   ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                   ON CONFLICT(userid) DO UPDATE SET
+                     phone=excluded.phone, name=excluded.name,
+                     password_hash=excluded.password_hash, password_salt=excluded.password_salt,
+                     status=excluded.status, batch_id=excluded.batch_id,
+                     failed_count=excluded.failed_count, locked_until=excluded.locked_until,
+                     last_login_at=excluded.last_login_at, updated_at=excluded.updated_at`,
+                  [
+                    row.userid,
+                    String(row.phone),
+                    row.name ?? '',
+                    String(row.password_hash),
+                    String(row.password_salt),
+                    row.status ?? 'active',
+                    row.batch_id ?? '',
+                    Number.isFinite(Number(row.failed_count)) ? Number(row.failed_count) : 0,
+                    row.locked_until ?? null,
+                    row.last_login_at ?? null,
+                    row.created_at ?? nowTs(),
+                    row.updated_at ?? nowTs(),
+                  ],
+                  `external_accounts[${i}]`,
+                );
+                count++;
+              } catch (err) {
+                markAndThrow('external_accounts', i, err);
+              }
+            }
+            try {
+              await bumpSerial(tx, 'external_accounts');
+            } catch (err) {
+              markAndThrow('external_accounts', null, err);
+            }
+            report.external_accounts = count;
           }
 
           // bob_tokens

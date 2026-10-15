@@ -1,9 +1,34 @@
 import { deductBob, grantBob } from './ledgerService.js';
 import { confirmRedeem } from './redeemService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
+import { getUserDetail } from './dingtalkService.js';
+
+export async function getTrustedAccountOptions(db, cfg, userid) {
+  const uid = String(userid || '').trim();
+  if (!uid) throw new Error('missing userid');
+  const user = await db.get('SELECT source FROM users WHERE userid = ? LIMIT 1', [uid]);
+  let createUser = false;
+  let name;
+  if (!user) {
+    // 缺失账号只接受钉钉实时证明；不按 userid 前缀猜来源，亦不复用缓存的旧身份。
+    const profile = await getUserDetail(cfg, uid);
+    if (String(profile?.userid || '') !== uid) throw new Error('unauthorized');
+    name = profile.name;
+    createUser = true;
+  } else if (user.source === 'dingtalk') {
+    createUser = true;
+  }
+  return { userid: uid, name, createUser };
+}
+
+async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
+  if (!Number.isInteger(Number(amount)) || Number(amount) <= 0) throw new Error('amount must be positive integer');
+  const account = await getTrustedAccountOptions(db, cfg, userid);
+  return await grantBob(db, { ...account, amount, reason, refId });
+}
 
 export async function grantWithNotify(db, cfg, { userid, amount, reason, refId, awaitNotify } = {}) {
-  const r = await grantBob(db, { userid, amount, reason, refId });
+  const r = await trustedGrant(db, cfg, { userid, amount, reason, refId });
 
   const displayName = await getUserName(db, userid);
   const title = displayName ? `【BOB币中心】恭喜你！${displayName}` : '【BOB币中心】恭喜你！';
@@ -32,7 +57,7 @@ export async function grantBatchWithNotify(db, cfg, { userids, amount, reason, r
   const results = [];
   for (const userid of ids) {
     try {
-      const r = await grantBob(db, { userid, amount, reason, refId });
+      const r = await trustedGrant(db, cfg, { userid, amount, reason, refId });
 
       const displayName = await getUserName(db, userid);
       const title = displayName ? `【BOB币中心】恭喜你！${displayName}` : '【BOB币中心】恭喜你！';

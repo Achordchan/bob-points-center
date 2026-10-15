@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { fileURLToPath } from 'node:url';
 import {
   buildDingtalkOAuthAuthorizeUrl,
   buildJsapiConfig,
@@ -9,10 +10,17 @@ import {
 import { beginUserSnapshot, persistDingtalkUserDetail } from '../services/dingtalkUserSyncService.js';
 import { ensureAccount } from '../services/ledgerService.js';
 import { buildClearWebSessionCookie, buildWebSessionCookie, createWebSessionToken } from '../services/webSession.js';
-import { cookieOptions, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
-import { getSiteVisibilitySettings } from '../services/systemSettings.js';
+import { cookieOptions, refreshSessionGlobalVersion, webOAuthSigningSecret, webSessionSigningSecret, withSessionVersion } from '../utils/sessionCrypto.js';
+import { getExternalLoginSettings, getSiteVisibilitySettings } from '../services/systemSettings.js';
 import { parseCookies } from '../services/adminSession.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
+import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { clientIpKey, createRateLimiter } from '../middleware/rateLimit.js';
+import {
+  authenticateExternalAccount,
+  ExternalAuthError,
+  registerExternalAccount,
+} from '../services/externalAccountService.js';
 import {
   buildClearDingtalkOAuthStateCookie,
   buildDingtalkOAuthStateCookie,
@@ -68,8 +76,9 @@ async function establishWebSession(req, res, userid) {
   const finalUserid = String(profile.userid);
   const finalName = profile?.name ? String(profile.name) : '';
   const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
-  await ensureAccount(db, { userid: finalUserid, name: finalName });
+  await ensureAccount(db, { userid: finalUserid, name: finalName, createUser: true });
 
+  await refreshSessionGlobalVersion(db, cfg, { force: true, throwOnError: true });
   const sessionSecret = webSessionSigningSecret(cfg);
   const sessionTtlSeconds = 86400 * 7;
   const token = createWebSessionToken(
@@ -81,11 +90,86 @@ async function establishWebSession(req, res, userid) {
   return { userid: finalUserid, name: finalName, avatar: finalAvatar };
 }
 
+const EXTERNAL_AUTH_STATUS = {
+  invalid_phone: 400,
+  invalid_name: 400,
+  weak_password: 400,
+  consent_required: 400,
+  phone_registered: 409,
+  phone_is_dingtalk_user: 409,
+  invalid_credentials: 401,
+  register_disabled: 403,
+  account_disabled: 403,
+  account_locked: 429,
+  register_failed: 500,
+};
+
+/**
+ * 外部账号登录成功后签发与钉钉免登完全相同的 web 会话：
+ * 业务侧（商城、核销、拍卖、红包）无需区分账号来源。
+ */
+async function establishExternalWebSession(req, res, { userid, name }) {
+  const cfg = req.app?.locals?.cfg;
+  const db = req.app?.locals?.db;
+  await refreshSessionGlobalVersion(db, cfg, { force: true, throwOnError: true });
+  const ttlSeconds = 86400 * 7;
+  const token = createWebSessionToken(
+    webSessionSigningSecret(cfg),
+    withSessionVersion({ userid: String(userid), name: String(name || '') }, cfg),
+    ttlSeconds,
+  );
+  res.setHeader('Set-Cookie', buildWebSessionCookie(token, ttlSeconds, cookieOptions(cfg)));
+  req.webSession = { userid: String(userid), name: String(name || '') };
+  return { userid: String(userid), name: String(name || '') };
+}
+
+async function handleExternalAuth(req, res, run) {
+  try {
+    const payload = await run();
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, ...payload });
+  } catch (err) {
+    res.setHeader('Cache-Control', 'no-store');
+    if (err instanceof ExternalAuthError) {
+      const body = { error: err.code, message: err.message };
+      // 手机号属于钉钉在册员工：前端据此提示并引导到钉钉登录。
+      if (err.code === 'phone_is_dingtalk_user') body.action = 'dingtalk_login';
+      if (err.retry_after) body.retry_after = Number(err.retry_after);
+      return res.status(EXTERNAL_AUTH_STATUS[err.code] || 400).json(body);
+    }
+    return res.status(500).json({ error: 'server_error', message: '服务异常，请稍后重试' });
+  }
+}
+
 export function webRouter() {
   const router = Router();
+  const pagesRoot = fileURLToPath(new URL('../pages/', import.meta.url));
+
+  // 限流挂在路由上而不是按路径字符串匹配：Express 默认大小写不敏感且容忍尾斜杠，
+  // 用 `req.path === '/web/ext/login'` 判断会让 `/web/ext/login/`、`/WEB/ext/login` 绕过限流。
+  // 会场 WiFi / 运营商 CGNAT 下大量用户共用出口 IP，阈值需宽于内部登录（30/min）。
+  const extRegisterLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 60,
+    keyFn: (req) => clientIpKey(req, 'ext_register'),
+    message: '注册过于频繁，请稍后再试',
+  });
+  const extLoginLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 120,
+    keyFn: (req) => clientIpKey(req, 'ext_login'),
+    message: '登录过于频繁，请稍后再试',
+  });
 
   router.get('/', (_req, res) => {
     res.status(410).type('text').send('该页面已废弃，请使用 /mall');
+  });
+
+  // 对外活动登录页（浏览器/微信内打开）：外部用户注册登录，员工走钉钉登录。
+  router.get('/login', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    return res.type('html').sendFile('login.html', { root: pagesRoot });
   });
 
   router.get('/config', async (req, res) => {
@@ -185,6 +269,64 @@ export function webRouter() {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Set-Cookie', buildClearWebSessionCookie(cookieOptions(cfg)));
     return res.json({ ok: true });
+  });
+
+  router.get('/ext/status', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const db = req.app?.locals?.db;
+      const [external, site] = await Promise.all([
+        getExternalLoginSettings(db),
+        getSiteVisibilitySettings(db),
+      ]);
+      const siteEnabled = site?.enabled !== false;
+      return res.json({
+        ok: true,
+        register_enabled: external.enabled === true,
+        site_enabled: siteEnabled,
+        message: external.message || '',
+        site_message: siteEnabled ? '' : String(site?.message || ''),
+      });
+    } catch (err) {
+      // fail-closed：状态读不到时前端按「未开放」处理，登录仍由后端开关兜底。
+      return res.status(500).json({ error: 'server_error', message: String(err?.message || err) });
+    }
+  });
+
+  router.post('/ext/register', extRegisterLimiter, requireSiteEnabled(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    return handleExternalAuth(req, res, async () => {
+      const settings = await getExternalLoginSettings(db);
+      if (settings.enabled !== true) {
+        throw new ExternalAuthError(
+          'register_disabled',
+          settings.message || '本次活动的自助注册未开放，请联系现场工作人员',
+        );
+      }
+      if (req.body?.consent !== true) {
+        throw new ExternalAuthError('consent_required', '请先阅读并同意个人信息收集告知');
+      }
+      const account = await registerExternalAccount(db, {
+        name: req.body?.name,
+        phone: req.body?.phone,
+        password: req.body?.password,
+      });
+      await establishExternalWebSession(req, res, account);
+      return { userid: account.userid, name: account.name };
+    });
+  });
+
+  // 登录不受注册开关影响：活动结束关闭注册后，已注册用户仍可登录兑换。
+  router.post('/ext/login', extLoginLimiter, requireSiteEnabled(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    return handleExternalAuth(req, res, async () => {
+      const account = await authenticateExternalAccount(db, {
+        phone: req.body?.phone,
+        password: req.body?.password,
+      });
+      await establishExternalWebSession(req, res, account);
+      return { userid: account.userid, name: account.name };
+    });
   });
 
   return router;

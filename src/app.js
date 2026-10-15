@@ -111,6 +111,13 @@ export function createApp({ db, cfg } = {}) {
   app.get('/favicon.ico', (_req, res) => {
     res.redirect(302, '/assets/favicon.png');
   });
+  // 对外活动短链：现场二维码直接指向 /login，保留查询串（含回跳地址）。
+  app.get('/login', (req, res) => {
+    const original = String(req.originalUrl || '/login');
+    const queryIndex = original.indexOf('?');
+    const query = queryIndex === -1 ? '' : original.slice(queryIndex);
+    res.redirect(302, `/web/login${query}`);
+  });
   const adminAppRoot = fileURLToPath(new URL('./pages/admin-app-dist/', import.meta.url));
   app.use('/admin-app', express.static(adminAppRoot, { maxAge: 0 }));
 
