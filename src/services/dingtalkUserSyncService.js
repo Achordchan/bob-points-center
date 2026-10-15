@@ -216,10 +216,13 @@ const DEPARTURE_CURSOR_KEY = 'dingtalk_departure_check_cursor';
 // 只写资料表的 active 标记（没有资料行则补建停用行），保留 users/accounts（BOB 币余额与流水不能丢）。
 async function deactivateConfirmedDepartures(db, cfg, listedUsers, { maxChecks = MAX_DEPARTURE_CHECKS_PER_SYNC } = {}) {
   // 从 users 出发：自动同步上线前靠登录创建、还没有资料行的旧账户也要检查。
+  // 排除对外活动外部账号：他们本就没有钉钉资料行，逐个去钉钉确认既吃 API 配额，
+  // 又会因「用户不存在」给外部账号补建假的停用员工档案，还会挤占本批离职核对预算。
   const rows = await db.all(
     `SELECT u.userid AS userid FROM users u
        LEFT JOIN user_dingtalk_profiles p ON p.userid = u.userid
-      WHERE p.userid IS NULL OR p.active IS NULL OR p.active <> 0`,
+      WHERE COALESCE(u.source, 'dingtalk') <> 'external'
+        AND (p.userid IS NULL OR p.active IS NULL OR p.active <> 0)`,
   );
   const all = (rows || [])
     .map((row) => String(row?.userid || ''))

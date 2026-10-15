@@ -16,8 +16,27 @@
 
   function normalizeRedirect(value) {
     var target = value ? String(value).trim() : '';
-    if (!target || target.charAt(0) !== '/' || target.indexOf('//') === 0) return DEFAULT_REDIRECT;
-    return target;
+    if (!target) return DEFAULT_REDIRECT;
+    try {
+      // 按解析后的地址校验来源：`/\evil.example` 以 / 开头（且不是 //），
+      // 但浏览器会把反斜杠当斜杠，直接跳转就是开放重定向。
+      var resolved = new URL(target, window.location.origin);
+      if (resolved.origin !== window.location.origin) return DEFAULT_REDIRECT;
+      return resolved.pathname + resolved.search + resolved.hash;
+    } catch (_) {
+      return DEFAULT_REDIRECT;
+    }
+  }
+
+  /**
+   * 手机号归一化：先去分隔符与 +86/86 前缀，再截断到 11 位。
+   * 顺序不能反：先截断会把 `+8613800000000` 截成 `86138000000`，号码就废了。
+   */
+  function normalizePhoneInput(value) {
+    var text = String(value || '').replace(/[\s\-()]/g, '');
+    if (text.charAt(0) === '+') text = text.slice(1);
+    if (text.length === 13 && text.indexOf('86') === 0) text = text.slice(2);
+    return text.replace(/\D/g, '').slice(0, 11);
   }
 
   function readRedirect() {
@@ -91,7 +110,7 @@
   function onlyDigits(el) {
     if (!el) return;
     el.addEventListener('input', function () {
-      var cleaned = String(el.value || '').replace(/\D/g, '').slice(0, 11);
+      var cleaned = normalizePhoneInput(el.value);
       if (cleaned !== el.value) el.value = cleaned;
     });
   }

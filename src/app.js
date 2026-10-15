@@ -82,20 +82,6 @@ export function createApp({ db, cfg } = {}) {
     keyFn: (req) => clientIpKey(req, 'auction_bid'),
     message: '出价过于频繁，请稍后再试',
   });
-  // 对外活动外部账号：会场 WiFi / 运营商 CGNAT 下大量用户共用一个出口 IP，
-  // 阈值必须宽于内部登录限流（30/min），否则会误伤整场活动。
-  const extRegisterLimiter = createRateLimiter({
-    windowMs: 60_000,
-    max: 60,
-    keyFn: (req) => clientIpKey(req, 'ext_register'),
-    message: '注册过于频繁，请稍后再试',
-  });
-  const extLoginLimiter = createRateLimiter({
-    windowMs: 60_000,
-    max: 120,
-    keyFn: (req) => clientIpKey(req, 'ext_login'),
-    message: '登录过于频繁，请稍后再试',
-  });
   const sseLimiter = createRateLimiter({
     windowMs: 60_000,
     max: 60,
@@ -106,8 +92,6 @@ export function createApp({ db, cfg } = {}) {
   app.use((req, res, next) => {
     const p = String(req.path || '');
     if (p.startsWith('/admin/oauth') || p.startsWith('/web/oauth')) return oauthLimiter(req, res, next);
-    if (req.method === 'POST' && p === '/web/ext/register') return extRegisterLimiter(req, res, next);
-    if (req.method === 'POST' && p === '/web/ext/login') return extLoginLimiter(req, res, next);
     if (p.startsWith('/qr/')) return qrLimiter(req, res, next);
     if (p === '/mall/events') return sseLimiter(req, res, next);
     if (req.method === 'POST' && (p === '/mall/more/feedback' || p.startsWith('/mall/more/feedback/'))) {

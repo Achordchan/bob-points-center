@@ -15,6 +15,7 @@ import { getExternalLoginSettings, getSiteVisibilitySettings } from '../services
 import { parseCookies } from '../services/adminSession.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
 import { requireSiteEnabled } from '../middleware/requireSiteEnabled.js';
+import { clientIpKey, createRateLimiter } from '../middleware/rateLimit.js';
 import {
   authenticateExternalAccount,
   ExternalAuthError,
@@ -140,6 +141,22 @@ async function handleExternalAuth(req, res, run) {
 export function webRouter() {
   const router = Router();
   const pagesRoot = fileURLToPath(new URL('../pages/', import.meta.url));
+
+  // 限流挂在路由上而不是按路径字符串匹配：Express 默认大小写不敏感且容忍尾斜杠，
+  // 用 `req.path === '/web/ext/login'` 判断会让 `/web/ext/login/`、`/WEB/ext/login` 绕过限流。
+  // 会场 WiFi / 运营商 CGNAT 下大量用户共用出口 IP，阈值需宽于内部登录（30/min）。
+  const extRegisterLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 60,
+    keyFn: (req) => clientIpKey(req, 'ext_register'),
+    message: '注册过于频繁，请稍后再试',
+  });
+  const extLoginLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 120,
+    keyFn: (req) => clientIpKey(req, 'ext_login'),
+    message: '登录过于频繁，请稍后再试',
+  });
 
   router.get('/', (_req, res) => {
     res.status(410).type('text').send('该页面已废弃，请使用 /mall');
@@ -273,7 +290,7 @@ export function webRouter() {
     }
   });
 
-  router.post('/ext/register', requireSiteEnabled(), async (req, res) => {
+  router.post('/ext/register', extRegisterLimiter, requireSiteEnabled(), async (req, res) => {
     const db = req.app?.locals?.db;
     return handleExternalAuth(req, res, async () => {
       const settings = await getExternalLoginSettings(db);
@@ -298,7 +315,7 @@ export function webRouter() {
   });
 
   // 登录不受注册开关影响：活动结束关闭注册后，已注册用户仍可登录兑换。
-  router.post('/ext/login', requireSiteEnabled(), async (req, res) => {
+  router.post('/ext/login', extLoginLimiter, requireSiteEnabled(), async (req, res) => {
     const db = req.app?.locals?.db;
     return handleExternalAuth(req, res, async () => {
       const account = await authenticateExternalAccount(db, {

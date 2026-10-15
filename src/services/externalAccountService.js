@@ -226,68 +226,98 @@ export async function registerExternalAccount(db, { name, phone, password, batch
   throw new ExternalAuthError('register_failed', '注册失败，请稍后重试');
 }
 
+const LOGIN_LOCKS = new Map();
+
+/**
+ * 按账号串行化「锁定检查 + 密码校验 + 失败计数写入」。
+ * 否则 N 个并发错误尝试会读到同一个 failed_count 再各自写回，计数丢失（20 次并发可能只记 1 次），
+ * 相当于把「5 次失败锁定」放大成任意次在线爆破。
+ * 与 middleware/rateLimit.js 一致，是进程内锁：当前为单进程部署，若将来多进程，
+ * 失败计数仍由单条原子 UPDATE（CASE WHEN 自增）保证不丢更新。
+ */
+async function withLoginLock(key, fn) {
+  const previous = LOGIN_LOCKS.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const tail = previous.then(() => gate);
+  LOGIN_LOCKS.set(key, tail);
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (LOGIN_LOCKS.get(key) === tail) LOGIN_LOCKS.delete(key);
+  }
+}
+
 /**
  * 校验手机号 + 密码。失败抛 ExternalAuthError
  * （invalid_credentials / account_locked / account_disabled）。
  */
 export async function authenticateExternalAccount(db, { phone, password } = {}) {
   const phoneNumber = normalizePhone(phone);
-  const now = Math.floor(Date.now() / 1000);
+  return await withLoginLock(`ext-login:${phoneNumber || 'invalid'}`, async () => {
+    const now = Math.floor(Date.now() / 1000);
 
-  const row = phoneNumber
-    ? await db.get(
-      `SELECT userid, phone, name, password_hash, password_salt, status, failed_count, locked_until
-         FROM external_accounts
-        WHERE phone = ?
-        LIMIT 1`,
-      [phoneNumber],
-    )
-    : null;
+    const row = phoneNumber
+      ? await db.get(
+        `SELECT userid, phone, name, password_hash, password_salt, status, failed_count, locked_until
+           FROM external_accounts
+          WHERE phone = ?
+          LIMIT 1`,
+        [phoneNumber],
+      )
+      : null;
 
-  if (!row) {
-    // 未注册过的手机号：若属于钉钉在册员工，直接引导到钉钉登录。
-    const dingtalkUser = await findActiveDingtalkUserByPhone(db, phoneNumber);
-    // 抹平「手机号不存在」与「密码错误」的耗时差异，避免账号枚举。
-    await hashPassword(String(password ?? ''));
-    if (dingtalkUser) {
-      throw new ExternalAuthError('phone_is_dingtalk_user', '该手机号已绑定企业钉钉账号，请使用钉钉登录', {
-        dingtalk_userid: dingtalkUser.userid,
-      });
+    if (!row) {
+      // 未注册过的手机号：若属于钉钉在册员工，直接引导到钉钉登录。
+      const dingtalkUser = await findActiveDingtalkUserByPhone(db, phoneNumber);
+      // 抹平「手机号不存在」与「密码错误」的耗时差异，避免账号枚举。
+      await hashPassword(String(password ?? ''));
+      if (dingtalkUser) {
+        throw new ExternalAuthError('phone_is_dingtalk_user', '该手机号已绑定企业钉钉账号，请使用钉钉登录', {
+          dingtalk_userid: dingtalkUser.userid,
+        });
+      }
+      throw new ExternalAuthError('invalid_credentials', '手机号或密码错误');
     }
-    throw new ExternalAuthError('invalid_credentials', '手机号或密码错误');
-  }
 
-  if (String(row.status || 'active') !== 'active') {
-    throw new ExternalAuthError('account_disabled', '账号已停用，请联系现场工作人员');
-  }
+    if (String(row.status || 'active') !== 'active') {
+      throw new ExternalAuthError('account_disabled', '账号已停用，请联系现场工作人员');
+    }
 
-  const lockedUntil = Number(row.locked_until || 0);
-  if (lockedUntil > now) {
-    throw new ExternalAuthError('account_locked', '密码错误次数过多，请稍后再试', {
-      retry_after: lockedUntil - now,
-    });
-  }
-
-  const ok = await verifyPasswordHash(password, { hash: row.password_hash, salt: row.password_salt });
-  if (!ok) {
-    const failed = Number(row.failed_count || 0) + 1;
-    const shouldLock = failed >= MAX_FAILED_ATTEMPTS;
-    await db.run(
-      'UPDATE external_accounts SET failed_count = ?, locked_until = ?, updated_at = unixepoch() WHERE userid = ?',
-      [shouldLock ? 0 : failed, shouldLock ? now + LOCK_DURATION_SECONDS : null, String(row.userid)],
-    );
-    if (shouldLock) {
+    const lockedUntil = Number(row.locked_until || 0);
+    if (lockedUntil > now) {
       throw new ExternalAuthError('account_locked', '密码错误次数过多，请稍后再试', {
-        retry_after: LOCK_DURATION_SECONDS,
+        retry_after: lockedUntil - now,
       });
     }
-    throw new ExternalAuthError('invalid_credentials', '手机号或密码错误');
-  }
 
-  await db.run(
-    'UPDATE external_accounts SET failed_count = 0, locked_until = NULL, last_login_at = ?, updated_at = unixepoch() WHERE userid = ?',
-    [now, String(row.userid)],
-  );
+    const ok = await verifyPasswordHash(password, { hash: row.password_hash, salt: row.password_salt });
+    if (!ok) {
+      // 单条原子 UPDATE：并发下也不会丢计数（不能先读 failed_count 再写回）。
+      const locked = await db.get(
+        `UPDATE external_accounts
+            SET failed_count = CASE WHEN failed_count + 1 >= ? THEN 0 ELSE failed_count + 1 END,
+                locked_until = CASE WHEN failed_count + 1 >= ? THEN ? ELSE locked_until END,
+                updated_at = unixepoch()
+          WHERE userid = ?
+          RETURNING locked_until`,
+        [MAX_FAILED_ATTEMPTS, MAX_FAILED_ATTEMPTS, now + LOCK_DURATION_SECONDS, String(row.userid)],
+      );
+      if (Number(locked?.locked_until || 0) > now) {
+        throw new ExternalAuthError('account_locked', '密码错误次数过多，请稍后再试', {
+          retry_after: LOCK_DURATION_SECONDS,
+        });
+      }
+      throw new ExternalAuthError('invalid_credentials', '手机号或密码错误');
+    }
 
-  return { userid: String(row.userid), name: String(row.name || ''), phone: String(row.phone || '') };
+    await db.run(
+      'UPDATE external_accounts SET failed_count = 0, locked_until = NULL, last_login_at = ?, updated_at = unixepoch() WHERE userid = ?',
+      [now, String(row.userid)],
+    );
+
+    return { userid: String(row.userid), name: String(row.name || ''), phone: String(row.phone || '') };
+  });
 }

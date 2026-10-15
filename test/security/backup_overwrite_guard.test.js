@@ -117,9 +117,10 @@ test('拍卖表纳入全量备份，但不作为旧备份覆盖完整性的必�
   assert.match(fullTablesBlock, /'auction_activities'/);
   assert.match(fullTablesBlock, /'auction_bids'/);
   // overwrite 完整性校验把拍卖表视为可选，避免拒绝早于该功能的旧全量备份
+  // （后引入的 external_accounts 同理，也在这个可选集合里）
   assert.match(
     backupRoutesSource,
-    /optionalFullTables = new Set\(\['auction_activities', 'auction_bids'\]\)/,
+    /optionalFullTables = new Set\(\['auction_activities', 'auction_bids', 'external_accounts'\]\)/,
   );
   assert.match(
     backupRoutesSource,

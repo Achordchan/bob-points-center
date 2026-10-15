@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 import {
   authenticateExternalAccount,
@@ -31,6 +32,22 @@ const mallAssetSource = readFileSync(
   fileURLToPath(new URL('../../src/pages/assets/mall.js', import.meta.url)),
   'utf8',
 );
+const appSource = readFileSync(
+  fileURLToPath(new URL('../../src/app.js', import.meta.url)),
+  'utf8',
+);
+const loginAssetSource = readFileSync(
+  fileURLToPath(new URL('../../src/pages/assets/login.js', import.meta.url)),
+  'utf8',
+);
+const backupRoutesSource = readFileSync(
+  fileURLToPath(new URL('../../src/routes/admin/backupRoutes.js', import.meta.url)),
+  'utf8',
+);
+const userSyncSource = readFileSync(
+  fileURLToPath(new URL('../../src/services/dingtalkUserSyncService.js', import.meta.url)),
+  'utf8',
+);
 
 /** 最小化假库：按 SQL 片段分派，覆盖服务层的读写分支。 */
 function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null } = {}) {
@@ -41,12 +58,28 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     inserts: [],
     updates: [],
     queries: [],
+    failureUpdates: [],
   };
 
   const db = {
     state,
     async get(sql, params = []) {
       state.queries.push({ sql, params });
+      // 原子失败计数（UPDATE ... RETURNING）：模拟数据库按行自增，
+      // 用于验证并发错误尝试不会丢计数。
+      if (sql.includes('UPDATE external_accounts')) {
+        state.failureUpdates.push(params);
+        const threshold = Number(params[0]);
+        const lockUntil = Number(params[2]);
+        const next = Number(state.account.failed_count || 0) + 1;
+        if (next >= threshold) {
+          state.account.failed_count = 0;
+          state.account.locked_until = lockUntil;
+        } else {
+          state.account.failed_count = next;
+        }
+        return { locked_until: state.account.locked_until };
+      }
       if (sql.includes('FROM user_dingtalk_profiles')) return dingtalkUser;
       if (sql.includes('FROM external_accounts')) return state.account;
       if (sql.includes('FROM users WHERE phone')) return userByPhone;
@@ -54,14 +87,9 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     },
     async run(sql, params = []) {
       state.updates.push({ sql, params });
-      if (sql.includes('UPDATE external_accounts')) {
-        if (sql.includes('failed_count = 0')) {
-          state.account.failed_count = 0;
-          state.account.locked_until = null;
-        } else {
-          state.account.failed_count = params[0];
-          state.account.locked_until = params[1];
-        }
+      if (sql.includes('UPDATE external_accounts') && sql.includes('failed_count = 0')) {
+        state.account.failed_count = 0;
+        state.account.locked_until = null;
       }
       if (sql.startsWith('INSERT INTO')) state.inserts.push({ sql, params });
       return { changes: 1, lastID: 1 };
@@ -266,6 +294,28 @@ test('连续密码错误触发锁定，锁定期内正确密码同样被拒', as
   );
 });
 
+test('并发错误密码同样会触发锁定（失败计数不丢更新）', async () => {
+  const account = await createAccountRow();
+  const db = createFakeDb({ account });
+
+  const results = await Promise.all(Array.from({ length: 8 }, () => (
+    authenticateExternalAccount(db, { phone: '13800000000', password: 'wrong' })
+      .then(() => 'ok')
+      .catch((err) => err.code)
+  )));
+
+  // 串行化 + 原子自增后结果确定：前 4 次是凭据错误，第 5 次触发锁定，其余都被锁定拦下。
+  assert.equal(results.filter((code) => code === 'invalid_credentials').length, MAX_FAILED_ATTEMPTS - 1);
+  assert.equal(results.filter((code) => code === 'account_locked').length, 8 - (MAX_FAILED_ATTEMPTS - 1));
+  assert.ok(Number(db.state.account.locked_until) > 0, '并发尝试后账号应处于锁定状态');
+
+  // 锁定期内即使密码正确也不放行
+  await assert.rejects(
+    () => authenticateExternalAccount(db, { phone: '13800000000', password: '123456' }),
+    (err) => { assertAuthError(err, 'account_locked'); return true; },
+  );
+});
+
 test('未注册手机号若属于钉钉员工则引导钉钉登录，否则统一提示凭据错误', async () => {
   await assert.rejects(
     () => authenticateExternalAccount(createFakeDb({ dingtalkUser: { userid: 'boss001' } }), {
@@ -309,4 +359,92 @@ test('外部用户不出现在转账搜索与富豪榜', () => {
 test('商城在浏览器内打开时跳转活动登录页而非直接钉钉授权', () => {
   assert.match(mallAssetSource, /window\.location\.replace\(`\/login\?\$\{params\.toString\(\)\}`\)/);
   assert.equal(mallAssetSource.includes("window.location.replace(`/web/oauth/start?${params.toString()}`)"), false);
+});
+
+test('外部限流挂在路由上，不依赖精确路径匹配', () => {
+  // Express 默认大小写不敏感且容忍尾斜杠：用 req.path === '/web/ext/login' 判断会被
+  // /web/ext/login/ 与 /WEB/ext/login 绕过，因此限流必须是路由级中间件。
+  assert.match(webRoutesSource, /createRateLimiter\(\{[\s\S]*?ext_register[\s\S]*?ext_login/);
+  assert.match(webRoutesSource, /router\.post\('\/ext\/register', extRegisterLimiter, requireSiteEnabled\(\)/);
+  assert.match(webRoutesSource, /router\.post\('\/ext\/login', extLoginLimiter, requireSiteEnabled\(\)/);
+  assert.equal(appSource.includes("p === '/web/ext/login'"), false);
+  assert.equal(appSource.includes("p === '/web/ext/register'"), false);
+});
+
+test('登录页跳转按解析后的 origin 校验，避免开放重定向', () => {
+  const helper = loginAssetSource.match(/function normalizeRedirect\(value\) \{[\s\S]*?\n  \}/);
+  assert.ok(helper, '未找到 normalizeRedirect');
+  const normalize = runInNewContext(`(${helper[0]})`, {
+    URL,
+    DEFAULT_REDIRECT: '/mall',
+    window: { location: { origin: 'https://bob.test' } },
+  });
+  for (const unsafe of ['/\\\\evil.example', '//evil.example', 'https://evil.example', 'javascript:alert(1)']) {
+    assert.equal(normalize(unsafe), '/mall', `应拒绝：${unsafe}`);
+  }
+  assert.equal(normalize('/mall?tab=auction#bids'), '/mall?tab=auction#bids');
+  assert.equal(normalize('https://bob.test/mall?tab=orders'), '/mall?tab=orders');
+  assert.equal(normalize(''), '/mall');
+});
+
+test('登录页手机号先归一化前缀再截断', () => {
+  const helper = loginAssetSource.match(/function normalizePhoneInput\(value\) \{[\s\S]*?\n  \}/);
+  assert.ok(helper, '未找到 normalizePhoneInput');
+  const normalize = runInNewContext(`(${helper[0]})`);
+  for (const phone of ['13800000000', '+8613800000000', '8613800000000', '138 0000 0000', '+86 (138) 0000-0000']) {
+    assert.equal(normalize(phone), '13800000000', `不应截坏：${phone}`);
+  }
+  // 输入框 maxlength 要为格式化输入留出余量，否则粘贴在归一化之前就被截断
+  const loginHtml = readFileSync(fileURLToPath(new URL('../../src/pages/login.html', import.meta.url)), 'utf8');
+  const phoneInputs = loginHtml.match(/type="tel"[^>]*maxlength="(\d+)"/g) || [];
+  assert.equal(phoneInputs.length, 2);
+  for (const input of phoneInputs) assert.match(input, /maxlength="20"/);
+});
+
+test('全量备份与恢复包含外部账号凭据', () => {
+  const fullTables = backupRoutesSource.match(/const FULL_TABLES = \[[\s\S]*?\];/);
+  assert.ok(fullTables, '未找到 FULL_TABLES');
+  assert.match(fullTables[0], /'external_accounts'/);
+  // users 恢复必须带上 source/phone，否则恢复出来的外部账号会被当成钉钉员工
+  const usersRestore = backupRoutesSource.match(/INSERT INTO users\(userid, name, is_admin, source, phone, created_at\)/);
+  assert.ok(usersRestore, 'users 恢复缺少 source/phone');
+  assert.match(backupRoutesSource, /INSERT INTO external_accounts\(/);
+  // 覆盖导入要先删 external_accounts 再删 users（外键）
+  const deleteOrder = backupRoutesSource.match(/const deleteOrder = \[[\s\S]*?\];/);
+  assert.ok(deleteOrder, '未找到 deleteOrder');
+  const order = deleteOrder[0].match(/'external_accounts'|'users'/g) || [];
+  assert.deepEqual(order.slice(-2), ["'external_accounts'", "'users'"]);
+  // 旧备份没有该表，不能因此拒绝恢复
+  assert.match(backupRoutesSource, /optionalFullTables = new Set\(\[[^\]]*'external_accounts'/);
+});
+
+test('备份预校验拒绝缺凭据或身份不匹配的外部用户，兼容历史员工备份', () => {
+  const guard = backupRoutesSource.match(/if \(backupMode === 'full'\) \{\n          const externalAccounts = requireArray\('external_accounts'\)[\s\S]*?\n        \}/);
+  assert.ok(guard, '未找到外部账号预校验');
+  const user = { userid: 'ext_roundtrip', source: 'external', phone: '13800000000' };
+  const credentials = { ...user, password_hash: 'hash', password_salt: 'salt' };
+  const validate = (users, externalAccounts) => {
+    const errors = [];
+    runInNewContext(guard[0], {
+      backupMode: 'full',
+      users,
+      requireArray: () => externalAccounts,
+      pushPreflight: (table, index, message) => errors.push({ table, index, message }),
+    });
+    return errors;
+  };
+  assert.deepEqual(validate([user], [credentials]), []);
+  assert.deepEqual(validate([{ userid: 'employee' }], null), []);
+  for (const rows of [null, []]) {
+    assert.match(validate([user], rows)[0].message, /外部用户缺少关联密码凭据/);
+  }
+  assert.ok(validate([user], [{ ...credentials, password_hash: '' }]).some((err) => /缺少密码凭据/.test(err.message)));
+  assert.ok(validate([user], [{ ...credentials, phone: '13900000000' }]).some((err) => /来源或手机号不一致/.test(err.message)));
+  assert.ok(validate([{ ...user, source: 'dingtalk' }], [credentials]).some((err) => /来源或手机号不一致/.test(err.message)));
+});
+
+test('离职核对排除外部账号，避免无谓钉钉调用与假离职档案', () => {
+  const query = userSyncSource.match(/async function deactivateConfirmedDepartures[\s\S]*?const all = /);
+  assert.ok(query, '未找到离职核对查询');
+  assert.match(query[0], /COALESCE\(u\.source, 'dingtalk'\) <> 'external'/);
 });
