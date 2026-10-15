@@ -28,15 +28,13 @@
     }
   }
 
-  /**
-   * 手机号归一化：先去分隔符与 +86/86 前缀，再截断到 11 位。
-   * 顺序不能反：先截断会把 `+8613800000000` 截成 `86138000000`，号码就废了。
-   */
+  // 仅在失焦或提交时归一化，保留逐字符输入国家前缀的中间状态。
+  // 不截断或剔除其他非法字符，交由服务端校验，避免悄悄改成另一个账号。
   function normalizePhoneInput(value) {
     var text = String(value || '').replace(/[\s\-()]/g, '');
     if (text.charAt(0) === '+') text = text.slice(1);
     if (text.length === 13 && text.indexOf('86') === 0) text = text.slice(2);
-    return text.replace(/\D/g, '').slice(0, 11);
+    return text;
   }
 
   function readRedirect() {
@@ -107,9 +105,9 @@
     });
   }
 
-  function onlyDigits(el) {
+  function normalizePhoneOnBlur(el) {
     if (!el) return;
-    el.addEventListener('input', function () {
+    el.addEventListener('blur', function () {
       var cleaned = normalizePhoneInput(el.value);
       if (cleaned !== el.value) el.value = cleaned;
     });
@@ -164,7 +162,7 @@
     setSubmitting(true);
     try {
       var result = await postJson('/web/ext/login', {
-        phone: String($('loginPhone').value || '').trim(),
+        phone: normalizePhoneInput($('loginPhone').value),
         password: String($('loginPassword').value || ''),
       });
       if (result.status === 200 && result.data.ok) {
@@ -198,7 +196,7 @@
     try {
       var result = await postJson('/web/ext/register', {
         name: String($('regName').value || '').trim(),
-        phone: String($('regPhone').value || '').trim(),
+        phone: normalizePhoneInput($('regPhone').value),
         password: String($('regPassword').value || ''),
         consent: true,
       });
@@ -258,8 +256,8 @@
   async function bootstrap() {
     state.redirect = readRedirect();
     applyDingtalkLinks();
-    onlyDigits($('loginPhone'));
-    onlyDigits($('regPhone'));
+    normalizePhoneOnBlur($('loginPhone'));
+    normalizePhoneOnBlur($('regPhone'));
     $('tabLogin').addEventListener('click', function () { setTab('login'); });
     $('tabRegister').addEventListener('click', function () { setTab('register'); });
     $('formLogin').addEventListener('submit', submitLogin);

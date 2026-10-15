@@ -405,18 +405,77 @@ test('外部批次清理排除启用角色管理员，且保留显式管理员�
   assert.match(purge, /deleteUsersCompletely\(tx, userids, \{ protectUserids \}\)/);
 });
 
-test('登录页手机号先归一化前缀再截断', () => {
+test('登录页手机号去除支持的前缀与分隔符，但不截坏非法号码', () => {
   const helper = loginAssetSource.match(/function normalizePhoneInput\(value\) \{[\s\S]*?\n  \}/);
   assert.ok(helper, '未找到 normalizePhoneInput');
   const normalize = runInNewContext(`(${helper[0]})`);
   for (const phone of ['13800000000', '+8613800000000', '8613800000000', '138 0000 0000', '+86 (138) 0000-0000']) {
     assert.equal(normalize(phone), '13800000000', `不应截坏：${phone}`);
   }
+  assert.equal(normalize('138000000001'), '138000000001');
+  assert.equal(normalize('138abc00000000'), '138abc00000000');
   // 输入框 maxlength 要为格式化输入留出余量，否则粘贴在归一化之前就被截断
   const loginHtml = readFileSync(fileURLToPath(new URL('../../src/pages/login.html', import.meta.url)), 'utf8');
   const phoneInputs = loginHtml.match(/type="tel"[^>]*maxlength="(\d+)"/g) || [];
   assert.equal(phoneInputs.length, 2);
   for (const input of phoneInputs) assert.match(input, /maxlength="20"/);
+});
+
+test('登录页完整脚本保留逐字符输入，失焦和未失焦提交均归一化', async () => {
+  const elements = new Map();
+  const getElement = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        value: '', checked: true, listeners: new Map(),
+        classList: { add() {}, remove() {}, toggle() {} },
+        setAttribute() {},
+        addEventListener(type, fn) { this.listeners.set(type, fn); },
+      });
+    }
+    return elements.get(id);
+  };
+  const requests = [];
+  let bootstrap;
+  runInNewContext(loginAssetSource, {
+    URL, URLSearchParams,
+    document: {
+      readyState: 'loading',
+      getElementById: getElement,
+      addEventListener(_type, fn) { bootstrap = fn; },
+    },
+    window: { location: { origin: 'https://bob.test', search: '' } },
+    async fetch(path, options) {
+      if (path === '/web/me') return { status: 401 };
+      if (path === '/web/ext/status') {
+        return { status: 200, async json() { return { register_enabled: true }; } };
+      }
+      requests.push({ path, body: JSON.parse(options.body) });
+      return { status: 400, async json() { return { error: 'invalid_credentials' }; } };
+    },
+  });
+  await bootstrap();
+  for (const [phoneId, formId, endpoint] of [
+    ['loginPhone', 'formLogin', '/web/ext/login'],
+    ['regPhone', 'formRegister', '/web/ext/register'],
+  ]) {
+    const phone = getElement(phoneId);
+    for (const text of ['+8613800000000', '8613800000000', '+86 (138) 0000-0000']) {
+      phone.value = '';
+      for (let index = 0; index < text.length; index += 1) {
+        phone.value += text[index];
+        phone.listeners.get('input')?.();
+        assert.equal(phone.value, text.slice(0, index + 1), '输入中不应改写或截断号码');
+      }
+      phone.listeners.get('blur')();
+      assert.equal(phone.value, '13800000000');
+      // 回车/自动填充提交不一定先触发 blur，提交处理器也必须归一化。
+      phone.value = text;
+      await getElement(formId).listeners.get('submit')({ preventDefault() {} });
+      assert.equal(requests.at(-1).path, endpoint);
+      assert.equal(requests.at(-1).body.phone, '13800000000');
+    }
+  }
+  assert.equal(requests.length, 6);
 });
 
 test('全量备份与恢复包含外部账号凭据', () => {
