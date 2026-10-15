@@ -27,7 +27,7 @@
           <button type="button" class="tab" id="tabRegister" data-tab="register" role="tab">注册</button>
         </nav>
 
-        <form class="form" id="formLogin" autocomplete="on">
+        <form class="form" id="formLogin" method="post" action="/web/ext/login" autocomplete="on">
           <label for="loginPhone">手机号</label>
           <input id="loginPhone" name="phone" type="tel" inputmode="numeric" autocomplete="username"
                  maxlength="20" placeholder="请输入注册时使用的手机号" required />
@@ -37,7 +37,7 @@
           <button type="submit" id="btnLogin" class="primary">登录</button>
         </form>
 
-        <form class="form hidden" id="formRegister" autocomplete="on">
+        <form class="form hidden" id="formRegister" method="post" action="/web/ext/register" autocomplete="on">
           <label for="regName">真实姓名</label>
           <input id="regName" name="name" type="text" autocomplete="name" maxlength="20"
                  placeholder="用于现场领取核对，请填写真实姓名" required />

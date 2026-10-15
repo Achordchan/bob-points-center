@@ -661,6 +661,11 @@ export function registerAdminSettingsRoutes(router) {
            JOIN users u ON u.userid = a.userid
           WHERE COALESCE(a.batch_id, '') = ?
             AND COALESCE(u.is_admin, 0) = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM admin_user_roles ur
+              JOIN admin_roles r ON r.id = ur.role_id
+              WHERE ur.userid = a.userid AND r.is_enabled = 1
+            )
           ORDER BY a.userid`,
         [batchId],
       );

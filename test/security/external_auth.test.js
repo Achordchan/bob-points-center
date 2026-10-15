@@ -379,12 +379,30 @@ test('登录页跳转按解析后的 origin 校验，避免开放重定向', () 
     DEFAULT_REDIRECT: '/mall',
     window: { location: { origin: 'https://bob.test' } },
   });
-  for (const unsafe of ['/\\\\evil.example', '//evil.example', 'https://evil.example', 'javascript:alert(1)']) {
+  for (const unsafe of ['/\\evil.example', '/\\\\evil.example', '//evil.example', 'https://evil.example', 'https://bob.test//evil.example', '/mall/..//evil.example', 'javascript:alert(1)']) {
     assert.equal(normalize(unsafe), '/mall', `应拒绝：${unsafe}`);
   }
   assert.equal(normalize('/mall?tab=auction#bids'), '/mall?tab=auction#bids');
   assert.equal(normalize('https://bob.test/mall?tab=orders'), '/mall?tab=orders');
   assert.equal(normalize(''), '/mall');
+});
+
+test('登录和注册表单原生回退仅使用 POST，不把密码写入 URL', () => {
+  const html = readFileSync(fileURLToPath(new URL('../../src/pages/login.html', import.meta.url)), 'utf8');
+  for (const [id, action] of [['formLogin', '/web/ext/login'], ['formRegister', '/web/ext/register']]) {
+    const form = html.match(new RegExp(`<form\\b[^>]*id="${id}"[^>]*>`));
+    assert.ok(form, `未找到 ${id}`);
+    assert.match(form[0], /method="post"/i);
+    assert.ok(form[0].includes(`action="${action}"`));
+  }
+});
+
+test('外部批次清理排除启用角色管理员，且保留显式管理员与超管保护', () => {
+  const source = readFileSync(fileURLToPath(new URL('../../src/routes/admin/settingsRoutes.js', import.meta.url)), 'utf8');
+  const purge = source.slice(source.indexOf("router.post('/settings/external-login/purge'"));
+  assert.match(purge, /COALESCE\(u\.is_admin, 0\) = 0/);
+  assert.match(purge, /NOT EXISTS \([\s\S]*?FROM admin_user_roles ur[\s\S]*?JOIN admin_roles r[\s\S]*?ur\.userid = a\.userid AND r\.is_enabled = 1/);
+  assert.match(purge, /deleteUsersCompletely\(tx, userids, \{ protectUserids \}\)/);
 });
 
 test('登录页手机号先归一化前缀再截断', () => {

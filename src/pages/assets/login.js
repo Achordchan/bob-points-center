@@ -21,7 +21,7 @@
       // 按解析后的地址校验来源：`/\evil.example` 以 / 开头（且不是 //），
       // 但浏览器会把反斜杠当斜杠，直接跳转就是开放重定向。
       var resolved = new URL(target, window.location.origin);
-      if (resolved.origin !== window.location.origin) return DEFAULT_REDIRECT;
+      if (resolved.origin !== window.location.origin || resolved.pathname.indexOf('//') === 0) return DEFAULT_REDIRECT;
       return resolved.pathname + resolved.search + resolved.hash;
     } catch (_) {
       return DEFAULT_REDIRECT;
