@@ -310,7 +310,6 @@ export function webRouter() {
         name: req.body?.name,
         phone: req.body?.phone,
         password: req.body?.password,
-        batchId: settings.batch_id,
       });
       await establishExternalWebSession(req, res, account);
       return { userid: account.userid, name: account.name };

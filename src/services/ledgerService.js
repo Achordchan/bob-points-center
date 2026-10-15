@@ -68,11 +68,11 @@ export async function ensureAccount(db, { userid, name, createUser = false }) {
       [uid, null],
     );
   } else {
-    const account = await db.get(
-      'SELECT userid FROM accounts WHERE userid = ? LIMIT 1',
+    const user = await db.get(
+      'SELECT userid FROM users WHERE userid = ? LIMIT 1',
       [uid],
     );
-    if (!account) throw new Error('unauthorized');
+    if (!user) throw new Error('unauthorized');
   }
 
   if (displayName) {
@@ -82,12 +82,11 @@ export async function ensureAccount(db, { userid, name, createUser = false }) {
     );
   }
 
-  if (createUser) {
-    await db.run(
-      'INSERT OR IGNORE INTO accounts(userid, balance) VALUES(?, 0)',
-      [uid],
-    );
-  }
+  // 仅从仍存在的 users 补齐账户；SELECT 与 INSERT 为一条语句，FK 保证并发删除时不留孤儿。
+  await db.run(
+    'INSERT OR IGNORE INTO accounts(userid, balance) SELECT userid, 0 FROM users WHERE userid = ?',
+    [uid],
+  );
 }
 
 export async function getBalance(db, { userid, name }) {

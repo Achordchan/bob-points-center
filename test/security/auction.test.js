@@ -166,8 +166,8 @@ class FakeAuctionDb {
     if (s.startsWith('SELECT balance FROM accounts WHERE userid = ?')) {
       return this.accounts.get(String(params[0]));
     }
-    if (s.startsWith('SELECT userid FROM accounts WHERE userid = ?')) {
-      return this.accounts.has(String(params[0])) ? { userid: String(params[0]) } : undefined;
+    if (s.startsWith('SELECT userid FROM users WHERE userid = ?')) {
+      return this.users.has(String(params[0])) ? { userid: String(params[0]) } : undefined;
     }
     if (/UPDATE accounts[\s\S]*RETURNING balance/.test(s) && s.includes('balance - ?')) {
       const amount = Number(params[0]);

@@ -627,10 +627,13 @@ export function registerAdminSettingsRoutes(router) {
     const db = req.app?.locals?.db;
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const data = await saveExternalLoginSettings(db, {
-        enabled: req.body?.enabled,
-        batch_id: req.body?.batch_id,
-        message: req.body?.message,
+      const data = await runInTransaction(db, async (tx) => {
+        await lockAdminAccountProtection(tx);
+        return await saveExternalLoginSettings(tx, {
+          enabled: req.body?.enabled,
+          batch_id: req.body?.batch_id,
+          message: req.body?.message,
+        });
       });
       return res.json({ ok: true, data });
     } catch (err) {

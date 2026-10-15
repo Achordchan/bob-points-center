@@ -10,6 +10,8 @@
  */
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
+import { getExternalLoginSettings } from './systemSettings.js';
+import { lockAdminAccountProtection } from './adminPermissionService.js';
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -163,7 +165,7 @@ function normalizeBatchId(value) {
  * 注册外部账号。失败抛 ExternalAuthError（invalid_phone / invalid_name / weak_password / phone_registered）。
  * 事务内同时写入 users / accounts / external_accounts，保证三者一致。
  */
-export async function registerExternalAccount(db, { name, phone, password, batchId } = {}) {
+export async function registerExternalAccount(db, { name, phone, password } = {}) {
   const phoneNumber = normalizePhone(phone);
   if (!phoneNumber) {
     throw new ExternalAuthError('invalid_phone', '请输入正确的手机号');
@@ -190,12 +192,18 @@ export async function registerExternalAccount(db, { name, phone, password, batch
   }
 
   const credentials = await hashPassword(password);
-  const batch = normalizeBatchId(batchId);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const userid = generateExternalUserid();
     try {
-      await db.transaction(async (tx) => {
+      return await db.transaction(async (tx) => {
+        // 哈希结束后再锁；与关闭注册、批次清理及备份恢复串行，锁内重读开关与当前批次。
+        await lockAdminAccountProtection(tx);
+        const settings = await getExternalLoginSettings(tx);
+        if (settings.enabled !== true) {
+          throw new ExternalAuthError('register_disabled', settings.message || '本次活动的自助注册未开放');
+        }
+        const batch = normalizeBatchId(settings.batch_id);
         await tx.run(
           'INSERT INTO users(userid, name, source, phone) VALUES(?, ?, ?, ?)',
           [userid, realName, EXTERNAL_SOURCE, phoneNumber],
@@ -209,8 +217,8 @@ export async function registerExternalAccount(db, { name, phone, password, batch
            VALUES(?, ?, ?, ?, ?, ?)`,
           [userid, phoneNumber, realName, credentials.hash, credentials.salt, batch],
         );
+        return { userid, name: realName, phone: phoneNumber, batch_id: batch };
       });
-      return { userid, name: realName, phone: phoneNumber, batch_id: batch };
     } catch (err) {
       if (isUniqueViolation(err) || isForeignKeyViolation(err)) {
         const duplicated = await db.get('SELECT userid FROM users WHERE phone = ? LIMIT 1', [phoneNumber]);

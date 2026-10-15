@@ -66,7 +66,7 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     userByPhone,
     users: new Map(account ? [[account.userid, { source: 'external' }]] : []),
     sessionVersion: 0,
-    externalLoginSettings: null,
+    externalLoginSettings: { enabled: true, batch_id: '活动A' },
     inserts: [],
     updates: [],
     queries: [],
@@ -107,6 +107,7 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
       if (sql.includes('FROM user_dingtalk_profiles')) return dingtalkUser;
       if (sql.includes('FROM external_accounts')) return state.account;
       if (sql.includes('FROM users WHERE phone')) return userByPhone;
+      if (sql.includes('SELECT userid FROM users')) return state.users.has(params[0]) ? { userid: params[0] } : null;
       return null;
     },
     async run(sql, params = []) {
@@ -129,6 +130,7 @@ function createFakeDb({ account = null, dingtalkUser = null, userByPhone = null 
     async all() {
       return [];
     },
+    async exec(sql, params = []) { state.queries.push({ sql, params }); },
     async transaction(fn) {
       return await fn(db);
     },
@@ -229,13 +231,42 @@ test('注册命中钉钉在册员工时拒绝建号并提示改用钉钉登录',
   assert.equal(db.state.inserts.length, 0);
 });
 
+test('注册锁内复核开关与批次，关闭期间未提交的注册不会留号', async () => {
+  for (const enabled of [false, true]) {
+    const db = createFakeDb();
+    let reachedTransaction;
+    const reached = new Promise((resolve) => { reachedTransaction = resolve; });
+    let release;
+    const proceed = new Promise((resolve) => { release = resolve; });
+    const originalExec = db.exec;
+    db.exec = async (sql, params) => {
+      if (sql.includes('pg_advisory_xact_lock')) {
+        reachedTransaction();
+        await proceed;
+      }
+      return originalExec(sql, params);
+    };
+    const pending = registerExternalAccount(db, { name: '并发注册', phone: '13800000009', password: '123' });
+    const result = pending.then((account) => ({ account }), (error) => ({ error }));
+    await reached;
+    db.state.externalLoginSettings = { enabled, batch_id: '新批次' };
+    release();
+    const outcome = await result;
+    if (enabled) {
+      assert.equal(outcome.account.batch_id, '新批次', '不能使用哈希前的旧批次');
+    } else {
+      assertAuthError(outcome.error, 'register_disabled');
+      assert.equal(db.state.inserts.length, 0, '锁内关闭后不得写入账号');
+    }
+  }
+});
+
 test('注册写入 users/accounts/external_accounts 三张表，落库不含明文密码', async () => {
   const db = createFakeDb();
   const account = await registerExternalAccount(db, {
     name: ' 王五 ',
     phone: '+8613800000001',
     password: '123',
-    batchId: '活动A',
   });
 
   assert.ok(isExternalUserid(account.userid));
@@ -426,13 +457,22 @@ test('外部旧 Cookie 在停用或清理后被所有会话入口拒绝，且不
 
 test('业务 ensureAccount 不创建用户，只有可信初始化允许创建', async () => {
   const writes = [];
+  let existingUser = false;
   const db = {
-    async get() { return null; },
+    async get(sql) {
+      if (sql.includes('FROM users') && existingUser) return { userid: 'existing_employee' };
+      if (sql.includes('SELECT balance')) return { balance: 0 };
+      return null;
+    },
     async run(sql, params) { writes.push({ sql, params }); return { changes: 1 }; },
   };
   await assert.rejects(() => ensureAccount(db, { userid: 'deleted_external' }), /unauthorized/);
   await assert.rejects(() => grantBob(db, { userid: 'deleted_external', amount: 1 }), /unauthorized/);
   assert.deepEqual(writes, [], '业务请求不得重建用户或账户');
+  existingUser = true;
+  assert.equal(await getBalance(db, { userid: 'existing_employee' }), 0);
+  assert.ok(writes.some(({ sql }) => /INTO accounts[\s\S]*SELECT userid, 0 FROM users/.test(sql)));
+  assert.equal(writes.some(({ sql }) => sql.includes('INTO users')), false, '已有用户只补账户');
   await ensureAccount(db, { userid: 'ext_employee', createUser: true });
   assert.ok(writes.some(({ sql }) => sql.includes('INTO users')));
   assert.ok(writes.some(({ sql }) => sql.includes('INTO accounts')));
@@ -447,6 +487,7 @@ test('可信单笔/批量发币可初始化新钉钉员工，但不重建已清�
     async get(sql, params) {
       const uid = params[0];
       if (sql.includes('FROM system_settings')) return { value: JSON.stringify({ enabled: false }) };
+      if (sql.includes('SELECT userid FROM users')) return users.has(uid) ? { userid: uid } : null;
       if (sql.includes('FROM users')) {
         const user = users.get(uid);
         if (purgeOnLookup && user?.source === 'external') {
@@ -718,6 +759,9 @@ test('批次清理在事务锁后选目标，授权先提交的管理员不进�
     assert.match(block, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
   }
   assert.match(backupRoutesSource, /const report = await runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
+  const settingsSource = readFileSync(fileURLToPath(new URL('../../src/routes/admin/settingsRoutes.js', import.meta.url)), 'utf8');
+  const saveSettings = settingsSource.slice(settingsSource.indexOf("router.post('/settings/external-login',")).split('\n  router.')[0];
+  assert.match(saveSettings, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
 });
 
 test('登录页手机号去除支持的前缀与分隔符，但不截坏非法号码', () => {
