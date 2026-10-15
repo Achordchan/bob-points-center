@@ -689,6 +689,59 @@ const components = {
       },
       required: ['userid'],
     },
+    AdminExternalPurgeResponse: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean' },
+        batch_id: { type: 'string' },
+        deleted: { type: 'integer', description: '被删除的外部账号数量' },
+        counts: { type: 'object', additionalProperties: true },
+      },
+      required: ['ok', 'batch_id', 'deleted', 'counts'],
+    },
+    ExtAuthLoginRequest: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        phone: { type: 'string', description: '大陆手机号，容忍空格/连字符/+86 前缀', example: '13800000000' },
+        password: { type: 'string', description: '注册时设置的密码（允许弱口令，连续 5 次失败锁定 10 分钟）' },
+      },
+      required: ['phone', 'password'],
+    },
+    ExtAuthRegisterRequest: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 2, maxLength: 20, description: '真实姓名，用于现场核销核对' },
+        phone: { type: 'string', description: '手机号，作为唯一登录账号；已绑定钉钉在册员工时引导使用钉钉登录' },
+        password: { type: 'string', minLength: 3, maxLength: 64 },
+        consent: { type: 'boolean', enum: [true], description: '必须显式同意个人信息收集告知' },
+      },
+      required: ['name', 'phone', 'password', 'consent'],
+    },
+    ExtAuthSessionResponse: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean' },
+        userid: { type: 'string', description: '外部账号 userid，前缀 ext_' },
+        name: { type: 'string' },
+      },
+      required: ['ok', 'userid'],
+    },
+    ExtAuthStatusResponse: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean' },
+        register_enabled: { type: 'boolean', description: '后台是否开放外部自助注册（默认关闭）' },
+        site_enabled: { type: 'boolean' },
+        message: { type: 'string', description: '注册关闭时的提示文案' },
+        site_message: { type: 'string', description: '站点维护提示文案' },
+      },
+      required: ['ok', 'register_enabled', 'site_enabled'],
+    },
     WebAuthResponse: {
       type: 'object',
       additionalProperties: true,

@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
   userid TEXT NOT NULL UNIQUE,
   name TEXT,
   is_admin INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'dingtalk',
+  phone TEXT,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr})
 );
 
@@ -458,6 +460,25 @@ CREATE TABLE IF NOT EXISTS attendance_reward_records (
 );
 CREATE INDEX IF NOT EXISTS idx_attendance_reward_records_work_date_status ON attendance_reward_records(work_date, status, userid);
 CREATE INDEX IF NOT EXISTS idx_attendance_reward_records_user_work_date ON attendance_reward_records(userid, work_date, check_time_ms DESC);
+
+-- 对外活动外部账号：仅存密码凭据，业务数据仍走 users/accounts/ledger。
+CREATE TABLE IF NOT EXISTS external_accounts (
+  id BIGSERIAL PRIMARY KEY,
+  userid TEXT NOT NULL UNIQUE,
+  phone TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  batch_id TEXT NOT NULL DEFAULT '',
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  locked_until BIGINT,
+  last_login_at BIGINT,
+  created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  updated_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_external_accounts_batch ON external_accounts(batch_id, created_at DESC);
 `;
 
 function resolvePgConfig(input) {
@@ -740,6 +761,14 @@ export async function initDb(input) {
   const db = new PgDb(pool);
   await db.get('SELECT 1');
   await db.exec(schemaSql);
+  await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'dingtalk'");
+  await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
+  // 手机号唯一：外部账号一人一号；钉钉侧不上报手机号，历史数据保持 NULL。
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone) WHERE phone IS NOT NULL AND phone <> ''");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_users_source_created ON users(source, created_at DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_external_accounts_batch ON external_accounts(batch_id, created_at DESC)");
+  await db.exec("ALTER TABLE external_accounts ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT ''");
+  await db.exec("ALTER TABLE external_accounts ADD COLUMN IF NOT EXISTS locked_until BIGINT");
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS cdk_enabled INTEGER NOT NULL DEFAULT 0");
   await db.exec("ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS limit_round INTEGER NOT NULL DEFAULT 1");
   await db.exec("ALTER TABLE mall_opening_schedule ADD COLUMN IF NOT EXISTS close_notify_for_close_at BIGINT");

@@ -4,16 +4,21 @@ import {
   applyDingtalkConnectionSettings,
   getAttendanceRewardSettings,
   getDingtalkConnectionSettings,
+  getExternalLoginSettings,
   getGroupCardSettings,
   getNotifySettings,
   getSiteVisibilitySettings,
   saveAttendanceRewardSettings,
   saveDingtalkConnectionSettings,
+  saveExternalLoginSettings,
   saveSiteVisibilitySettings,
   toPublicDingtalkConnectionSettings,
   saveGroupCardSettings,
   saveNotifySettings,
 } from '../../services/systemSettings.js';
+import { deleteUsersCompletely } from '../../services/userDataPurgeService.js';
+import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
+import { runInTransaction } from './shared.js';
 import { getAttendanceRewardDailySummary, getAttendanceRewardDayDetail, reconcileAttendanceRewards } from '../../services/attendanceRewardService.js';
 import { getUserName, sendOrQueueNotify } from '../../services/notifyOpsService.js';
 import { toBool } from '../../services/notifyOpsService.js';
@@ -580,5 +585,103 @@ export function registerAdminSettingsRoutes(router) {
     }
   });
 
+  // 对外活动外部账号：注册开关、批次统计与活动结束后的批量清理。
+  router.get('/settings/external-login', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const settings = await getExternalLoginSettings(db);
+      const summary = await db.get(
+        `SELECT COUNT(1) AS total,
+                SUM(CASE WHEN COALESCE(status, 'active') = 'active' THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN last_login_at IS NOT NULL THEN 1 ELSE 0 END) AS logged_in
+           FROM external_accounts`,
+      );
+      const batches = await db.all(
+        `SELECT COALESCE(batch_id, '') AS batch_id, COUNT(1) AS count,
+                MIN(created_at) AS first_at, MAX(created_at) AS last_at
+           FROM external_accounts
+          GROUP BY COALESCE(batch_id, '')
+          ORDER BY MAX(created_at) DESC NULLS LAST
+          LIMIT 50`,
+      );
+      return res.json({
+        ok: true,
+        data: {
+          settings,
+          summary: {
+            total: Number(summary?.total || 0),
+            active: Number(summary?.active || 0),
+            logged_in: Number(summary?.logged_in || 0),
+          },
+          batches: batches || [],
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  router.post('/settings/external-login', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const data = await saveExternalLoginSettings(db, {
+        enabled: req.body?.enabled,
+        batch_id: req.body?.batch_id,
+        message: req.body?.message,
+      });
+      return res.json({ ok: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  // 活动结束后按批次清理外部账号（连带清除其流水/订单/竞拍等业务数据）。
+  // 需要显式 confirm=DELETE 二次确认；管理员账号不会被清理。
+  router.post('/settings/external-login/purge', requireAdminSession(), async (req, res) => {
+    const db = req.app?.locals?.db;
+    const cfg = req.app?.locals?.cfg;
+    const batchId = req.body?.batch_id === undefined || req.body?.batch_id === null
+      ? ''
+      : String(req.body.batch_id).trim();
+    const confirm = String(req.body?.confirm || '').trim().toUpperCase();
+    if (confirm !== 'DELETE') {
+      return res.status(400).json({ error: 'confirmation_required', message: '请输入 DELETE 以确认清理' });
+    }
+
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const protectUserids = (Array.isArray(cfg?.adminUserids) ? cfg.adminUserids : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean);
+      const rows = await db.all(
+        `SELECT a.userid
+           FROM external_accounts a
+           JOIN users u ON u.userid = a.userid
+          WHERE COALESCE(a.batch_id, '') = ?
+            AND COALESCE(u.is_admin, 0) = 0
+          ORDER BY a.userid`,
+        [batchId],
+      );
+      const userids = (rows || []).map((row) => String(row.userid || '')).filter(Boolean);
+      if (!userids.length) {
+        return res.json({ ok: true, batch_id: batchId, deleted: 0, counts: {} });
+      }
+      const result = await runInTransaction(db, async (tx) => deleteUsersCompletely(tx, userids, { protectUserids }));
+      if (Number(result?.deleted_users || 0) > 0) {
+        publishMallRealtimeEvent('balance_changed', { reason: 'external_purge' });
+        publishMallRealtimeEvent('charity_changed', { reason: 'external_purge' });
+      }
+      return res.json({
+        ok: true,
+        batch_id: batchId,
+        deleted: result?.deleted_users ?? 0,
+        counts: result?.counts || {},
+      });
+    } catch (err) {
+      return res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
 
 }

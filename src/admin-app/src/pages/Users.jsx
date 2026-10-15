@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Avatar, Button, Card, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag } from 'antd';
+import { Alert, App, Avatar, Button, Card, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, Typography } from 'antd';
 import { api, qs, translateErrorMessage } from '../api.js';
 import DataToolbar from '../components/DataToolbar.jsx';
 import { amountText, formatTs, orderAmount } from '../utils.js';
@@ -69,6 +69,8 @@ export default function Users({ me }) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(30);
   const [keyword, setKeyword] = useState('');
+  // 来源筛选：区分钉钉员工与对外活动外部账号（外部账号可整批清理）。
+  const [source, setSource] = useState('');
   const [selected, setSelected] = useState([]);
   const [selectedUsers, setSelectedUsers] = useState({});
   const [detail, setDetail] = useState(null);
@@ -98,7 +100,7 @@ export default function Users({ me }) {
   const load = async (nextPage = page, nextKeyword = keyword, nextPageSize = pageSize) => {
     setLoading(true);
     try {
-      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: nextPageSize, keyword: normalizeKeyword(nextKeyword) })}`);
+      const data = await api(`/admin/users?${qs({ page: nextPage, pageSize: nextPageSize, keyword: normalizeKeyword(nextKeyword), source })}`);
       const nextRows = data.data || [];
       setRows(nextRows);
       setSelectedUsers((prev) => {
@@ -121,7 +123,7 @@ export default function Users({ me }) {
       load(1, keyword).catch((e) => message.error(e.message));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [keyword]);
+  }, [keyword, source]);
 
   useEffect(() => {
     if (!canAssignRole) return;
@@ -343,6 +345,14 @@ export default function Users({ me }) {
   const columns = [
     { title: '姓名', dataIndex: 'name', render: (v, r) => <Button type="link" onClick={() => openDetail(r.userid)}>{v || '-'}</Button> },
     { title: 'Userid', dataIndex: 'userid', ellipsis: true },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      width: 150,
+      render: (v, r) => (v === 'external'
+        ? <Space size={4} wrap><Tag color="purple">外部活动</Tag>{r.phone ? <Typography.Text type="secondary">{r.phone}</Typography.Text> : null}</Space>
+        : <Tag>钉钉</Tag>),
+    },
     { title: '余额', dataIndex: 'balance', render: amountText, sorter: (a, b) => Number(a.balance) - Number(b.balance) },
     { title: '身份', render: (_, r) => r.is_fixed_admin ? <Tag color="gold">超级管理员</Tag> : (r.role?.name ? <Tag color="blue">{r.role.name}</Tag> : <Tag>普通用户</Tag>) },
     { title: '更新时间', dataIndex: 'updated_at', render: formatTs },
@@ -352,6 +362,14 @@ export default function Users({ me }) {
   return (
     <Card>
       <DataToolbar keyword={keyword} onKeyword={setKeyword} onRefresh={() => load(1, keyword)} searchPlaceholder="搜索姓名 / Userid">
+        <Select
+          allowClear
+          placeholder="来源"
+          style={{ minWidth: 130 }}
+          value={source || undefined}
+          onChange={(value) => setSource(value || '')}
+          options={[{ value: 'dingtalk', label: '钉钉员工' }, { value: 'external', label: '外部活动账号' }]}
+        />
         {canEdit && <Button onClick={() => api('/admin/users/sync', { method: 'POST', body: {} }).then(() => { message.success('通讯录同步完成'); load(1, keyword); })}>同步通讯录</Button>}
         {selected.length > 0 && <Tag color="blue">已选 {selected.length} 人</Tag>}
         <Button onClick={selectAllMatchedUsers}>全选当前搜索结果</Button>

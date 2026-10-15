@@ -168,6 +168,9 @@ export function matchPathPermission(method, path) {
   }
   if (p.startsWith('/image-optimization/upload')) return ['integrations:edit', 'commerce:edit', 'activities:edit', 'content:edit'];
   if (p.startsWith('/resources')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
+  // 外部活动账号：清理会连带删除业务数据，仅超级管理员可执行。
+  if (p.startsWith('/settings/external-login/purge')) return 'super';
+  if (p.startsWith('/settings/external-login')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/site-visibility') || p.startsWith('/settings/image-optimization') || p.startsWith('/settings/dingtalk') || p.startsWith('/image-optimization') || p.startsWith('/bob-token')) return m === 'GET' ? 'integrations:view' : 'integrations:edit';
   if (p.startsWith('/backup/export')) return 'integrations:export';
   if (p.startsWith('/backup/history') && p.includes('/download')) return 'integrations:export'; // full 另在 handler 校验 super

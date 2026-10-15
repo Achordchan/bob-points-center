@@ -639,6 +639,7 @@ export function mallRouter() {
         `SELECT u.userid, COALESCE(u.name, '') AS name
          FROM users u
          WHERE (LOWER(COALESCE(u.name, '')) LIKE LOWER(?) OR LOWER(u.userid) LIKE LOWER(?))
+           AND COALESCE(u.source, 'dingtalk') <> 'external'
          ORDER BY (u.name IS NULL), u.name COLLATE NOCASE, u.userid COLLATE NOCASE
          LIMIT ?`,
         [kw, kw, limit],
@@ -667,6 +668,7 @@ export function mallRouter() {
          FROM accounts a
          LEFT JOIN users u ON u.userid = a.userid
          WHERE a.userid IS NOT NULL AND trim(a.userid) <> ''
+           AND COALESCE(u.source, 'dingtalk') <> 'external'
          ORDER BY a.balance DESC, a.userid COLLATE NOCASE ASC
          LIMIT ?`,
         [limit],

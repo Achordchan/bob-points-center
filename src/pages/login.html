@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>BOB币 · 活动登录</title>
+    <link rel="icon" type="image/png" href="/assets/favicon.png" />
+    <link rel="stylesheet" href="/assets/base.css" />
+    <link rel="stylesheet" href="/assets/login.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="card" aria-label="BOB币活动登录">
+        <header class="brand">
+          <div class="brand-badge">BOB</div>
+          <div class="brand-text">
+            <h1>BOB 币活动中心</h1>
+            <p>注册后即可参与现场活动与商城兑换</p>
+          </div>
+        </header>
+
+        <div class="notice hidden" id="siteNotice" role="alert"></div>
+
+        <nav class="tabs" id="tabs" role="tablist">
+          <button type="button" class="tab is-active" id="tabLogin" data-tab="login" role="tab">登录</button>
+          <button type="button" class="tab" id="tabRegister" data-tab="register" role="tab">注册</button>
+        </nav>
+
+        <form class="form" id="formLogin" autocomplete="on">
+          <label for="loginPhone">手机号</label>
+          <input id="loginPhone" name="phone" type="tel" inputmode="numeric" autocomplete="username"
+                 maxlength="11" placeholder="请输入注册时使用的手机号" required />
+          <label for="loginPassword">密码</label>
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password"
+                 maxlength="64" placeholder="请输入密码" required />
+          <button type="submit" id="btnLogin" class="primary">登录</button>
+        </form>
+
+        <form class="form hidden" id="formRegister" autocomplete="on">
+          <label for="regName">真实姓名</label>
+          <input id="regName" name="name" type="text" autocomplete="name" maxlength="20"
+                 placeholder="用于现场领取核对，请填写真实姓名" required />
+          <label for="regPhone">手机号</label>
+          <input id="regPhone" name="phone" type="tel" inputmode="numeric" autocomplete="tel"
+                 maxlength="11" placeholder="手机号将作为登录账号" required />
+          <label for="regPassword">设置密码</label>
+          <input id="regPassword" name="password" type="password" autocomplete="new-password"
+                 maxlength="64" placeholder="至少 3 位，例如 123" required />
+          <label class="consent">
+            <input type="checkbox" id="regConsent" />
+            <span>我已阅读并同意为参与本次活动收集我的<strong>姓名与手机号</strong>，仅用于活动发币、商城兑换与现场核销的身份核对。</span>
+          </label>
+          <button type="submit" id="btnRegister" class="primary">注册并进入活动</button>
+          <p class="tip" id="registerTip"></p>
+        </form>
+
+        <div class="alert" id="alert" role="alert" hidden></div>
+
+        <section class="dingtalk hidden" id="dingtalkCard">
+          <div class="dingtalk-head">
+            <span class="chip chip-info">企业员工</span>
+            <strong>该手机号已绑定企业钉钉账号</strong>
+          </div>
+          <p id="dingtalkHint">请使用钉钉登录，避免重复注册两套账号。</p>
+          <a class="dingtalk-btn" id="btnDingtalk" href="#">使用钉钉登录</a>
+        </section>
+
+        <footer class="footer">
+          <span>企业员工？</span>
+          <a id="dingtalkLink" href="#">使用钉钉登录</a>
+        </footer>
+      </section>
+    </main>
+
+    <script src="/assets/login.js"></script>
+  </body>
+</html>

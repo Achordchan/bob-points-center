@@ -1794,15 +1794,25 @@ export function adminRouter() {
         }
       }
 
+      // 来源筛选：区分钉钉员工与对外活动外部账号（按批次清理外部账号时使用）。
+      const sourceFilter = String(req.query.source || '').trim().toLowerCase();
+      if (sourceFilter === 'external' || sourceFilter === 'dingtalk') {
+        where.push("COALESCE(u.source, 'dingtalk') = ?");
+        params.push(sourceFilter);
+      }
+
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const totalRow = await db.get(`SELECT COUNT(1) AS c FROM users u ${whereSql}`, params);
       const total = Number(totalRow?.c) || 0;
 
       const rows = await db.all(
-        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(a.balance, 0) AS balance, a.updated_at,
+        `SELECT u.userid, u.name, u.is_admin, u.created_at, COALESCE(u.source, 'dingtalk') AS source,
+                u.phone, COALESCE(a.balance, 0) AS balance, a.updated_at,
+                ea.batch_id, ea.last_login_at, ea.status AS external_status,
                 r.id AS role_id, r.name AS role_name, r.is_enabled AS role_enabled
          FROM users u
          LEFT JOIN accounts a ON a.userid = u.userid
+         LEFT JOIN external_accounts ea ON ea.userid = u.userid
          LEFT JOIN admin_user_roles ur ON ur.userid = u.userid
          LEFT JOIN admin_roles r ON r.id = ur.role_id
          ${whereSql}
