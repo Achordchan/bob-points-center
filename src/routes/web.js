@@ -76,7 +76,7 @@ async function establishWebSession(req, res, userid) {
   const finalUserid = String(profile.userid);
   const finalName = profile?.name ? String(profile.name) : '';
   const finalAvatar = profile?.avatar ? String(profile.avatar) : '';
-  await ensureAccount(db, { userid: finalUserid, name: finalName });
+  await ensureAccount(db, { userid: finalUserid, name: finalName, createUser: true });
 
   await refreshSessionGlobalVersion(db, cfg, { force: true, throwOnError: true });
   const sessionSecret = webSessionSigningSecret(cfg);

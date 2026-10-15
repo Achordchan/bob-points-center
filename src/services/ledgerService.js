@@ -52,7 +52,7 @@ function withDisplayReason(row = {}) {
   };
 }
 
-export async function ensureAccount(db, { userid, name }) {
+export async function ensureAccount(db, { userid, name, createUser = false }) {
   const uid = userid === null || userid === undefined ? '' : String(userid).trim();
   if (!uid) {
     throw new Error('missing userid');
@@ -61,10 +61,19 @@ export async function ensureAccount(db, { userid, name }) {
   // Do not persist userid placeholders as the user's canonical name.
   const displayName = rawDisplayName && rawDisplayName !== uid ? rawDisplayName : '';
 
-  await db.run(
-    'INSERT OR IGNORE INTO users(userid, name) VALUES(?, ?)',
-    [uid, null],
-  );
+  // 只有可信的钉钉资料入库能创建用户；业务请求不得复活已被清理的用户。
+  if (createUser) {
+    await db.run(
+      'INSERT OR IGNORE INTO users(userid, name) VALUES(?, ?)',
+      [uid, null],
+    );
+  } else {
+    const account = await db.get(
+      'SELECT userid FROM accounts WHERE userid = ? LIMIT 1',
+      [uid],
+    );
+    if (!account) throw new Error('unauthorized');
+  }
 
   if (displayName) {
     await db.run(
@@ -73,10 +82,12 @@ export async function ensureAccount(db, { userid, name }) {
     );
   }
 
-  await db.run(
-    'INSERT OR IGNORE INTO accounts(userid, balance) VALUES(?, 0)',
-    [uid],
-  );
+  if (createUser) {
+    await db.run(
+      'INSERT OR IGNORE INTO accounts(userid, balance) VALUES(?, 0)',
+      [uid],
+    );
+  }
 }
 
 export async function getBalance(db, { userid, name }) {

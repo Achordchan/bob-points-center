@@ -99,7 +99,7 @@ function inTransaction(db, fn) {
 
 // 写入/更新 users、accounts 与 user_dingtalk_profiles；全量同步、通讯录事件、登录/打卡回写共用。
 export async function upsertDingtalkUserProfile(tx, u) {
-  await ensureAccount(tx, { userid: u.userid, name: u.name });
+  await ensureAccount(tx, { userid: u.userid, name: u.name, createUser: true });
   await tx.exec(
     `INSERT INTO user_dingtalk_profiles(
       userid, unionid, name, avatar, mobile, telephone, email, org_email, title, job_number, work_place, remark,

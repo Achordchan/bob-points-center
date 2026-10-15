@@ -9,6 +9,7 @@ import { webRouter } from '../../src/routes/web.js';
 import { mallRouter } from '../../src/routes/mall.js';
 import { ledgerRouter } from '../../src/routes/ledger.js';
 import { redeemRouter } from '../../src/routes/redeem.js';
+import { ensureAccount, getBalance, grantBob } from '../../src/services/ledgerService.js';
 
 import {
   authenticateExternalAccount,
@@ -419,6 +420,61 @@ test('外部旧 Cookie 在停用或清理后被所有会话入口拒绝，且不
     return get(sql, params);
   };
   assert.equal(await request('/web/me'), 500, '账号状态读取失败时不得放行');
+});
+
+test('业务 ensureAccount 不创建用户，只有可信初始化允许创建', async () => {
+  const writes = [];
+  const db = {
+    async get() { return null; },
+    async run(sql, params) { writes.push({ sql, params }); return { changes: 1 }; },
+  };
+  await assert.rejects(() => ensureAccount(db, { userid: 'deleted_external' }), /unauthorized/);
+  await assert.rejects(() => grantBob(db, { userid: 'deleted_external', amount: 1 }), /unauthorized/);
+  assert.deepEqual(writes, [], '业务请求不得重建用户或账户');
+  await ensureAccount(db, { userid: 'ext_employee', createUser: true });
+  assert.ok(writes.some(({ sql }) => sql.includes('INTO users')));
+  assert.ok(writes.some(({ sql }) => sql.includes('INTO accounts')));
+});
+
+test('已通过认证的账本请求与清理交错时，返回 401 且不复活用户', async (t) => {
+  const db = createFakeDb({ account: { userid: 'race_external', status: 'active' } });
+  let notifyValidated;
+  const validated = new Promise((resolve) => { notifyValidated = resolve; });
+  let continueRequest;
+  const resume = new Promise((resolve) => { continueRequest = resolve; });
+  const get = db.get;
+  db.get = async (sql, params) => {
+    const row = await get(sql, params);
+    if (sql.includes('LEFT JOIN external_accounts')) {
+      notifyValidated();
+      await resume;
+    }
+    return row;
+  };
+  const cfg = { webSessionSecret: 'purge-race-test', sessionGlobalVersion: 0 };
+  const app = express();
+  app.locals.db = db;
+  app.locals.cfg = cfg;
+  app.use('/ledger', ledgerRouter());
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  t.after(() => {
+    continueRequest();
+    return new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  });
+  const cookie = `bob_web_session=${createWebSessionToken(cfg.webSessionSecret, { userid: 'race_external', sv: 0 }, 3600)}`;
+  const pending = fetch(`http://127.0.0.1:${server.address().port}/ledger/balance`, { headers: { Cookie: cookie } });
+  await validated;
+  db.state.users.clear();
+  db.state.account = null;
+  continueRequest();
+  const response = await pending;
+  await response.text();
+  assert.equal(response.status, 401);
+  assert.equal(db.state.users.size, 0);
+  assert.equal(db.state.inserts.length, 0);
+  await assert.rejects(() => getBalance(db, { userid: 'race_external' }), /unauthorized/);
 });
 
 test('注册与登录签发前强制刷新会话版本，新 Cookie 可立即使用且刷新失败不签发', async (t) => {

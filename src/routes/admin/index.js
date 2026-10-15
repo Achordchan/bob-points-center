@@ -986,7 +986,7 @@ export function adminRouter() {
       const cached = await db.get('SELECT name FROM users WHERE userid = ?', [userid]);
       const cachedName = cached?.name ? String(cached.name) : '';
       const profile = cachedName ? { userid, name: cachedName } : await getUserProfile(cfg, userid);
-      await ensureAccount(db, { userid: profile.userid, name: profile.name });
+      await ensureAccount(db, { userid: profile.userid, name: profile.name, createUser: true });
 
       if (!(await isAdmin(db, cfg, profile.userid))) {
         safeAppendAuditLog(db, {
@@ -1735,7 +1735,7 @@ export function adminRouter() {
       const cachedName = cached?.name ? String(cached.name) : '';
       const profile = cachedName ? { userid, name: cachedName } : await getUserProfile(cfg, userid);
 
-      await ensureAccount(db, { userid: profile.userid, name: profile.name });
+      await ensureAccount(db, { userid: profile.userid, name: profile.name, createUser: true });
 
       if (!(await isAdmin(db, cfg, profile.userid))) {
         return res.status(403).json({ error: 'forbidden', userid: profile.userid, name: profile.name });

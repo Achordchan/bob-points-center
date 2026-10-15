@@ -88,7 +88,8 @@ export function ledgerRouter() {
       const balance = await getBalance(db, { userid });
       return res.json({ userid, balance });
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === 'unauthorized' ? 401 : 500).json({ error: message });
     }
   });
 
@@ -102,7 +103,8 @@ export function ledgerRouter() {
       const result = await listLedgerRecords(db, { userid, page, pageSize });
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === 'unauthorized' ? 401 : 500).json({ error: message });
     }
   });
 
