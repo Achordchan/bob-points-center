@@ -10,6 +10,7 @@ import { requireAnnouncementAccess } from '../middleware/requireAnnouncementAcce
 import { createRedeemOrderInTx } from '../services/redeemService.js';
 import { ensureAccount, listLedgerRecords, transferBob } from '../services/ledgerService.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
+import { isExternalUser } from '../services/externalAccountService.js';
 import { notifyGroupInteractiveCardBySettings } from '../services/groupCardNotifyService.js';
 import { getRedeemCdkInfo, previewRedeemCdk, redeemCdk } from '../services/cdkService.js';
 import { contributeToCharity, getCharityProjectDetail, listMallCharityProjects } from '../services/charityService.js';
@@ -635,14 +636,17 @@ export function mallRouter() {
     try {
       res.setHeader('Cache-Control', 'no-store');
       const kw = `%${keyword}%`;
+      // 按会话来源对称隔离：员工只能搜到员工，外部活动用户只能搜到外部活动用户
+      // （转账服务端同样禁止跨来源），避免员工目录对外部用户可见。
+      const viewerIsExternal = await isExternalUser(db, req.webSession?.userid);
       const rows = await db.all(
         `SELECT u.userid, COALESCE(u.name, '') AS name
          FROM users u
          WHERE (LOWER(COALESCE(u.name, '')) LIKE LOWER(?) OR LOWER(u.userid) LIKE LOWER(?))
-           AND COALESCE(u.source, 'dingtalk') <> 'external'
+           AND (COALESCE(u.source, 'dingtalk') = 'external') = ?
          ORDER BY (u.name IS NULL), u.name COLLATE NOCASE, u.userid COLLATE NOCASE
          LIMIT ?`,
-        [kw, kw, limit],
+        [kw, kw, viewerIsExternal, limit],
       );
       const selfId = req.webSession?.userid ? String(req.webSession.userid) : '';
       const data = (rows || [])
@@ -663,6 +667,10 @@ export function mallRouter() {
     const limit = Math.min(100, Math.max(1, toOptionalInt(req.query?.limit) || 50));
     try {
       res.setHeader('Cache-Control', 'no-store');
+      // 外部活动用户看不到员工资产排行；榜单本身也不收录外部用户。
+      if (await isExternalUser(db, req.webSession?.userid)) {
+        return res.json({ ok: true, limit, count: 0, data: [] });
+      }
       const rows = await db.all(
         `SELECT a.userid, COALESCE(a.balance, 0) AS balance, COALESCE(u.name, '') AS name
          FROM accounts a
@@ -788,9 +796,12 @@ export function mallRouter() {
         db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NULL AND (exchange_id LIKE 'MALL_%' OR exchange_id LIKE 'AUCTION_%')", [userid]),
         db.get("SELECT COUNT(1) AS cnt FROM redeems WHERE userid = ? AND fulfilled_at IS NOT NULL AND (exchange_id LIKE 'MALL_%' OR exchange_id LIKE 'AUCTION_%')", [userid]),
         db.get(
+          // 名次与富豪榜口径一致：只在非外部账号里排，外部账号不上榜，名次为空。
           `SELECT rank FROM (
-             SELECT userid, ROW_NUMBER() OVER (ORDER BY balance DESC, userid COLLATE NOCASE ASC) AS rank
-             FROM accounts
+             SELECT a.userid, ROW_NUMBER() OVER (ORDER BY a.balance DESC, a.userid COLLATE NOCASE ASC) AS rank
+             FROM accounts a
+             LEFT JOIN users u ON u.userid = a.userid
+             WHERE COALESCE(u.source, 'dingtalk') <> 'external'
            ) t
            WHERE userid = ?
            LIMIT 1`,

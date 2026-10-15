@@ -149,6 +149,7 @@ export function matchPathPermission(method, path) {
   if (p.startsWith('/dashboard') || p.startsWith('/system/info')) return 'dashboard:view';
   if (p.startsWith('/users/assign-role') || p.startsWith('/roles') || p.startsWith('/permissions')) return 'super';
   if (p.startsWith('/users/set-admin')) return 'super';
+  if (p.startsWith('/users/external')) return 'users:edit';
   if (p.startsWith('/users/sync')) return 'users:edit';
   if (p.startsWith('/users/notify')) return 'messages:edit';
   if (p.startsWith('/users/delete') || p.startsWith('/data/reset-user') || p.startsWith('/data/reset-all')) return 'super';

@@ -1,5 +1,8 @@
 import { notifyUserPrivateText, sendRobotPrivateText } from './robotNotifyService.js';
 import { getNotifySettings } from './systemSettings.js';
+import { isExternalUser } from './externalAccountService.js';
+
+export const EXTERNAL_NOTIFY_SKIPPED = 'external_user_no_dingtalk';
 
 export function toBool(value) {
   if (value === true) return true;
@@ -45,6 +48,10 @@ export async function sendOrQueueNotify({
   event,
   variables,
 }) {
+  // 外部活动账号没有钉钉身份，私聊必然发不出去：直接跳过，避免占用全局串行队列和产生无效请求。
+  if (await isExternalUser(db, userid)) {
+    return { ok: false, skipped: true, error: EXTERNAL_NOTIFY_SKIPPED };
+  }
   const settings = await getNotifySettings(db);
   if (settings?.enabled === false) {
     return { ok: false, error: 'notify_disabled' };

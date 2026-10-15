@@ -279,7 +279,7 @@ function Auctions({ me }) {
       width={640}
       destroyOnClose
     >
-      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="员工出价即冻结 BOB 币；被他人超出自动退回；结束后最高出价人竞得，冻结金额转为成交扣款。" />
+      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="用户出价即冻结 BOB 币；被他人超出自动退回；结束后最高出价人竞得，冻结金额转为成交扣款。" />
       <Form form={form} layout="vertical" onFinish={submitCreate}>
         <Form.Item name="title" label="竞拍标题" rules={[{ required: true, whitespace: true, message: '请输入标题' }, { max: 80, message: '标题最多 80 字' }]}>
           <Input placeholder="如：限量周边礼盒" readOnly={!canEdit} />
@@ -350,7 +350,7 @@ function Auctions({ me }) {
           { key: 'winner', label: '得主', children: detail.winner_userid ? `${detail.winner_name || '-'} (${detail.winner_userid})` : (detail.status === 'settled' ? '流拍' : '-') },
           { key: 'final', label: '成交价', children: detail.final_price === null || detail.final_price === undefined ? '-' : amountText(detail.final_price) },
           { key: 'settled', label: '结算时间', children: formatTs(detail.settled_at) },
-          { key: 'redeem', label: '领取单号', children: detail.winner_userid ? `AUCTION_${detail.id}（员工端出示核销二维码，扫码即完成发放）` : '-' },
+          { key: 'redeem', label: '领取单号', children: detail.winner_userid ? `AUCTION_${detail.id}（用户端出示核销二维码，扫码即完成发放）` : '-' },
           { key: 'cancel', label: '取消原因', children: detail.cancel_reason || '-' },
           { key: 'created', label: '创建人', span: 2, children: detail.created_name ? `${detail.created_name} (${detail.created_by})` : '-' },
         ]} />

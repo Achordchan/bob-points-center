@@ -203,15 +203,17 @@ export function ledgerRouter() {
       });
     } catch (err) {
       const message = String(err?.message || err);
-      const status = [
-        'missing from userid',
-        'missing to userid',
-        'amount must be positive integer',
-        'cannot transfer to self',
-        'insufficient balance',
-      ].includes(message)
-        ? 400
-        : 500;
+      const status = message === 'transfer_not_allowed_between_sources'
+        ? 403
+        : [
+          'missing from userid',
+          'missing to userid',
+          'amount must be positive integer',
+          'cannot transfer to self',
+          'insufficient balance',
+        ].includes(message)
+          ? 400
+          : 500;
       return res.status(status).json({ error: message });
     }
   });

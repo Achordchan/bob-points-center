@@ -717,7 +717,9 @@ test('注册接口要求显式同意告知且默认关闭（fail-closed）', () 
 test('外部用户不出现在转账搜索与富豪榜', () => {
   const usersQuery = mallRoutesSource.match(/router\.get\('\/users'[\s\S]*?LIMIT \?`,/);
   assert.ok(usersQuery, '未找到 /mall/users 查询');
-  assert.match(usersQuery[0], /COALESCE\(u\.source, 'dingtalk'\) <> 'external'/);
+  // 按会话来源对称隔离：员工只搜到员工，外部用户只搜到外部用户（转账服务端同样禁止跨来源）。
+  assert.match(usersQuery[0], /isExternalUser\(db, req\.webSession\?\.userid\)/);
+  assert.match(usersQuery[0], /\(COALESCE\(u\.source, 'dingtalk'\) = 'external'\) = \?/);
 
   const boardQuery = mallRoutesSource.match(/router\.get\('\/rich-board'[\s\S]*?LIMIT \?`,/);
   assert.ok(boardQuery, '未找到 /mall/rich-board 查询');

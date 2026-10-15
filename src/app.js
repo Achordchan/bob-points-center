@@ -23,7 +23,7 @@ import {
   startDingtalkUserSyncScheduler,
 } from './services/dingtalkUserSyncService.js';
 import { getClientIp, safeAppendAuditLog } from './services/auditLogService.js';
-import { clientIpKey, createRateLimiter } from './middleware/rateLimit.js';
+import { clientIpKey, createRateLimiter, webSessionOrIpKey } from './middleware/rateLimit.js';
 
 export function shouldStartDingtalkStream(cfg) {
   return Boolean(
@@ -63,29 +63,31 @@ export function createApp({ db, cfg } = {}) {
     keyFn: (req) => clientIpKey(req, 'qr'),
     message: '二维码请求过于频繁，请稍后再试',
   });
+  // 以下面向登录用户的限流按账号计数（未登录退回 IP）：活动现场大量用户共用同一出口 IP，
+  // 按 IP 计数会互相误限，尤其是竞拍冲刺和实时推送。
   const feedbackLimiter = createRateLimiter({
     windowMs: 60_000,
     max: 20,
-    keyFn: (req) => clientIpKey(req, 'feedback'),
+    keyFn: (req) => webSessionOrIpKey(req, 'feedback'),
     message: '反馈提交过于频繁，请稍后再试',
   });
   const transferLimiter = createRateLimiter({
     windowMs: 60_000,
     max: 30,
-    keyFn: (req) => clientIpKey(req, 'transfer'),
+    keyFn: (req) => webSessionOrIpKey(req, 'transfer'),
     message: '转账过于频繁，请稍后再试',
   });
   const auctionBidLimiter = createRateLimiter({
     windowMs: 60_000,
-    // 出价高峰集中在活动最后几秒；办公网 NAT 下同 IP 并发更高，阈值宽于转账。
+    // 出价高峰集中在活动最后几秒，阈值宽于转账。
     max: 60,
-    keyFn: (req) => clientIpKey(req, 'auction_bid'),
+    keyFn: (req) => webSessionOrIpKey(req, 'auction_bid'),
     message: '出价过于频繁，请稍后再试',
   });
   const sseLimiter = createRateLimiter({
     windowMs: 60_000,
     max: 60,
-    keyFn: (req) => clientIpKey(req, 'sse'),
+    keyFn: (req) => webSessionOrIpKey(req, 'sse'),
     message: '实时连接请求过于频繁，请稍后再试',
   });
 

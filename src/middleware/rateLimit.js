@@ -1,4 +1,7 @@
 import { resolveClientIp, trustProxyFromReq } from '../utils/clientIp.js';
+import { parseCookies } from '../services/adminSession.js';
+import { verifyWebSessionToken } from '../services/webSession.js';
+import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 
 /**
  * 简易内存固定窗口限流。
@@ -46,4 +49,24 @@ export function createRateLimiter({
 export function clientIpKey(req, suffix = '') {
   const ip = resolveClientIp(req, { trustProxy: trustProxyFromReq(req) }) || 'unknown';
   return suffix ? `${ip}:${suffix}` : ip;
+}
+
+/**
+ * 已登录用户按账号限流，未登录/会话无效时退回按 IP。
+ * 活动现场 WiFi 与运营商 CGNAT 下几百人共用一个出口 IP，按 IP 计数会让整场活动互相误限；
+ * 这里只信任签名校验通过的会话（纯 HMAC，不查库），伪造或过期的 Cookie 仍落在 IP 桶里，
+ * 无法靠换 Cookie 绕过限流。
+ */
+export function webSessionOrIpKey(req, suffix = '') {
+  try {
+    const token = parseCookies(req.header('cookie')).bob_web_session;
+    if (token) {
+      const payload = verifyWebSessionToken(webSessionSigningSecret(req.app?.locals?.cfg), token);
+      const userid = payload?.userid ? String(payload.userid) : '';
+      if (userid) return `user:${userid}${suffix ? `:${suffix}` : ''}`;
+    }
+  } catch {
+    // 会话密钥缺失等异常不应让限流失效，退回 IP。
+  }
+  return clientIpKey(req, suffix);
 }

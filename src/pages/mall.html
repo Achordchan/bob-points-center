@@ -75,7 +75,7 @@
               <button class="goldBtn" id="btnTransfer" disabled type="button">转账</button>
               <button class="goldBtn goldBtnGhost" id="btnWithdraw" disabled type="button">提现</button>
             </div>
-            <div class="help heroHelp">转账支持同事之间互转 BOB 币。</div>
+            <div class="help heroHelp" id="transferHeroHelp">转账支持用户之间互转 BOB 币。</div>
           </div>
 
           <div class="card redPacketCard hidden" id="redPacketCard">
@@ -240,7 +240,7 @@
         <section class="tab hidden" id="tabMarket">
           <div class="sectionHead">
             <div class="sectionTitle">市场与竞拍</div>
-            <div class="help">买卖同事转让的商品，或用 BOB 币竞拍心仪奖品</div>
+            <div class="help">买卖其他用户转让的商品，或用 BOB 币竞拍心仪奖品</div>
           </div>
 
           <div class="marketSubnav" id="marketSubnav">
@@ -341,7 +341,7 @@
               </div>
             </div>
             <div class="richSubnav" id="richSubnav">
-              <button class="segBtn" type="button" data-rich-tab="wealth">大富翁排行榜</button>
+              <button class="segBtn" type="button" id="richTabWealth" data-rich-tab="wealth">大富翁排行榜</button>
               <button class="segBtn" type="button" data-rich-tab="products">热门商品下单榜</button>
             </div>
             <div class="card glass richCard" id="richPanelWealth">
@@ -369,6 +369,10 @@
             <div class="sectionTitle">我的数据</div>
             <div class="moreStats" id="moreStats"></div>
             <div class="error" id="moreStatsErr"></div>
+            <div class="help hidden" id="logoutHelp" style="margin-top:14px;">当前为外部活动账号，退出后需重新输入手机号和密码登录。</div>
+            <div class="row hidden" id="logoutRow" style="margin-top:8px;">
+              <button class="secondary" id="btnLogout" type="button">退出登录</button>
+            </div>
           </div>
 
           <div class="card glass moreCard hidden" id="morePanelVersion">
@@ -648,7 +652,7 @@
         <div class="transferSearch">
           <label for="transferKeyword">收款人姓名</label>
           <input id="transferKeyword" type="text" maxlength="40" placeholder="输入姓名搜索" />
-          <div class="help">会列出匹配的同事，请点击选择</div>
+          <div class="help" id="transferSearchHelp">会列出匹配的其他用户，请点击选择</div>
         </div>
 
         <div class="transferList" id="transferList"></div>
