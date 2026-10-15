@@ -55,21 +55,23 @@ export async function refreshSessionGlobalVersion(db, cfg, { force = false, thro
   if (!force && now - lastSessionVersionRefreshAt < 2000) {
     return normalizeVersion(cfg.sessionGlobalVersion);
   }
-  if (sessionVersionRefreshPromise) return sessionVersionRefreshPromise;
-  sessionVersionRefreshPromise = (async () => {
-    try {
+  if (!sessionVersionRefreshPromise) {
+    sessionVersionRefreshPromise = (async () => {
       const row = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', [SESSION_VERSION_KEY]);
       cfg.sessionGlobalVersion = normalizeVersion(row?.value);
       lastSessionVersionRefreshAt = Date.now();
       return cfg.sessionGlobalVersion;
-    } catch (err) {
-      if (throwOnError) throw err;
-      return normalizeVersion(cfg.sessionGlobalVersion);
-    } finally {
+    })().finally(() => {
       sessionVersionRefreshPromise = null;
-    }
-  })();
-  return sessionVersionRefreshPromise;
+    });
+  }
+  // 共享的只是不吞错的数据库读取；每个调用方独立决定失败时是否回退缓存。
+  try {
+    return await sessionVersionRefreshPromise;
+  } catch (err) {
+    if (throwOnError) throw err;
+    return normalizeVersion(cfg.sessionGlobalVersion);
+  }
 }
 
 export function isSessionVersionValid(payload, cfg) {
