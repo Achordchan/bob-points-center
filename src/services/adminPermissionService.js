@@ -143,7 +143,9 @@ export function hasAdminPermission(access, permission) {
 }
 
 export function matchPathPermission(method, path) {
-  const p = String(path || '');
+  // Express 路由默认大小写不敏感（/users/DELETE 同样会命中 /users/delete 处理器），
+  // 而下面的规则是字面前缀匹配：不统一转小写，换个大小写就会漏过规则落到 /users 的 users:view 兜底。
+  const p = String(path || '').toLowerCase();
   const m = String(method || 'GET').toUpperCase();
   if (p.startsWith('/legacy')) return 'super';
   if (p.startsWith('/dashboard') || p.startsWith('/system/info')) return 'dashboard:view';

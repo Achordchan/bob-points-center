@@ -7,6 +7,7 @@ import { matchPathPermission } from '../../src/services/adminPermissionService.j
 import { webRouter } from '../../src/routes/web.js';
 import { mallRouter } from '../../src/routes/mall.js';
 import { ledgerRouter } from '../../src/routes/ledger.js';
+import { createSessionToken } from '../../src/services/adminSession.js';
 import { createWebSessionToken } from '../../src/services/webSession.js';
 import { transferBob } from '../../src/services/ledgerService.js';
 import { EXTERNAL_NOTIFY_SKIPPED, sendOrQueueNotify } from '../../src/services/notifyOpsService.js';
@@ -470,4 +471,60 @@ test('外部账号运维接口权限精确匹配，不误伤以 external 开头�
   for (const path of ['/users/external_partner', '/users/external', '/users/external/']) {
     assert.equal(matchPathPermission('GET', path), 'users:view', path);
   }
+});
+
+test('权限规则对路径大小写不敏感：混合大小写路径不能绕过 super/users:edit 要求', () => {
+  for (const path of ['/users/EXTERNAL/RESET-PASSWORD', '/Users/external/set-status/', '/users/External/Set-Status']) {
+    const expected = path.toLowerCase().startsWith('/users/external') ? 'users:edit' : 'super';
+    assert.equal(matchPathPermission('POST', path), expected, path);
+  }
+  for (const path of ['/users/DELETE', '/users/Assign-Role', '/users/SET-ADMIN', '/DATA/Reset-All']) {
+    assert.equal(matchPathPermission('POST', path), 'super', path);
+  }
+  assert.equal(matchPathPermission('POST', '/users/NOTIFY'), 'messages:edit');
+  assert.equal(matchPathPermission('POST', '/users/SYNC'), 'users:edit');
+});
+
+test('HTTP：仅有 users:view 的管理员用混合大小写路径也拿不到外部账号运维和超管接口', async (t) => {
+  const cfg = { adminSessionSecret: 'case-test-secret', adminUserids: ['boss'], webSessionSecret: 'w', sessionGlobalVersion: 0 };
+  let role = ['users:view'];
+  const db = {
+    async get(sql) {
+      if (sql.includes('FROM admin_user_roles ur')) {
+        return { id: 1, code: 'viewer', name: '只读', permissions: JSON.stringify(role), is_enabled: 1 };
+      }
+      return null; // system_settings 等：无会话版本覆盖
+    },
+    async all() { return []; },
+    async run() { return { changes: 0 }; },
+    async exec() {},
+  };
+  const app = express();
+  app.use(express.json());
+  app.locals.db = db;
+  app.locals.cfg = cfg;
+  app.use('/admin', adminRouter());
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  t.after(() => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+  const cookie = `bob_admin_session=${createSessionToken(`${cfg.adminSessionSecret}`, { userid: 'viewer_user', name: 'v', sv: 0 }, 3600)}`;
+  const post = async (path, body = {}) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body),
+    });
+    await response.text();
+    return response.status;
+  };
+
+  for (const path of [
+    '/admin/users/external/reset-password', '/admin/users/EXTERNAL/RESET-PASSWORD', '/admin/users/external/SET-STATUS', '/admin/users/External/Set-Status/',
+    '/admin/users/DELETE', '/admin/users/Assign-Role', '/admin/users/SET-ADMIN',
+  ]) {
+    assert.equal(await post(path, { userid: 'ext_x', password: '123', status: 'disabled' }), 403, `${path} 对 users:view 必须 403`);
+  }
+
+  // 有 users:edit 的角色可通过权限检查（走到处理器，弱密码在落库前就返回 400）。
+  role = ['users:view', 'users:edit'];
+  assert.equal(await post('/admin/users/EXTERNAL/RESET-PASSWORD', { userid: 'ext_x', password: '1' }), 400);
 });
