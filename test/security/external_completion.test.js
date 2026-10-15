@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import { adminRouter } from '../../src/routes/admin/index.js';
 import { registerAdminSettingsRoutes } from '../../src/routes/admin/settingsRoutes.js';
+import { matchPathPermission } from '../../src/services/adminPermissionService.js';
 import { webRouter } from '../../src/routes/web.js';
 import { mallRouter } from '../../src/routes/mall.js';
 import { ledgerRouter } from '../../src/routes/ledger.js';
@@ -459,4 +460,14 @@ test('后台用户列表关键字同时匹配手机号', async () => {
   const count = queries.find((q) => q.sql.includes('COUNT(1)'));
   assert.match(count.sql, /COALESCE\(u\.phone, ''\) LIKE \?/);
   assert.ok(count.params.filter((p) => p === '%1380000%').length >= 3, '手机号参与 LIKE 匹配');
+});
+
+test('外部账号运维接口权限精确匹配，不误伤以 external 开头的 userid 详情', () => {
+  for (const path of ['/users/external/reset-password', '/users/external/set-status', '/users/external/reset-password/']) {
+    assert.equal(matchPathPermission('POST', path), 'users:edit', path);
+  }
+  // 详情 GET 仍只需查看权限，哪怕 userid 以 external 开头。
+  for (const path of ['/users/external_partner', '/users/external', '/users/external/']) {
+    assert.equal(matchPathPermission('GET', path), 'users:view', path);
+  }
 });
