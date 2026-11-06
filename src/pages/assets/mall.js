@@ -4911,6 +4911,22 @@
     return applySiteGate(resp.data?.data || {});
   }
 
+  // 余额页金币下拉刷新（mall_coin.js 派发）。与登录方式无关地注册一次；
+  // 刷新按钮在登录并通过公告门禁后才启用，未启用时直接回失败，避免金币一直停在刷新中。
+  window.addEventListener('bob:refresh-balance', async () => {
+    let ok = false;
+    if (!document.getElementById('btnRefresh')?.disabled) {
+      ok = true;
+      try {
+        await refreshBalanceAndLedger();
+      } catch (_) {
+        ok = false;
+      }
+      if (document.getElementById('balanceErr')?.textContent) ok = false;
+    }
+    window.dispatchEvent(new CustomEvent('bob:balance-refreshed', { detail: { ok } }));
+  });
+
   async function bootstrap() {
     if (await shouldStopForSiteGate()) {
       return;
@@ -4981,19 +4997,6 @@
           await waitForAnnouncementAccess();
           document.getElementById('btnRefresh').disabled = false;
           document.getElementById('btnRefresh').onclick = () => refreshBalanceAndLedger();
-          if (!state.coinRefreshBound) {
-            state.coinRefreshBound = true;
-            window.addEventListener('bob:refresh-balance', async () => {
-              let ok = true;
-              try {
-                await refreshBalanceAndLedger();
-              } catch (_) {
-                ok = false;
-              }
-              if (document.getElementById('balanceErr')?.textContent) ok = false;
-              window.dispatchEvent(new CustomEvent('bob:balance-refreshed', { detail: { ok } }));
-            });
-          }
           const btnTransfer = document.getElementById('btnTransfer');
           if (btnTransfer) {
             btnTransfer.disabled = false;
