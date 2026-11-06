@@ -4388,6 +4388,10 @@ textarea::placeholder { color: #A3927A; }
   .modal:not(.hidden) .modalBox { animation-name: sheetUp; }
 }
 @keyframes sheetUp { from { transform: translateY(60%); } to { transform: none; } }
+/* 放在弹窗动画之后，才能覆盖上面两条（含移动端 sheetUp） */
+@media (prefers-reduced-motion: reduce) {
+  .modal:not(.hidden) .modalBox { animation: none; }
+}
 .modalTitle { font-size: 19px; font-weight: 700; }
 .modalSub { margin-top: 4px; font-size: 13px; line-height: 1.5; color: var(--ink-2); }
 .modalTop .iconBtn { width: 36px; height: 36px; flex: none; }
