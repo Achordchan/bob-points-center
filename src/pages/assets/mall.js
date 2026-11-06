@@ -2975,6 +2975,7 @@
     const tab = requested === 'shop' || requested === 'orders' || requested === 'more' || requested === 'market'
       ? requested
       : 'balance';
+    const prevTab = state.activeTab;
     state.activeTab = tab;
 
     document.querySelectorAll('.navBtn').forEach((btn) => {
@@ -2988,6 +2989,12 @@
     setHidden('tabMarket', tab !== 'market');
     setHidden('tabOrders', tab !== 'orders');
     setHidden('tabMore', tab !== 'more');
+    // 各标签共用同一个页面滚动：换标签时回到顶部，否则会停在上一个标签的位置，二级导航被卷到视野外。
+    // 弹窗打开时页面被固定，关窗会恢复记下的位置，所以改写那个位置而不是直接滚动。
+    if (prevTab !== tab) {
+      if (document.body.classList.contains('modalOpenFixed')) state.modalLockScrollTop = 0;
+      else window.scrollTo(0, 0);
+    }
 
     if (tab === 'balance') {
       refreshBalanceAndLedger();

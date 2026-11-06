@@ -72,6 +72,7 @@
   const appBar = $('appBar');
   const appBarTitle = $('appBarTitle');
   const appBarBalance = $('appBarBalance');
+  const chip = $('appBarChip');
   const balanceEl = $('balance');
   const tabBalance = $('tabBalance');
   const btnRefresh = $('btnRefresh');
@@ -122,6 +123,13 @@
   let base = 0;
   let dragging = false;
   const springsIdle = () => Object.values(sp).every((s) => s.x === s.t && s.v === 0);
+  // 手势用的弹簧偏活泼；从胶囊飞回时临时换成接近临界阻尼的一组，落定或有新手势时恢复
+  const springBase = {};
+  Object.keys(sp).forEach((k) => { springBase[k] = [sp[k].k, sp[k].c]; });
+  const ARRIVE_SPRINGS = { dx: [170, 19.5], dy: [170, 19.5], lift: [200, 21] };
+  function restoreSprings() {
+    Object.keys(springBase).forEach((k) => { sp[k].k = springBase[k][0]; sp[k].c = springBase[k][1]; });
+  }
 
   // ---------- 余额 ----------
   let shown = 0;
@@ -206,6 +214,17 @@
   // 首次流水若在本文件初始化前已渲染，事件已错过，用 mall.js 留下的快照补一次
   if (Array.isArray(window.bobLatestLedger)) applyLedger(window.bobLatestLedger);
 
+  // 余额页顶栏只靠透明度隐藏时，里面的胶囊按钮仍能被 Tab 聚焦；隐藏期间让整条顶栏 inert，
+  // 旧 WebView 不支持 inert 时再把胶囊移出 Tab 顺序兜底
+  let appBarHidden = false;
+  function setAppBarHidden(hidden) {
+    if (!appBar || appBarHidden === hidden) return;
+    appBarHidden = hidden;
+    appBar.inert = hidden;
+    if (hidden) appBar.setAttribute('aria-hidden', 'true'); else appBar.removeAttribute('aria-hidden');
+    if (chip) chip.tabIndex = hidden ? -1 : 0;
+  }
+
   // ---------- 当前标签 ----------
   const tabNames = { balance: '余额', shop: '商城', market: '市场', orders: '订单', more: '更多' };
   let snapTimer = 0; // 推近吸附的延时任务，离开余额页时要取消
@@ -217,11 +236,14 @@
     const t = active?.getAttribute('data-tab') || 'balance';
     if (appBarTitle) appBarTitle.textContent = tabNames[t] || 'BOB 币中心';
     if (on) {
+      // 样式表在余额页先把顶栏藏起来，这里同步不可聚焦；随后 frame() 按滑动进度修正
+      setAppBarHidden(true);
       layout();
       kick();
     } else {
       // 离开余额页时清掉逐帧写入的内联样式，交还给样式表
       if (appBar) { appBar.style.opacity = ''; appBar.style.transform = ''; appBar.style.pointerEvents = ''; }
+      setAppBarHidden(false);
       if (topbar) topbar.style.opacity = '';
     }
   }
@@ -338,6 +360,7 @@
       appBar.style.opacity = String(hb);
       appBar.style.transform = `translateY(${(1 - hb) * -8}px)`;
       appBar.style.pointerEvents = hb > 0.5 ? 'auto' : 'none';
+      setAppBarHidden(hb <= 0.5);
     }
     if (topbar) topbar.style.opacity = String(1 - hb);
 
@@ -346,7 +369,7 @@
     if (backdrop) backdrop.style.background = `rgb(${c0.map((v, i) => Math.round(lerp(v, c1[i], p))).join(',')})`;
 
     const moving = dragging || Math.abs(raw - cur) > 0 || !springsIdle() || e < 1 || (rollDur && target !== null);
-    if (moving) requestAnimationFrame(frame); else running = false;
+    if (moving) requestAnimationFrame(frame); else { running = false; restoreSprings(); }
   }
 
   window.addEventListener('scroll', kick, { passive: true });
@@ -376,6 +399,7 @@
   const PUSH = 80;
 
   function flip(dir) {
+    restoreSprings();
     base += 180 * (dir || 1);
     sp.rot.t = base;
     sp.rot.v = 520 * (dir || 1);
@@ -388,6 +412,7 @@
 
   hit.addEventListener('pointerdown', (ev) => {
     try { hit.setPointerCapture(ev.pointerId); } catch (_) {}
+    restoreSprings();
     dragging = true;
     mode = null;
     start = { x: ev.clientX, y: ev.clientY, t: performance.now(), rot: sp.rot.x };
@@ -461,6 +486,7 @@
   let toastTimer = 0;
   let refreshing = false;
   function spin() {
+    restoreSprings();
     if (mod360(base) === 180) base += 180;
     base += 720;
     sp.rot.t = base;
@@ -491,6 +517,45 @@
   });
   // 顶部刷新按钮：同样让币转一下
   if (btnRefresh) btnRefresh.addEventListener('click', () => { if (body.classList.contains('onBalance')) spin(); });
+
+  // ---------- 顶部余额胶囊：点一下回到余额页，币从胶囊里飞出来落到中央 ----------
+  function arriveFrom(rect) {
+    layout();
+    // 舞台是 fixed 全屏层，币心在视口坐标 (W/2 + dx, A.cy + dy)；把起点放到胶囊里的小币上，弹簧负责把它带回中央
+    cur = 0;
+    if (mod360(base) === 180) base += 180;
+    sp.dx.x = rect.left + rect.width / 2 - W / 2;
+    sp.dy.x = rect.top + rect.height / 2 - A.cy;
+    sp.lift.x = Math.max(0.06, rect.height / A.d);
+    sp.rot.x = base - 360;
+    sp.tiltX.x = 18;
+    ['dx', 'dy', 'lift', 'rot', 'tiltX'].forEach((k) => { sp[k].v = 0; });
+    Object.keys(ARRIVE_SPRINGS).forEach((k) => { [sp[k].k, sp[k].c] = ARRIVE_SPRINGS[k]; });
+    sp.dx.t = 0;
+    sp.dy.t = 0;
+    sp.lift.t = 1;
+    sp.rot.t = base;
+    sp.tiltX.t = 0;
+    hit.setAttribute('aria-pressed', 'false');
+    kick();
+  }
+  if (chip) {
+    chip.addEventListener('click', () => {
+      // 已在余额页（滑到了流水）：平滑回到币面
+      if (body.classList.contains('onBalance')) {
+        window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+        return;
+      }
+      const navBalance = document.querySelector('.navBtn[data-tab="balance"]');
+      if (!navBalance) return;
+      const mini = chip.querySelector('.miniCoin') || chip;
+      const rect = mini.getBoundingClientRect();
+      navBalance.click();
+      syncTab();
+      if (!body.classList.contains('onBalance')) return;
+      arriveFrom(rect);
+    });
+  }
 
   // ---------- 启动 ----------
   syncTab();
