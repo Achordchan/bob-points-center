@@ -123,7 +123,9 @@ body:not(.onBalance) .topbar { display: none; }
   box-shadow: 0 1px 0 var(--line);
 }
 .appBarTitle { font-size: 18px; font-weight: 700; flex: 1 1 auto; }
-.coinChip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 4px; border-radius: 16px; background: var(--card-2); color: var(--ink); }
+.coinChip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 4px; border: 0; border-radius: 16px; background: var(--card-2); color: var(--ink); font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: transform .18s cubic-bezier(.3, 1.6, .5, 1); }
+.coinChip:active { transform: scale(.94); transition-duration: .08s; }
+.coinChip:focus-visible { outline: 2px solid var(--brass-d); outline-offset: 2px; }
 .coinChip b { font: 400 21px/1 var(--serif); padding-top: 1px; }
 .coinChip small { font-size: 12px; font-weight: 600; color: var(--brass-d); }
 .miniCoin {
@@ -265,7 +267,7 @@ body:not(.onBalance) .coinBackdrop { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .tab { animation: none; }
-  .navIc, .coinBtn { transition: none; }
+  .navIc, .coinBtn, .coinChip { transition: none; }
 }
 
 .sectionHead {

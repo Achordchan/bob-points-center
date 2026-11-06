@@ -122,6 +122,13 @@
   let base = 0;
   let dragging = false;
   const springsIdle = () => Object.values(sp).every((s) => s.x === s.t && s.v === 0);
+  // 手势用的弹簧偏活泼；从胶囊飞回时临时换成接近临界阻尼的一组，落定或有新手势时恢复
+  const springBase = {};
+  Object.keys(sp).forEach((k) => { springBase[k] = [sp[k].k, sp[k].c]; });
+  const ARRIVE_SPRINGS = { dx: [170, 19.5], dy: [170, 19.5], lift: [200, 21] };
+  function restoreSprings() {
+    Object.keys(springBase).forEach((k) => { sp[k].k = springBase[k][0]; sp[k].c = springBase[k][1]; });
+  }
 
   // ---------- 余额 ----------
   let shown = 0;
@@ -346,7 +353,7 @@
     if (backdrop) backdrop.style.background = `rgb(${c0.map((v, i) => Math.round(lerp(v, c1[i], p))).join(',')})`;
 
     const moving = dragging || Math.abs(raw - cur) > 0 || !springsIdle() || e < 1 || (rollDur && target !== null);
-    if (moving) requestAnimationFrame(frame); else running = false;
+    if (moving) requestAnimationFrame(frame); else { running = false; restoreSprings(); }
   }
 
   window.addEventListener('scroll', kick, { passive: true });
@@ -376,6 +383,7 @@
   const PUSH = 80;
 
   function flip(dir) {
+    restoreSprings();
     base += 180 * (dir || 1);
     sp.rot.t = base;
     sp.rot.v = 520 * (dir || 1);
@@ -388,6 +396,7 @@
 
   hit.addEventListener('pointerdown', (ev) => {
     try { hit.setPointerCapture(ev.pointerId); } catch (_) {}
+    restoreSprings();
     dragging = true;
     mode = null;
     start = { x: ev.clientX, y: ev.clientY, t: performance.now(), rot: sp.rot.x };
@@ -461,6 +470,7 @@
   let toastTimer = 0;
   let refreshing = false;
   function spin() {
+    restoreSprings();
     if (mod360(base) === 180) base += 180;
     base += 720;
     sp.rot.t = base;
@@ -491,6 +501,46 @@
   });
   // 顶部刷新按钮：同样让币转一下
   if (btnRefresh) btnRefresh.addEventListener('click', () => { if (body.classList.contains('onBalance')) spin(); });
+
+  // ---------- 顶部余额胶囊：点一下回到余额页，币从胶囊里飞出来落到中央 ----------
+  const chip = $('appBarChip');
+  function arriveFrom(rect) {
+    layout();
+    // 舞台是 fixed 全屏层，币心在视口坐标 (W/2 + dx, A.cy + dy)；把起点放到胶囊里的小币上，弹簧负责把它带回中央
+    cur = 0;
+    if (mod360(base) === 180) base += 180;
+    sp.dx.x = rect.left + rect.width / 2 - W / 2;
+    sp.dy.x = rect.top + rect.height / 2 - A.cy;
+    sp.lift.x = Math.max(0.06, rect.height / A.d);
+    sp.rot.x = base - 360;
+    sp.tiltX.x = 18;
+    ['dx', 'dy', 'lift', 'rot', 'tiltX'].forEach((k) => { sp[k].v = 0; });
+    Object.keys(ARRIVE_SPRINGS).forEach((k) => { [sp[k].k, sp[k].c] = ARRIVE_SPRINGS[k]; });
+    sp.dx.t = 0;
+    sp.dy.t = 0;
+    sp.lift.t = 1;
+    sp.rot.t = base;
+    sp.tiltX.t = 0;
+    hit.setAttribute('aria-pressed', 'false');
+    kick();
+  }
+  if (chip) {
+    chip.addEventListener('click', () => {
+      // 已在余额页（滑到了流水）：平滑回到币面
+      if (body.classList.contains('onBalance')) {
+        window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+        return;
+      }
+      const navBalance = document.querySelector('.navBtn[data-tab="balance"]');
+      if (!navBalance) return;
+      const mini = chip.querySelector('.miniCoin') || chip;
+      const rect = mini.getBoundingClientRect();
+      navBalance.click();
+      syncTab();
+      if (!body.classList.contains('onBalance')) return;
+      arriveFrom(rect);
+    });
+  }
 
   // ---------- 启动 ----------
   syncTab();
