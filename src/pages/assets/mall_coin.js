@@ -72,6 +72,7 @@
   const appBar = $('appBar');
   const appBarTitle = $('appBarTitle');
   const appBarBalance = $('appBarBalance');
+  const chip = $('appBarChip');
   const balanceEl = $('balance');
   const tabBalance = $('tabBalance');
   const btnRefresh = $('btnRefresh');
@@ -213,6 +214,17 @@
   // 首次流水若在本文件初始化前已渲染，事件已错过，用 mall.js 留下的快照补一次
   if (Array.isArray(window.bobLatestLedger)) applyLedger(window.bobLatestLedger);
 
+  // 余额页顶栏只靠透明度隐藏时，里面的胶囊按钮仍能被 Tab 聚焦；隐藏期间让整条顶栏 inert，
+  // 旧 WebView 不支持 inert 时再把胶囊移出 Tab 顺序兜底
+  let appBarHidden = false;
+  function setAppBarHidden(hidden) {
+    if (!appBar || appBarHidden === hidden) return;
+    appBarHidden = hidden;
+    appBar.inert = hidden;
+    if (hidden) appBar.setAttribute('aria-hidden', 'true'); else appBar.removeAttribute('aria-hidden');
+    if (chip) chip.tabIndex = hidden ? -1 : 0;
+  }
+
   // ---------- 当前标签 ----------
   const tabNames = { balance: '余额', shop: '商城', market: '市场', orders: '订单', more: '更多' };
   let snapTimer = 0; // 推近吸附的延时任务，离开余额页时要取消
@@ -224,11 +236,14 @@
     const t = active?.getAttribute('data-tab') || 'balance';
     if (appBarTitle) appBarTitle.textContent = tabNames[t] || 'BOB 币中心';
     if (on) {
+      // 样式表在余额页先把顶栏藏起来，这里同步不可聚焦；随后 frame() 按滑动进度修正
+      setAppBarHidden(true);
       layout();
       kick();
     } else {
       // 离开余额页时清掉逐帧写入的内联样式，交还给样式表
       if (appBar) { appBar.style.opacity = ''; appBar.style.transform = ''; appBar.style.pointerEvents = ''; }
+      setAppBarHidden(false);
       if (topbar) topbar.style.opacity = '';
     }
   }
@@ -345,6 +360,7 @@
       appBar.style.opacity = String(hb);
       appBar.style.transform = `translateY(${(1 - hb) * -8}px)`;
       appBar.style.pointerEvents = hb > 0.5 ? 'auto' : 'none';
+      setAppBarHidden(hb <= 0.5);
     }
     if (topbar) topbar.style.opacity = String(1 - hb);
 
@@ -503,7 +519,6 @@
   if (btnRefresh) btnRefresh.addEventListener('click', () => { if (body.classList.contains('onBalance')) spin(); });
 
   // ---------- 顶部余额胶囊：点一下回到余额页，币从胶囊里飞出来落到中央 ----------
-  const chip = $('appBarChip');
   function arriveFrom(rect) {
     layout();
     // 舞台是 fixed 全屏层，币心在视口坐标 (W/2 + dx, A.cy + dy)；把起点放到胶囊里的小币上，弹簧负责把它带回中央
