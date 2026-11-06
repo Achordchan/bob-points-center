@@ -4415,6 +4415,7 @@ textarea::placeholder { color: #A3927A; }
 .shopFilterLabel { color: var(--ink-2); }
 .shopCloseTimer { border: 0; background: var(--ink); color: #F4E7C8; border-radius: 999px; box-shadow: none; }
 .shopCloseValue { font-family: var(--serif); font-weight: 400; font-size: 20px; color: var(--brass-l); }
+.shopCloseLabel { color: rgba(244, 231, 200, 0.72); }
 .gridProducts { gap: 12px; }
 .productCard { border: 0; border-radius: var(--r-l); background: transparent; box-shadow: none; overflow: visible; }
 .productCard:hover { transform: none; box-shadow: none; }

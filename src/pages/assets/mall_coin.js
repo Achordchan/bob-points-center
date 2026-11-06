@@ -206,9 +206,11 @@
 
   // ---------- 当前标签 ----------
   const tabNames = { balance: '余额', shop: '商城', market: '市场', orders: '订单', more: '更多' };
+  let snapTimer = 0; // 推近吸附的延时任务，离开余额页时要取消
   function syncTab() {
     const on = tabBalance && !tabBalance.classList.contains('hidden');
     body.classList.toggle('onBalance', !!on);
+    if (!on) { clearTimeout(snapTimer); snapTimer = 0; }
     const active = document.querySelector('.navBtn.active');
     const t = active?.getAttribute('data-tab') || 'balance';
     if (appBarTitle) appBarTitle.textContent = tabNames[t] || 'BOB 币中心';
@@ -349,11 +351,15 @@
   window.addEventListener('resize', () => { if (body.classList.contains('onBalance')) { layout(); kick(); } });
 
   // 推近途中松手，吸附到最近的一端
-  let idle = 0;
+  const canSnap = () => body.classList.contains('onBalance') && !body.classList.contains('modalOpenFixed');
   window.addEventListener('scroll', () => {
-    clearTimeout(idle);
-    if (!body.classList.contains('onBalance') || body.classList.contains('modalOpenFixed')) return;
-    idle = setTimeout(() => {
+    clearTimeout(snapTimer);
+    snapTimer = 0;
+    if (!canSnap()) return;
+    snapTimer = setTimeout(() => {
+      snapTimer = 0;
+      // 等待期间可能已切走标签或打开弹窗，执行时再确认一次
+      if (!canSnap()) return;
       const y = window.scrollY;
       if (y > 4 && y < D - 4) window.scrollTo({ top: y < D * 0.45 ? 0 : D, behavior: reduce ? 'auto' : 'smooth' });
     }, 140);
