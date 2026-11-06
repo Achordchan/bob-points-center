@@ -41,6 +41,16 @@ const DEFAULT_NOTIFY_SETTINGS = {
       title: '【BOB币中心】公益助力成功 {{name}}',
       content: '类型：支出\n项目：{{project_name}}\n金额：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
     },
+    market_sold: {
+      enabled: true,
+      title: '【BOB币中心】你出售的商品已成交 {{name}}',
+      content: '商品：{{product_name}}\n买家：{{buyer_name}}\n成交价：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币',
+    },
+    market_bought: {
+      enabled: true,
+      title: '【BOB币中心】市场购买成功 {{name}}',
+      content: '商品：{{product_name}}\n卖家：{{seller_name}}\n成交价：{{amount}} BOB 币\n当前余额：{{balance}} BOB 币\n商品已转入你的「订单」，请联系工作人员线下核销',
+    },
   },
 };
 

@@ -138,6 +138,9 @@ export function registerAdminSettingsRoutes(router) {
         to_name: '测试收款人',
         activity_id: 'TEST_ACTIVITY_001',
         transfer_id: 'TEST_TRANSFER_001',
+        buyer_name: '测试买家',
+        seller_name: '测试卖家',
+        listing_id: 'TEST_LISTING_001',
       };
       const notify = await sendOrQueueNotify({
         db,

@@ -864,6 +864,14 @@ body:not(.onBalance) .coinBackdrop { display: none; }
   white-space: nowrap;
 }
 
+#tabMarket .marketMineBuyer {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(58, 42, 18, 0.72);
+  overflow-wrap: anywhere;
+}
+
 #tabMarket .marketMineTime {
   font-size: 11px;
   color: rgba(58, 42, 18, 0.5);

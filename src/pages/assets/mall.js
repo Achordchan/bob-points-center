@@ -3585,14 +3585,20 @@
             : status;
       const canCancel = status === 'active';
       const cancelDisabled = !marketOpen;
+      const isSold = status === 'sold';
+      const buyerName = x?.buyer_display_name ? String(x.buyer_display_name) : '';
+      const soldAt = isSold && x?.sold_at ? fmtTs(x.sold_at) : '';
+      // 已成交：时间显示成交时间，并标出买家，免得卖家只能去流水里反查
+      const timeText = isSold && soldAt ? soldAt : createdAt;
       return (
         `<article class="marketItem marketMineItem" data-market-my-listing="${escapeHtml(listingId)}">` +
         `  <div class="marketMineInfo">` +
         `    <div class="marketName">${escapeHtml(productName)}</div>` +
         `    <div class="marketMineSub">` +
-        (createdAt ? `      <span class="marketMineTime">${escapeHtml(createdAt)}</span>` : '') +
+        (timeText ? `      <span class="marketMineTime">${escapeHtml(timeText)}</span>` : '') +
         `      <span class="marketState marketState-${escapeHtml(status)}">${escapeHtml(statusText)}</span>` +
         `    </div>` +
+        (isSold ? `    <div class="marketMineBuyer">买家：${escapeHtml(buyerName || '未知')}</div>` : '') +
         `  </div>` +
         `  <div class="marketMineActions">` +
         `    <div class="marketMinePrice">${escapeHtml(priceText)}</div>` +
@@ -3612,7 +3618,11 @@
       html += activeCards;
     }
     if (historyCards) {
-      html += `<details class="marketHistoryFold"><summary class="marketHistorySummary">历史记录（${historyRows.length}）</summary>${historyCards}</details>`;
+      const soldCount = historyRows.filter((x) => String(x?.status || '') === 'sold').length;
+      const historyLabel = soldCount > 0
+        ? `历史记录（已成交 ${soldCount} · 共 ${historyRows.length}）`
+        : `历史记录（${historyRows.length}）`;
+      html += `<details class="marketHistoryFold"><summary class="marketHistorySummary">${escapeHtml(historyLabel)}</summary>${historyCards}</details>`;
     }
 
     myListingsNode.innerHTML = html || '<div class="marketEmpty">暂无挂出的商品</div>';

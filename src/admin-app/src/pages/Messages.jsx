@@ -13,6 +13,8 @@ const notifyTemplates = [
   { key: 'transfer_in', label: '转入通知', vars: '{{name}} {{userid}} {{from_name}} {{amount}} {{balance}} {{transfer_id}}' },
   { key: 'red_packet', label: '红包通知', vars: '{{name}} {{userid}} {{amount}} {{balance}} {{activity_id}}' },
   { key: 'charity', label: '公益通知', vars: '{{name}} {{userid}} {{project_name}} {{amount}} {{balance}}' },
+  { key: 'market_sold', label: '市场售出通知（卖家）', vars: '{{name}} {{userid}} {{product_name}} {{buyer_name}} {{amount}} {{balance}} {{listing_id}}' },
+  { key: 'market_bought', label: '市场购买通知（买家）', vars: '{{name}} {{userid}} {{product_name}} {{seller_name}} {{amount}} {{balance}} {{listing_id}}' },
 ];
 
 const groupTemplates = [
