@@ -286,6 +286,62 @@ function normalizeMarketListing(row = {}, currentUserid = '') {
   });
 }
 
+// 市场成交后私聊通知买卖双方。事务提交后调用，不阻塞响应；外部账号由 sendOrQueueNotify 统一跳过。
+export function notifyMarketTrade({ db, cfg, trade, notify = sendOrQueueNotify }) {
+  if (!trade) return;
+  const productName = String(trade.order?.product_name || trade.order?.product_id || trade.exchange_id || '商品');
+  const amount = String(trade.price);
+  const sellerName = resolveDisplayName(trade.seller_name, trade.seller_userid);
+  const buyerName = resolveDisplayName(trade.buyer_name, trade.buyer_userid);
+  const sellerBalance = trade.transfer?.toBalance;
+  const buyerBalance = trade.transfer?.fromBalance;
+  Promise.resolve(notify({
+    db,
+    cfg,
+    userid: trade.seller_userid,
+    title: `【BOB币中心】你出售的商品已成交 ${sellerName}`,
+    lines: [
+      `商品：${productName}`,
+      `买家：${buyerName}`,
+      `成交价：${amount} BOB 币`,
+      sellerBalance !== undefined && sellerBalance !== null ? `当前余额：${String(sellerBalance)} BOB 币` : '',
+    ],
+    event: 'market_sold',
+    variables: {
+      name: sellerName,
+      userid: trade.seller_userid,
+      product_name: productName,
+      buyer_name: buyerName,
+      amount,
+      balance: sellerBalance !== undefined && sellerBalance !== null ? String(sellerBalance) : '',
+      listing_id: trade.listing_id,
+    },
+  })).catch(() => null);
+  Promise.resolve(notify({
+    db,
+    cfg,
+    userid: trade.buyer_userid,
+    title: `【BOB币中心】市场购买成功 ${buyerName}`,
+    lines: [
+      `商品：${productName}`,
+      `卖家：${sellerName}`,
+      `成交价：${amount} BOB 币`,
+      buyerBalance !== undefined && buyerBalance !== null ? `当前余额：${String(buyerBalance)} BOB 币` : '',
+      '商品已转入你的「订单」，请联系工作人员线下核销',
+    ],
+    event: 'market_bought',
+    variables: {
+      name: buyerName,
+      userid: trade.buyer_userid,
+      product_name: productName,
+      seller_name: sellerName,
+      amount,
+      balance: buyerBalance !== undefined && buyerBalance !== null ? String(buyerBalance) : '',
+      listing_id: trade.listing_id,
+    },
+  })).catch(() => null);
+}
+
 async function getMarketOpen(db) {
   const opening = await ensureMallOpeningRow(db);
   return !isMallOpenRow(opening);
@@ -1414,10 +1470,12 @@ export function mallRouter() {
       );
       const listingRows = await db.all(
         `SELECT l.listing_id, l.exchange_id, l.seller_userid, l.seller_name_snapshot,
-                l.buyer_userid, l.buyer_name_snapshot, l.price, l.seller_note, l.status, l.created_at, l.sold_at, l.cancelled_at,
+                l.buyer_userid, COALESCE(NULLIF(l.buyer_name_snapshot, ''), bu.name) AS buyer_name_snapshot,
+                l.price, l.seller_note, l.status, l.created_at, l.sold_at, l.cancelled_at,
                 r.product_id, r.product_name, r.bob_amount
            FROM mall_order_listings l
            LEFT JOIN redeems r ON r.exchange_id = l.exchange_id
+           LEFT JOIN users bu ON bu.userid = l.buyer_userid
           WHERE l.seller_userid = ?
           ORDER BY l.created_at DESC, l.id DESC
           LIMIT 100`,
@@ -1703,12 +1761,15 @@ export function mallRouter() {
           listing_id: listingId,
           exchange_id: String(listing.exchange_id || ''),
           seller_userid: sellerUserid,
+          seller_name: sellerName,
           buyer_userid: buyerUserid,
+          buyer_name: buyerName || await getUserName(tx, buyerUserid),
           price,
           transfer,
           order,
         };
       });
+      notifyMarketTrade({ db, cfg: req.app?.locals?.cfg, trade: result });
       publishMallRealtimeEvent('balance_changed', { userid: result.buyer_userid, reason: 'market_buy' });
       publishMallRealtimeEvent('balance_changed', { userid: result.seller_userid, reason: 'market_sell' });
       publishMallRealtimeEvent('order_updated', {
