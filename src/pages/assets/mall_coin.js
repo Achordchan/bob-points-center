@@ -99,6 +99,8 @@
   const mod360 = (v) => ((v % 360) + 360) % 360;
 
   function Spring(x, k, c) { return { x, v: 0, t: x, k, c }; }
+  // 手势拖动时直接把弹簧钉在手指位置：目标跟着走，帧循环就不会把它拉回去
+  function hold(s, x) { s.x = x; s.t = x; s.v = 0; }
   function stepSpring(s, dt) {
     if (reduce) { s.x = s.t; s.v = 0; return; }
     const a = -s.k * (s.x - s.t) - s.c * s.v;
@@ -404,19 +406,21 @@
     lastPt = { x: ev.clientX, y: ev.clientY, t: now };
     if (!mode && Math.hypot(dx, dy) > 6) mode = Math.abs(dx) > Math.abs(dy) ? 'turn' : 'pull';
     if (mode === 'turn') {
-      sp.rot.x = start.rot + dx * 0.75; sp.rot.v = 0;
-      sp.dx.x = rubber(dx * 0.35, 60); sp.dx.v = 0;
-      sp.tiltX.x = clamp(-dy * 0.08, -10, 10); sp.tiltX.v = 0;
+      hold(sp.rot, start.rot + dx * 0.75);
+      hold(sp.dx, rubber(dx * 0.35, 60));
+      hold(sp.tiltX, clamp(-dy * 0.08, -10, 10));
     } else if (mode === 'pull') {
-      sp.dy.x = rubber(dy); sp.dy.v = 0;
-      sp.tiltX.x = clamp(-sp.dy.x * 0.22, -22, 22); sp.tiltX.v = 0;
-      sp.dx.x = rubber(dx * 0.3, 40); sp.dx.v = 0;
+      hold(sp.dy, rubber(dy));
+      hold(sp.tiltX, clamp(-sp.dy.x * 0.22, -22, 22));
+      hold(sp.dx, rubber(dx * 0.3, 40));
       pullTipText.textContent = dy > PULL ? '松手刷新余额' : '继续下拉刷新余额';
     }
   });
+  let lastPointerUp = 0;
   function release(ev) {
     if (!dragging) return;
     dragging = false;
+    if (ev.type === 'pointerup') lastPointerUp = performance.now();
     sp.lift.t = 1;
     const dx = ev.clientX - start.x;
     const dy = ev.clientY - start.y;
@@ -446,6 +450,11 @@
   hit.addEventListener('pointercancel', release);
   hit.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); flip(1); }
+  });
+  // 读屏等辅助技术只合成 click，不带指针事件；指针手势结束后浏览器补发的 click 已由 release 处理过，跳过
+  hit.addEventListener('click', () => {
+    if (performance.now() - lastPointerUp < 600) return;
+    flip(1);
   });
 
   // ---------- 刷新：币边转边回弹，数字滚到新值 ----------
