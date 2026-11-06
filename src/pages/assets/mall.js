@@ -94,6 +94,11 @@
     eventsSource: null,
     realtimeTimers: {},
     hasSeenRealtimeSnapshot: false,
+    realtimeLastActivityAt: 0,
+    realtimeRetryTimer: null,
+    realtimeRetryDelay: 0,
+    realtimeAuthLost: false,
+    realtimeProbing: false,
     announcementPending: [],
     announcementCurrent: null,
     announcementRefreshInFlight: null,
@@ -992,7 +997,13 @@
     });
   }
 
+  function clearRealtimeRetry() {
+    if (state.realtimeRetryTimer) clearTimeout(state.realtimeRetryTimer);
+    state.realtimeRetryTimer = null;
+  }
+
   function closeMallRealtime({ keepNotice = false } = {}) {
+    clearRealtimeRetry();
     if (state.eventsSource) {
       state.eventsSource.close();
       state.eventsSource = null;
@@ -1821,28 +1832,104 @@
     }
   }
 
+  // 服务端每 25 秒发一次 ping；超过这个时长没有任何动静，说明连接已经名存实亡
+  // （锁屏后 WebView 常把套接字留在半开状态：readyState 仍是 OPEN/CONNECTING，却再也收不到数据）。
+  const REALTIME_STALE_MS = 60_000;
+  const REALTIME_RETRY_MIN_MS = 5_000;
+  const REALTIME_RETRY_MAX_MS = 30_000;
+
+  function isMallRealtimeAlive(source) {
+    if (!source || source.readyState === window.EventSource.CLOSED) return false;
+    return Date.now() - state.realtimeLastActivityAt <= REALTIME_STALE_MS;
+  }
+
+  function markMallRealtimeActivity() {
+    state.realtimeLastActivityAt = Date.now();
+    state.realtimeRetryDelay = 0;
+    state.realtimeAuthLost = false;
+  }
+
+  // 非 200 响应（429 限流、503 满载、401 会话失效）会让 EventSource 进入 CLOSED，浏览器不再自动重试，
+  // 只能由页面自己重建。先探一次会话：已失效就停下并如实提示，否则按退避间隔重连（同一时间只挂一个定时器）。
+  async function handleMallRealtimeClosed(source) {
+    if (state.eventsSource !== source) return;
+    source.close();
+    state.eventsSource = null;
+    state.realtimeProbing = true;
+    let me;
+    try {
+      me = await safeFetchJson('/web/me');
+    } finally {
+      state.realtimeProbing = false;
+    }
+    // 探测期间若已被 revive 重建，交给新连接
+    if (state.eventsSource) return;
+    if (me?.status === 401) {
+      state.realtimeAuthLost = true;
+      clearRealtimeRetry();
+      setRealtimeNotice('登录已失效，请重新进入页面');
+      return;
+    }
+    setRealtimeNotice('实时连接正在重试...');
+    scheduleMallRealtimeRetry();
+  }
+
+  function scheduleMallRealtimeRetry() {
+    if (state.realtimeRetryTimer || state.realtimeAuthLost) return;
+    // 后台时不排定时器，回到前台由 reviveMallRealtime 立即重连
+    if (document.hidden) return;
+    const delay = state.realtimeRetryDelay
+      ? Math.min(REALTIME_RETRY_MAX_MS, state.realtimeRetryDelay * 2)
+      : REALTIME_RETRY_MIN_MS;
+    state.realtimeRetryDelay = delay;
+    state.realtimeRetryTimer = setTimeout(() => {
+      state.realtimeRetryTimer = null;
+      ensureMallRealtime();
+    }, delay);
+  }
+
+  // 回到前台 / 网络恢复 / 从往返缓存恢复：不等退避，立即检查并在需要时重建
+  function reviveMallRealtime() {
+    clearRealtimeRetry();
+    state.realtimeAuthLost = false;
+    state.realtimeProbing = false;
+    ensureMallRealtime();
+  }
+
   function ensureMallRealtime(forceReconnect = false) {
     if (typeof window.EventSource === 'undefined') {
       setRealtimeNotice('当前环境不支持实时更新，请手动刷新');
       return null;
     }
-    if (forceReconnect && state.eventsSource) {
-      closeMallRealtime({ keepNotice: true });
+    if (forceReconnect) {
+      clearRealtimeRetry();
+      state.realtimeAuthLost = false;
+      if (state.eventsSource) closeMallRealtime({ keepNotice: true });
     }
     if (state.eventsSource) {
-      return state.eventsSource;
+      if (isMallRealtimeAlive(state.eventsSource)) return state.eventsSource;
+      closeMallRealtime({ keepNotice: true });
     }
+    // 会话探测中、退避等待中或会话已失效时不抢跑，交给探测结果、定时器或下一次 revive
+    if (state.realtimeProbing || state.realtimeRetryTimer || state.realtimeAuthLost) return null;
 
     setRealtimeNotice(state.hasSeenRealtimeSnapshot ? '实时连接恢复中...' : '实时同步中...');
     const source = new window.EventSource('/mall/events');
     state.eventsSource = source;
+    state.realtimeLastActivityAt = Date.now();
 
     source.onopen = () => {
       if (state.eventsSource !== source) return;
+      markMallRealtimeActivity();
       setRealtimeNotice('');
     };
     source.onerror = () => {
       if (state.eventsSource !== source) return;
+      if (source.readyState === window.EventSource.CLOSED) {
+        void handleMallRealtimeClosed(source);
+        return;
+      }
+      // CONNECTING：网络层断开，浏览器会按服务端下发的 retry 间隔自动重连
       setRealtimeNotice('实时连接正在重试...');
     };
 
@@ -1850,6 +1937,7 @@
       .forEach((eventName) => {
         source.addEventListener(eventName, (evt) => {
           if (state.eventsSource !== source) return;
+          markMallRealtimeActivity();
           let payload = {};
           try {
             payload = evt?.data ? JSON.parse(evt.data) : {};
@@ -5169,15 +5257,25 @@
 
           document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
-              ensureMallRealtime();
+              reviveMallRealtime();
               refreshAnnouncementAccessState();
             }
           });
 
           window.addEventListener('focus', () => {
-            ensureMallRealtime();
+            reviveMallRealtime();
             refreshAnnouncementAccessState();
           });
+
+          window.addEventListener('online', () => reviveMallRealtime());
+          window.addEventListener('pageshow', (ev) => {
+            if (ev.persisted) reviveMallRealtime();
+          });
+
+          // 部分 WebView 解锁后不派发 visibilitychange / focus，靠定时巡检兜底发现失效连接
+          setInterval(() => {
+            if (!document.hidden) ensureMallRealtime();
+          }, 10_000);
 
           window.addEventListener('pagehide', () => {
             closeMallRealtime({ keepNotice: true });
