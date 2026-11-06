@@ -99,6 +99,7 @@
     realtimeRetryDelay: 0,
     realtimeAuthLost: false,
     realtimeProbing: false,
+    realtimeProbeSeq: 0,
     announcementPending: [],
     announcementCurrent: null,
     announcementRefreshInFlight: null,
@@ -1855,14 +1856,12 @@
     if (state.eventsSource !== source) return;
     source.close();
     state.eventsSource = null;
+    const seq = ++state.realtimeProbeSeq;
     state.realtimeProbing = true;
-    let me;
-    try {
-      me = await safeFetchJson('/web/me');
-    } finally {
-      state.realtimeProbing = false;
-    }
-    // 探测期间若已被 revive 重建，交给新连接
+    const me = await safeFetchJson('/web/me');
+    // 探测期间被 revive / 强制重连取代：结果作废，状态交给更新的那一轮
+    if (seq !== state.realtimeProbeSeq) return;
+    state.realtimeProbing = false;
     if (state.eventsSource) return;
     if (me?.status === 401) {
       state.realtimeAuthLost = true;
@@ -1889,10 +1888,16 @@
   }
 
   // 回到前台 / 网络恢复 / 从往返缓存恢复：不等退避，立即检查并在需要时重建
+  // 作废进行中的会话探测：其结果晚到也不再影响重连状态
+  function invalidateMallRealtimeProbe() {
+    state.realtimeProbeSeq += 1;
+    state.realtimeProbing = false;
+  }
+
   function reviveMallRealtime() {
     clearRealtimeRetry();
+    invalidateMallRealtimeProbe();
     state.realtimeAuthLost = false;
-    state.realtimeProbing = false;
     ensureMallRealtime();
   }
 
@@ -1903,6 +1908,7 @@
     }
     if (forceReconnect) {
       clearRealtimeRetry();
+      invalidateMallRealtimeProbe();
       state.realtimeAuthLost = false;
       if (state.eventsSource) closeMallRealtime({ keepNotice: true });
     }
