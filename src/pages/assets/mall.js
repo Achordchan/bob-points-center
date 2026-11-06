@@ -2985,6 +2985,9 @@
   function renderLedger(rows) {
     const list = document.getElementById('ledger');
     if (!list) return;
+    try {
+      window.dispatchEvent(new CustomEvent('bob:ledger', { detail: { rows: Array.isArray(rows) ? rows : [] } }));
+    } catch (_) {}
     if (!rows || rows.length === 0) {
       list.innerHTML = '<div class="item muted">暂无流水</div>';
       return;
@@ -2993,7 +2996,7 @@
     list.innerHTML = rows
       .map((x) => {
         const delta = Number(x?.delta);
-        const deltaText = Number.isFinite(delta) ? (delta > 0 ? `+${delta}` : String(delta)) : '-';
+        const deltaText = Number.isFinite(delta) ? (delta > 0 ? `+${delta}` : (delta < 0 ? `−${Math.abs(delta)}` : '0')) : '-';
         const reasonRaw = x?.reason ? String(x.reason) : '';
         const refId = x?.ref_id ? String(x.ref_id) : '';
         const ts = fmtTs(x?.created_at);
@@ -3002,18 +3005,17 @@
         const productName = getProductNameByExchangeId(refId);
         const reason = x?.display_reason ? String(x.display_reason) : reasonToHuman(reasonRaw, { delta, refId, productName, peerName: peerNameRaw });
 
-        const pill = delta < 0 ? '<span class="pill pillBad">支出</span>' : '<span class="pill pillOk">收入</span>';
+        const out = delta < 0;
         const title = reason ? escapeHtml(reason) : '-';
 
         return (
-          `<div class="item">` +
-          `<div class="orderTop">` +
-          `<div>` +
-          `<div class="orderTitle">${pill} <span style="margin-left:8px;">${title}</span></div>` +
-          `<div class="orderMeta mono">${escapeHtml(ts)}</div>` +
+          `<div class="item ledgerRow">` +
+          `<span class="ledgerMk ${out ? 'ledgerMkOut' : 'ledgerMkIn'}" aria-label="${out ? '支出' : '收入'}">${out ? '−' : '+'}</span>` +
+          `<div class="ledgerTxt">` +
+          `<div class="ledgerTitle">${title}</div>` +
+          `<div class="ledgerTime">${escapeHtml(ts)}</div>` +
           `</div>` +
-          `<div class="ledgerDelta ${delta < 0 ? 'ledgerDeltaBad' : 'ledgerDeltaGood'}">${escapeHtml(deltaText)} <span class="muted">BOB 币</span></div>` +
-          `</div>` +
+          `<div class="ledgerDelta serifNum ${out ? 'ledgerDeltaBad' : 'ledgerDeltaGood'}">${escapeHtml(deltaText)}</div>` +
           `</div>`
         );
       })
@@ -3225,7 +3227,7 @@
           `<div class="productMeta">${escapeHtml(metaText || stockText)}</div>` +
           (remark ? `<div class="productRemark">${escapeHtml(remark)}</div>` : '') +
           `<div class="productActions">` +
-          `<div class="productPrice"><span class="productPriceNum">${escapeHtml(amountText)}</span><span class="productPriceUnit">BOB 币</span></div>` +
+          `<div class="productPrice"><i class="miniCoin" aria-hidden="true"></i><span class="productPriceNum">${escapeHtml(amountText)}</span><span class="productPriceUnit srOnly">BOB 币</span></div>` +
           `</div>` +
           `</div>` +
           `${soldOutHtml}` +
@@ -4379,7 +4381,6 @@
 
     state.me = me;
     state.ledger = ledger;
-    renderMe(state.me);
     renderLedger(state.ledger);
     if (state.activeTab === 'shop' || state.shopFilter === 'affordable') {
       renderProductsWithFilterAndOrder(state.products);
@@ -4977,6 +4978,19 @@
           await waitForAnnouncementAccess();
           document.getElementById('btnRefresh').disabled = false;
           document.getElementById('btnRefresh').onclick = () => refreshBalanceAndLedger();
+          if (!state.coinRefreshBound) {
+            state.coinRefreshBound = true;
+            window.addEventListener('bob:refresh-balance', async () => {
+              let ok = true;
+              try {
+                await refreshBalanceAndLedger();
+              } catch (_) {
+                ok = false;
+              }
+              if (document.getElementById('balanceErr')?.textContent) ok = false;
+              window.dispatchEvent(new CustomEvent('bob:balance-refreshed', { detail: { ok } }));
+            });
+          }
           const btnTransfer = document.getElementById('btnTransfer');
           if (btnTransfer) {
             btnTransfer.disabled = false;
