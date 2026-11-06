@@ -12,6 +12,9 @@
     eventsSource: null,
     realtimeTimers: {},
     hasSeenRealtimeSnapshot: false,
+    realtimeLastActivityAt: 0,
+    realtimeRetryTimer: null,
+    realtimeRetryDelay: 0,
   };
 
   function setText(id, text) {
@@ -39,7 +42,13 @@
     });
   }
 
+  function clearScreenRealtimeRetry() {
+    if (state.realtimeRetryTimer) clearTimeout(state.realtimeRetryTimer);
+    state.realtimeRetryTimer = null;
+  }
+
   function closeScreenRealtime({ keepNotice = false } = {}) {
+    clearScreenRealtimeRetry();
     if (state.eventsSource) {
       state.eventsSource.close();
       state.eventsSource = null;
@@ -282,30 +291,76 @@
     }, 1800);
   }
 
+  // 与商城页一致：服务端 25 秒一次 ping，60 秒没有动静视为连接已失效；
+  // 非 200 响应会让 EventSource 进入 CLOSED 且不再自动重试，由页面按退避间隔重建。
+  const REALTIME_STALE_MS = 60_000;
+  const REALTIME_RETRY_MIN_MS = 5_000;
+  const REALTIME_RETRY_MAX_MS = 30_000;
+
+  function isScreenRealtimeAlive(source) {
+    if (!source || source.readyState === window.EventSource.CLOSED) return false;
+    return Date.now() - state.realtimeLastActivityAt <= REALTIME_STALE_MS;
+  }
+
+  function markScreenRealtimeActivity() {
+    state.realtimeLastActivityAt = Date.now();
+    state.realtimeRetryDelay = 0;
+  }
+
+  function scheduleScreenRealtimeRetry() {
+    if (state.realtimeRetryTimer || document.hidden) return;
+    const delay = state.realtimeRetryDelay
+      ? Math.min(REALTIME_RETRY_MAX_MS, state.realtimeRetryDelay * 2)
+      : REALTIME_RETRY_MIN_MS;
+    state.realtimeRetryDelay = delay;
+    state.realtimeRetryTimer = setTimeout(() => {
+      state.realtimeRetryTimer = null;
+      ensureScreenRealtime();
+    }, delay);
+  }
+
+  function reviveScreenRealtime() {
+    clearScreenRealtimeRetry();
+    ensureScreenRealtime();
+  }
+
   function ensureScreenRealtime(forceReconnect = false) {
     if (typeof window.EventSource === 'undefined') {
       setScreenStreamNotice('当前环境不支持实时更新，请手动刷新');
       return null;
     }
-    if (forceReconnect && state.eventsSource) {
+    if (forceReconnect) {
+      clearScreenRealtimeRetry();
+      if (state.eventsSource) closeScreenRealtime({ keepNotice: true });
+    }
+    if (state.eventsSource) {
+      if (isScreenRealtimeAlive(state.eventsSource)) return state.eventsSource;
       closeScreenRealtime({ keepNotice: true });
     }
-    if (state.eventsSource) return state.eventsSource;
+    if (state.realtimeRetryTimer) return null;
 
     setScreenStreamNotice(state.hasSeenRealtimeSnapshot ? '实时连接恢复中...' : '实时同步中...');
     const source = new window.EventSource('/mall/events?scope=screen');
     state.eventsSource = source;
+    state.realtimeLastActivityAt = Date.now();
     source.onopen = () => {
       if (state.eventsSource !== source) return;
+      markScreenRealtimeActivity();
       setScreenStreamNotice('');
     };
     source.onerror = () => {
       if (state.eventsSource !== source) return;
       setScreenStreamNotice('实时连接正在重试...');
+      if (source.readyState === window.EventSource.CLOSED) {
+        source.close();
+        state.eventsSource = null;
+        scheduleScreenRealtimeRetry();
+      }
     };
     ['snapshot', 'ping', 'screen_changed'].forEach((eventName) => {
       source.addEventListener(eventName, (evt) => {
         if (state.eventsSource !== source) return;
+        markScreenRealtimeActivity();
         if (eventName === 'ping' || eventName === 'snapshot') {
           setScreenStreamNotice('');
         }
@@ -349,12 +404,19 @@
     ensureScreenRealtime(true);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
-        ensureScreenRealtime();
+        reviveScreenRealtime();
       }
     });
     window.addEventListener('focus', () => {
-      ensureScreenRealtime();
+      reviveScreenRealtime();
     });
+    window.addEventListener('online', () => reviveScreenRealtime());
+    window.addEventListener('pageshow', (ev) => {
+      if (ev.persisted) reviveScreenRealtime();
+    });
+    setInterval(() => {
+      if (!document.hidden) ensureScreenRealtime();
+    }, 10_000);
     window.addEventListener('pagehide', () => {
       closeScreenRealtime({ keepNotice: true });
     });
