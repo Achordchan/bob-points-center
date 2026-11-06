@@ -1,5 +1,5 @@
 // 余额页的 3D 币：滑动推近、翻面、拨转、下拉刷新；同时维护顶部应用栏和底部标签栏的状态。
-// 只读写本文件创建或 mall.html 里 coin* 前缀的元素，余额和流水通过 #balance 的变化与 bob:ledger 事件获得。
+// 只读写本文件创建或 mall.html 里 coin* 前缀的元素，余额和流水通过 #balance 的变化、bob:ledger 事件及 window.bobLatestLedger 快照获得。
 (function () {
   'use strict';
 
@@ -168,8 +168,9 @@
     d.setDate(d.getDate() - day);
     return d;
   }
-  window.addEventListener('bob:ledger', (ev) => {
-    const rows = ev?.detail?.rows || [];
+  const weekSr = $('coinWeekSr');
+  function applyLedger(rowsIn) {
+    const rows = Array.isArray(rowsIn) ? rowsIn : [];
     const ws = weekStart();
     const wsSec = ws.getTime() / 1000;
     let inc = 0;
@@ -188,6 +189,7 @@
     weekIn.textContent = `+${fmt(inc)}`;
     weekOut.textContent = `−${fmt(out)}`;
     weekNet.textContent = net > 0 ? `+${fmt(net)}` : (net < 0 ? `−${fmt(-net)}` : '0');
+    if (weekSr) weekSr.textContent = `${partial ? '最近 20 笔' : '本周'}收入 ${weekIn.textContent}，支出 ${weekOut.textContent}，净额 ${weekNet.textContent} BOB 币`;
     const end = new Date(ws.getTime() + 6 * 86400000);
     const p2 = (n) => String(n).padStart(2, '0');
     backArt.dataset.bottom = partial ? '最近 20 笔' : `${p2(ws.getMonth() + 1)}.${p2(ws.getDate())} – ${p2(end.getMonth() + 1)}.${p2(end.getDate())}`;
@@ -197,7 +199,10 @@
         ? `本周净${net >= 0 ? '收入' : '支出'} <b class="${net >= 0 ? 'good' : 'bad'}">${net >= 0 ? '+' : '−'}${fmt(Math.abs(net))}</b>${partial ? '（最近 20 笔）' : ''}`
         : '';
     }
-  });
+  }
+  window.addEventListener('bob:ledger', (ev) => applyLedger(ev?.detail?.rows));
+  // 首次流水若在本文件初始化前已渲染，事件已错过，用 mall.js 留下的快照补一次
+  if (Array.isArray(window.bobLatestLedger)) applyLedger(window.bobLatestLedger);
 
   // ---------- 当前标签 ----------
   const tabNames = { balance: '余额', shop: '商城', market: '市场', orders: '订单', more: '更多' };

@@ -2985,8 +2985,11 @@
   function renderLedger(rows) {
     const list = document.getElementById('ledger');
     if (!list) return;
+    // 保留最近一次快照：mall_coin.js 晚于首次加载完成初始化时可直接读取，不依赖事件先后
+    const ledgerRows = Array.isArray(rows) ? rows : [];
+    window.bobLatestLedger = ledgerRows;
     try {
-      window.dispatchEvent(new CustomEvent('bob:ledger', { detail: { rows: Array.isArray(rows) ? rows : [] } }));
+      window.dispatchEvent(new CustomEvent('bob:ledger', { detail: { rows: ledgerRows } }));
     } catch (_) {}
     if (!rows || rows.length === 0) {
       list.innerHTML = '<div class="item muted">暂无流水</div>';
