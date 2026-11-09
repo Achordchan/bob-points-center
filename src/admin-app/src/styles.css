@@ -158,6 +158,8 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
 .redeem-confirm-card .ant-card-head { min-height: 42px; }
 .redeem-confirm-loading { min-height: 96px; display: flex; align-items: center; justify-content: center; gap: 10px; color: rgba(15, 23, 42, .62); }
 .redeem-confirm-actions { width: 100%; justify-content: flex-end; }
+.shared-redeem-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid rgba(15, 23, 42, .08); border-radius: 8px; }
+.shared-redeem-item .ant-typography { word-break: break-all; }
 @media (max-width: 760px) {
   .redeem-scanner-card .ant-card-body { padding: 12px; }
   .redeem-scanner-grid { grid-template-columns: 1fr; gap: 12px; }

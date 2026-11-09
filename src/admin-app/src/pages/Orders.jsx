@@ -46,9 +46,32 @@ function payloadProductText(payload) {
   return name || id || '-';
 }
 
-function RedeemCenter({ onRedeemed }) {
+function SharedRedeemList({ queue, current, doneSet, onSelect }) {
+  return <Card size="small" title={`转发来的待核销订单（${queue.length} 单）`}>
+    <Space direction="vertical" style={{ width: '100%' }} size={8}>
+      {queue.map((item, index) => {
+        const p = parseEncodedPayload(item);
+        const isCurrent = item === current;
+        const isDone = doneSet.has(item);
+        return <div key={item} className="shared-redeem-item">
+          <Space size={6} wrap>
+            <Typography.Text strong>{index + 1}.</Typography.Text>
+            <Typography.Text>{p ? payloadProductText(p) : '二维码内容无效'}</Typography.Text>
+            {p?.exchange_id && <Typography.Text type="secondary">{p.exchange_id}</Typography.Text>}
+            {isDone ? <Tag color="green">已核销</Tag> : isCurrent ? <Tag color="blue">当前</Tag> : null}
+          </Space>
+          {!isCurrent && !isDone && <Button size="small" onClick={() => onSelect(item)}>查看</Button>}
+        </div>;
+      })}
+    </Space>
+  </Card>;
+}
+
+function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
   const { message } = App.useApp();
-  const [encoded, setEncoded] = useState('');
+  const [queue] = useState(() => sharedQueue);
+  const [doneSet, setDoneSet] = useState(() => new Set());
+  const [encoded, setEncoded] = useState(() => sharedQueue[0] || '');
   const [redeeming, setRedeeming] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState(null);
@@ -56,6 +79,7 @@ function RedeemCenter({ onRedeemed }) {
   const [lastResult, setLastResult] = useState(null);
   const payload = useMemo(() => parseEncodedPayload(encoded), [encoded]);
   const trimmedEncoded = encoded.trim();
+  const order = preview?.encoded === trimmedEncoded ? (preview.data?.order || null) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +95,8 @@ function RedeemCenter({ onRedeemed }) {
     setPreviewing(true);
     api(`/admin/orders/${encodeURIComponent(payload.exchange_id)}`)
       .then((result) => {
-        if (!cancelled) setPreview(result.data || null);
+        // 记下这份预览对应的 encoded，切换订单时旧预览不会被当成新订单的。
+        if (!cancelled) setPreview(result.data ? { encoded: trimmedEncoded, data: result.data } : null);
       })
       .catch((err) => {
         if (!cancelled) setPreviewError(err.message || '订单信息读取失败，请重新扫码');
@@ -98,7 +123,7 @@ function RedeemCenter({ onRedeemed }) {
       message.error('二维码内容无效，请重新扫码');
       return false;
     }
-    if (preview?.order?.fulfilled_at) {
+    if (order?.fulfilled_at) {
       message.warning('该订单已核销，不能重复操作');
       return false;
     }
@@ -107,8 +132,14 @@ function RedeemCenter({ onRedeemed }) {
     try {
       const result = await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: trimmedEncoded } });
       message.success('核销完成');
-      setLastResult({ ...result, payload, order: preview?.order || null });
+      setLastResult({ ...result, payload, order: order || null });
       resetScan();
+      if (queue.includes(trimmedEncoded)) {
+        const nextDone = new Set(doneSet).add(trimmedEncoded);
+        setDoneSet(nextDone);
+        const next = queue.find((item) => !nextDone.has(item));
+        if (next) setEncoded(next);
+      }
       onRedeemed?.();
       return true;
     } catch (err) {
@@ -119,12 +150,16 @@ function RedeemCenter({ onRedeemed }) {
     }
   };
 
-  const order = preview?.order || null;
   const confirmDisabled = !payload || !order || Boolean(order.fulfilled_at) || previewing || Boolean(previewError);
 
-  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
-    <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} />
-    {trimmedEncoded && <Card size="small" className="redeem-confirm-card" title="待核销订单">
+  // 转发来的订单如果别人已经核销过，列表里也标成已核销。
+  useEffect(() => {
+    if (order?.fulfilled_at && queue.includes(trimmedEncoded) && !doneSet.has(trimmedEncoded)) {
+      setDoneSet((prev) => new Set(prev).add(trimmedEncoded));
+    }
+  }, [order?.fulfilled_at, trimmedEncoded, queue, doneSet]);
+
+  const confirmCard = trimmedEncoded ?<Card size="small" className="redeem-confirm-card" title="待核销订单">
       {previewing ? <div className="redeem-confirm-loading"><Spin />正在读取订单信息…</div> : previewError ? <Space direction="vertical" style={{ width: '100%' }} size={12}>
         <Alert type="error" showIcon message={previewError} />
         <Button onClick={resetScan}>重新扫码</Button>
@@ -145,7 +180,12 @@ function RedeemCenter({ onRedeemed }) {
           <Button type="primary" loading={redeeming} disabled={confirmDisabled} onClick={doRedeem}>确认核销</Button>
         </Space>
       </Space> : <Typography.Text type="secondary">识别成功后将在这里显示订单信息。</Typography.Text>}
-    </Card>}
+    </Card> : null;
+  const scanner = <RedeemScanner encoded={encoded} onEncodedChange={setEncoded} />;
+  // 从转发链接进来时，确认卡片紧跟订单列表，免得管理员还要滚过扫码区。
+  return <Space direction="vertical" style={{ width: '100%' }} size={12}>
+    {queue.length > 0 && <SharedRedeemList queue={queue} current={trimmedEncoded} doneSet={doneSet} onSelect={setEncoded} />}
+    {queue.length > 0 ? <>{confirmCard}{scanner}</> : <>{scanner}{confirmCard}</>}
     {lastResult && <Card size="small" title="最近核销结果">
       <Descriptions bordered size="small" column={{ xs: 1, md: 2 }} items={[
         { key: 'exchange', label: '兑换单号', children: lastResult.order?.exchange_id || lastResult.exchange_id || lastResult.payload?.exchange_id || '-' },
@@ -254,17 +294,19 @@ function OrderTable({ type, onOpen, reloadKey, me }) {
   </Space>;
 }
 
-export default function Orders({ me }) {
+export default function Orders({ me, sharedRedeemQueue = [] }) {
   const [detail, setDetail] = useState(null);
   const [redeemVersion, setRedeemVersion] = useState(0);
   const open = async (id) => setDetail((await api(`/admin/orders/${encodeURIComponent(id)}`)).data);
   const items = [];
-  if (hasPermission(me, 'orders:redeem')) items.push({ key: 'redeem', label: '核销中心', children: <RedeemCenter onRedeemed={() => setRedeemVersion((v) => v + 1)} /> });
+  const canRedeem = hasPermission(me, 'orders:redeem');
+  if (canRedeem) items.push({ key: 'redeem', label: '核销中心', children: <RedeemCenter sharedQueue={sharedRedeemQueue} onRedeemed={() => setRedeemVersion((v) => v + 1)} /> });
   items.push(
     { key: 'pending', label: '未核销', children: <OrderTable type="pending" onOpen={open} reloadKey={redeemVersion} me={me} /> },
     { key: 'history', label: '已核销', children: <OrderTable type="history" onOpen={open} reloadKey={redeemVersion} me={me} /> },
   );
   return <Card>
+    {!canRedeem && sharedRedeemQueue.length > 0 && <Alert style={{ marginBottom: 12 }} type="warning" showIcon message="有人转发了核销订单给你，但你没有核销权限" description="请转发给有核销权限的管理员处理。" />}
     <Tabs defaultActiveKey={items[0]?.key} items={items} />
     <Drawer title="订单详情" open={Boolean(detail)} onClose={() => setDetail(null)} width={720}>
       {detail && <Descriptions bordered column={1} items={[
