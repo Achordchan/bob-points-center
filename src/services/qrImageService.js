@@ -20,9 +20,17 @@ function normalizeQrSize(value, fallback = DEFAULT_QR_SIZE) {
   return Math.min(MAX_QR_SIZE, Math.max(MIN_QR_SIZE, n));
 }
 
-function qrOptions(size) {
+const QR_EC_LEVELS = new Set(['L', 'M', 'Q', 'H']);
+
+// 默认 M；转发核销图要在二维码中间盖产品名，需要 H。
+export function normalizeQrEcLevel(value) {
+  const level = String(value || '').trim().toUpperCase();
+  return QR_EC_LEVELS.has(level) ? level : 'M';
+}
+
+function qrOptions(size, ecLevel = 'M') {
   return {
-    errorCorrectionLevel: 'M',
+    errorCorrectionLevel: normalizeQrEcLevel(ecLevel),
     type: 'image/png',
     margin: 2,
     width: normalizeQrSize(size),
@@ -57,10 +65,11 @@ export async function createQrDataUrl(data, { size = DEFAULT_QR_SIZE } = {}) {
   }
 }
 
-export async function createQrPngBuffer(data, { size = DEFAULT_QR_SIZE } = {}) {
+export async function createQrPngBuffer(data, { size = DEFAULT_QR_SIZE, ec = 'M' } = {}) {
   const text = normalizeQrText(data);
   const normalizedSize = normalizeQrSize(size);
-  const cacheKey = `${normalizedSize}:${text}`;
+  const ecLevel = normalizeQrEcLevel(ec);
+  const cacheKey = `${normalizedSize}:${ecLevel}:${text}`;
   const cached = qrPngCache.get(cacheKey);
   if (cached) {
     qrPngCache.delete(cacheKey);
@@ -68,7 +77,7 @@ export async function createQrPngBuffer(data, { size = DEFAULT_QR_SIZE } = {}) {
     return cached;
   }
   try {
-    const buffer = await QRCode.toBuffer(text, qrOptions(normalizedSize));
+    const buffer = await QRCode.toBuffer(text, qrOptions(normalizedSize, ecLevel));
     rememberQrPng(cacheKey, buffer);
     return buffer;
   } catch (err) {

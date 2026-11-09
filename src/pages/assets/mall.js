@@ -2518,6 +2518,171 @@
     setQrModalVisible(true);
   }
 
+  // ===== 转发核销：生成中间印着产品名的二维码图片，发给管理员扫码/上传核销 =====
+  const QR_SHARE_CANVAS_SIZE = 1080;
+
+  function loadImageElement(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('二维码图片加载失败'));
+      img.src = src;
+    });
+  }
+
+  // 按宽度切行，最多 maxLines 行，超出部分用省略号。
+  function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+    const chars = Array.from(String(text || '').trim());
+    const lines = [];
+    let line = '';
+    for (let i = 0; i < chars.length; i += 1) {
+      const next = line + chars[i];
+      if (ctx.measureText(next).width <= maxWidth) {
+        line = next;
+        continue;
+      }
+      if (lines.length === maxLines - 1) {
+        let cut = line;
+        while (cut && ctx.measureText(`${cut}…`).width > maxWidth) cut = cut.slice(0, -1);
+        lines.push(`${cut}…`);
+        return lines;
+      }
+      lines.push(line);
+      line = chars[i];
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  async function buildRedeemShareCanvas({ encoded, productTitle }) {
+    const size = QR_SHARE_CANVAS_SIZE;
+    // 中间要盖产品名，二维码用最高容错等级 H。
+    const qrImg = await loadImageElement(`/qr/render?size=720&ec=H&data=${encodeURIComponent(encoded)}`);
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(qrImg, 0, 0, size, size);
+
+    const title = String(productTitle || '').trim();
+    if (!title) return canvas;
+    const fontSize = 40;
+    const lineHeight = 50;
+    const padX = 22;
+    const padY = 18;
+    const maxBoxW = Math.round(size * 0.3);
+    ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif`;
+    const lines = wrapCanvasText(ctx, title, maxBoxW - padX * 2, 2);
+    const textW = Math.max(...lines.map((x) => ctx.measureText(x).width));
+    const boxW = Math.min(maxBoxW, Math.ceil(textW) + padX * 2);
+    const boxH = lines.length * lineHeight + padY * 2;
+    const boxX = Math.round((size - boxW) / 2);
+    const boxY = Math.round((size - boxH) / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(boxX, boxY, boxW, boxH, 14);
+    else ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.fill();
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    lines.forEach((text, i) => {
+      ctx.fillText(text, size / 2, boxY + padY + lineHeight * i + lineHeight / 2);
+    });
+    return canvas;
+  }
+
+  function closeQrShareOverlay() {
+    document.getElementById('qrShareOverlay')?.remove();
+    updateModalScrollLock();
+  }
+
+  // 全屏预览图片。capturing=true 时只放图片（供钉钉截取当前页面分享），否则带操作提示。
+  function showQrShareOverlay(dataUrl, fileName, { capturing = false } = {}) {
+    closeQrShareOverlay();
+    const overlay = document.createElement('div');
+    overlay.id = 'qrShareOverlay';
+    overlay.className = `qrShareOverlay${capturing ? ' isCapturing' : ''}`;
+    overlay.innerHTML =
+      '<img class="qrShareImage" alt="核销二维码" />' +
+      (capturing ? '' : (
+        '<div class="qrShareTip">长按或右键图片，转发给管理员核销</div>' +
+        '<div class="qrShareActions">' +
+        '<a class="qrShareBtn qrShareDownload" download>保存图片</a>' +
+        '<button class="secondary" type="button" data-qr-share-close>关闭</button>' +
+        '</div>'
+      ));
+    overlay.querySelector('.qrShareImage').src = dataUrl;
+    const download = overlay.querySelector('.qrShareDownload');
+    if (download) {
+      download.href = dataUrl;
+      download.setAttribute('download', fileName);
+    }
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target?.closest?.('[data-qr-share-close]')) closeQrShareOverlay();
+    });
+    document.body.appendChild(overlay);
+    updateModalScrollLock();
+    return overlay;
+  }
+
+  function waitForPaint() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  async function shareRedeemQrImage() {
+    const payload = state.qrModalPayload || {};
+    if (!payload.encoded) {
+      showNotice('二维码信息缺失，请刷新后再试', 'error');
+      return;
+    }
+    let dataUrl = '';
+    try {
+      const canvas = await buildRedeemShareCanvas({ encoded: payload.encoded, productTitle: payload.productTitle });
+      dataUrl = canvas.toDataURL('image/png');
+    } catch (err) {
+      showNotice(err?.message || '生成二维码图片失败', 'error');
+      return;
+    }
+    const safeName = String(payload.productTitle || payload.exchangeId || '订单').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+    const fileName = `核销码_${safeName}.png`;
+
+    const ua = navigator.userAgent || '';
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
+    const ddShareImage = /DingTalk/i.test(ua) && isMobile && typeof window.dd?.biz?.util?.shareImage === 'function';
+    if (!ddShareImage) {
+      showQrShareOverlay(dataUrl, fileName);
+      return;
+    }
+
+    // 手机钉钉：全屏只显示这张图，让钉钉截取当前页面直接分享到会话。
+    const overlay = showQrShareOverlay(dataUrl, fileName, { capturing: true });
+    const img = overlay.querySelector('.qrShareImage');
+    if (img && !img.complete) await new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; });
+    await waitForPaint();
+    const shared = await new Promise((resolve) => {
+      try {
+        window.dd.biz.util.shareImage({
+          autoCapture: true,
+          destChannelStyle: 'dd',
+          onSuccess: () => resolve(true),
+          onFail: () => resolve(false),
+        });
+      } catch (_) {
+        resolve(false);
+      }
+    });
+    if (shared) {
+      closeQrShareOverlay();
+      return;
+    }
+    // 分享没成功：换成带提示的预览，用户可以长按图片转发或保存。
+    showQrShareOverlay(dataUrl, fileName);
+  }
+
   function closeQrModal(options = {}) {
     const keepPayload = options?.keepPayload === true;
     state.qrModalExchangeId = null;
@@ -5083,7 +5248,7 @@
       timeStamp: cfg.timeStamp,
       nonceStr: cfg.nonceStr,
       signature: cfg.signature,
-      jsApiList: ['runtime.permission.requestAuthCode'],
+      jsApiList: ['runtime.permission.requestAuthCode', 'biz.util.shareImage'],
     });
 
     dd.ready(() => {
@@ -5340,6 +5505,7 @@
               switchTab('orders');
             });
           }
+          document.getElementById('btnQrShare')?.addEventListener('click', () => shareRedeemQrImage());
           const btnQrRefund = document.getElementById('btnQrRefund');
           if (btnQrRefund) {
             btnQrRefund.addEventListener('click', () => {
