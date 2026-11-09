@@ -334,9 +334,10 @@ export default function RedeemScanner({ encoded, onEncodedChange }) {
         {hasEncoded ? '重新扫码' : '打开摄像头扫码'}
       </Button>
       {scanning && <Button icon={<StopOutlined />} onClick={stopCamera}>停止扫码</Button>}
-      {!isMobile && <Upload accept="image/*" showUploadList={false} beforeUpload={handleFile}>
-        <Button icon={<UploadOutlined />} loading={detecting}>上传二维码图片</Button>
-      </Upload>}
+      {/* 手机端也要能从相册选图：用户转发来的核销码图片在同一台手机上无法用摄像头扫。 */}
+      <Upload accept="image/*" showUploadList={false} beforeUpload={handleFile}>
+        <Button size={isMobile ? 'large' : 'middle'} icon={<UploadOutlined />} loading={detecting}>{isMobile ? '从相册选二维码图片' : '上传二维码图片'}</Button>
+      </Upload>
       {!isMobile && <Button icon={<CopyOutlined />} onClick={readClipboard}>读取剪贴板</Button>}
     </Space>
     {(!isMobile || scanning) && <div className="redeem-scanner-grid">

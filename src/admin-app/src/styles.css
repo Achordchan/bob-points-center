@@ -166,6 +166,8 @@ html, body, #root { min-height: 100%; margin: 0; background: #f5f7fb; }
   .redeem-scanner-camera.is-scanning, .redeem-scanner-camera.is-scanning .redeem-scanner-video { min-height: min(58vh, 430px); }
   .redeem-scanner-actions .ant-space-item:nth-child(1), .redeem-scanner-actions .ant-space-item:nth-child(2) { width: 100%; }
   .redeem-scanner-actions .ant-space-item:nth-child(1) .ant-btn, .redeem-scanner-actions .ant-space-item:nth-child(2) .ant-btn { width: 100%; height: 48px; }
+  .redeem-scanner-actions .ant-upload-wrapper, .redeem-scanner-actions .ant-upload { display: block; width: 100%; }
+  .redeem-scanner-actions .ant-upload .ant-btn { width: 100%; height: 48px; }
 
   .redeem-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .redeem-confirm-actions .ant-space-item, .redeem-confirm-actions .ant-btn { width: 100%; }
