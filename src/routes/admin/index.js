@@ -1051,12 +1051,7 @@ export function adminRouter() {
       return res.status(500).type('text').send(String(err?.message || err));
     }
     if (!payload) {
-      // 保留原始链接（如转发核销带的 ?encoded=），登录后回到这里。
-      const returnTo = normalizeAdminReturnTo(req.originalUrl);
-      const loginUrl = returnTo === '/admin/home'
-        ? '/admin/login'
-        : `/admin/login?${new URLSearchParams({ redirect: returnTo }).toString()}`;
-      return res.redirect(302, loginUrl);
+      return res.redirect(302, '/admin/login');
     }
     if (existsSync(adminAppIndex)) {
       return res.type('html').sendFile(adminAppIndex);

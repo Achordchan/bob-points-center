@@ -46,23 +46,9 @@ class PageErrorBoundary extends Component {
   }
 }
 
-// 用户从商城“转发核销”过来的链接：/admin/home?encoded=xxx&encoded=yyy
-const MAX_SHARED_REDEEM = 10;
-
-function readSharedRedeemQueue() {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const list = params.getAll('encoded').map((value) => String(value || '').trim()).filter(Boolean);
-    return [...new Set(list)].slice(0, MAX_SHARED_REDEEM);
-  } catch {
-    return [];
-  }
-}
-
 export default function AdminApp() {
   const { message, modal } = AntApp.useApp();
-  const [sharedRedeemQueue] = useState(readSharedRedeemQueue);
-  const [activeKey, setActiveKey] = useState(() => (sharedRedeemQueue.length ? 'orders' : 'dashboard'));
+  const [activeKey, setActiveKey] = useState('dashboard');
   const [me, setMe] = useState(null);
   const [dingtalk, setDingtalk] = useState({ connected: false, data: null, error: '' });
   const [modalOpen, setModalOpen] = useState(false);
@@ -132,7 +118,7 @@ export default function AdminApp() {
   };
 
   const Page = pages[activeKey] || pages.dashboard;
-  const common = { onOpenDingtalk: () => canEditDingtalk && setModalOpen(true), dingtalk, reloadDingtalk: () => loadDingtalk(me), onNavigate: setActiveKey, me, sharedRedeemQueue };
+  const common = { onOpenDingtalk: () => canEditDingtalk && setModalOpen(true), dingtalk, reloadDingtalk: () => loadDingtalk(me), onNavigate: setActiveKey, me };
 
   return (
     <>
