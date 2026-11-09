@@ -4,7 +4,9 @@ import express from 'express';
 import { adminRouter } from '../../src/routes/admin/index.js';
 
 // 转发核销链接 /admin/home?encoded=... 未登录时必须带着原链接跳登录页，登录后才能回到核销页。
-test('未登录访问 /admin/home 保留原链接作为 redirect', async (t) => {
+// 回跳地址必须放在 # 后：登录页在钉钉内用 origin+pathname+search 做 JSAPI 签名，
+// 查询串里出现 %2F 等转义字符会导致 dd.config 校验失败（钉钉免登初始化失败）。
+test('未登录访问 /admin/home 用 hash 保留原链接，登录页 URL 不带查询串', async (t) => {
   const app = express();
   app.locals.db = {
     async get() { return null; },
@@ -32,5 +34,6 @@ test('未登录访问 /admin/home 保留原链接作为 redirect', async (t) => 
   const location = await locationOf(shared);
   const url = new URL(location, base);
   assert.equal(url.pathname, '/admin/login');
-  assert.equal(url.searchParams.get('redirect'), shared);
+  assert.equal(url.search, '');
+  assert.equal(new URLSearchParams(url.hash.slice(1)).get('redirect'), shared);
 });

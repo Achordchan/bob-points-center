@@ -4,7 +4,10 @@
 
   function getLoginRedirectTarget() {
     const fallback = '/admin/home';
-    const target = new URLSearchParams(window.location.search).get('redirect') || '';
+    // 优先读 # 后的回跳地址（不参与钉钉签名），兼容旧的 ?redirect= 链接。
+    const target = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('redirect')
+      || new URLSearchParams(window.location.search).get('redirect')
+      || '';
     if (!target.startsWith('/') || target.startsWith('//')) return fallback;
     if (target.startsWith('/admin/') || target === '/docs' || target.startsWith('/docs/')) return target;
     return fallback;

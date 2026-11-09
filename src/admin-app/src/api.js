@@ -42,7 +42,8 @@ const errorTextMap = {
 
 function getAdminLoginUrl() {
   const target = `${window.location.pathname}${window.location.search}${window.location.hash}` || '/admin/home';
-  return `/admin/login?redirect=${encodeURIComponent(target)}`;
+  // 回跳地址放在 # 后，钉钉 JSAPI 签名 URL 不含 # 部分（见 admin_login.js）。
+  return `/admin/login#redirect=${encodeURIComponent(target)}`;
 }
 
 function redirectToAdminLogin() {

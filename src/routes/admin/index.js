@@ -1052,10 +1052,12 @@ export function adminRouter() {
     }
     if (!payload) {
       // 保留原始链接（如转发核销带的 ?encoded=），登录后回到这里。
+      // 回跳地址放在 # 后：钉钉 JSAPI 签名 URL 不含 # 部分，登录页 URL 保持干净，
+      // 避免查询串里的 %2F 等转义字符导致钉钉内 dd.config 签名校验失败。
       const returnTo = normalizeAdminReturnTo(req.originalUrl);
       const loginUrl = returnTo === '/admin/home'
         ? '/admin/login'
-        : `/admin/login?${new URLSearchParams({ redirect: returnTo }).toString()}`;
+        : `/admin/login#${new URLSearchParams({ redirect: returnTo }).toString()}`;
       return res.redirect(302, loginUrl);
     }
     if (existsSync(adminAppIndex)) {
