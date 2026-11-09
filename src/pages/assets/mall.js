@@ -41,8 +41,6 @@
     cartItems: [],
     cartCheckoutInFlight: false,
     ordersFilter: null,
-    ordersShareMode: false,
-    ordersShareSelected: new Set(),
     ordersSearchKeyword: '',
     ordersTimeFilter: 'all',
     shopFilter: 'all',
@@ -2520,6 +2518,171 @@
     setQrModalVisible(true);
   }
 
+  // ===== 转发核销：生成中间印着产品名的二维码图片，发给管理员扫码/上传核销 =====
+  const QR_SHARE_CANVAS_SIZE = 1080;
+
+  function loadImageElement(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('二维码图片加载失败'));
+      img.src = src;
+    });
+  }
+
+  // 按宽度切行，最多 maxLines 行，超出部分用省略号。
+  function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+    const chars = Array.from(String(text || '').trim());
+    const lines = [];
+    let line = '';
+    for (let i = 0; i < chars.length; i += 1) {
+      const next = line + chars[i];
+      if (ctx.measureText(next).width <= maxWidth) {
+        line = next;
+        continue;
+      }
+      if (lines.length === maxLines - 1) {
+        let cut = line;
+        while (cut && ctx.measureText(`${cut}…`).width > maxWidth) cut = cut.slice(0, -1);
+        lines.push(`${cut}…`);
+        return lines;
+      }
+      lines.push(line);
+      line = chars[i];
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  async function buildRedeemShareCanvas({ encoded, productTitle }) {
+    const size = QR_SHARE_CANVAS_SIZE;
+    // 中间要盖产品名，二维码用最高容错等级 H。
+    const qrImg = await loadImageElement(`/qr/render?size=720&ec=H&data=${encodeURIComponent(encoded)}`);
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(qrImg, 0, 0, size, size);
+
+    const title = String(productTitle || '').trim();
+    if (!title) return canvas;
+    const fontSize = 40;
+    const lineHeight = 50;
+    const padX = 22;
+    const padY = 18;
+    const maxBoxW = Math.round(size * 0.3);
+    ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif`;
+    const lines = wrapCanvasText(ctx, title, maxBoxW - padX * 2, 2);
+    const textW = Math.max(...lines.map((x) => ctx.measureText(x).width));
+    const boxW = Math.min(maxBoxW, Math.ceil(textW) + padX * 2);
+    const boxH = lines.length * lineHeight + padY * 2;
+    const boxX = Math.round((size - boxW) / 2);
+    const boxY = Math.round((size - boxH) / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(boxX, boxY, boxW, boxH, 14);
+    else ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.fill();
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    lines.forEach((text, i) => {
+      ctx.fillText(text, size / 2, boxY + padY + lineHeight * i + lineHeight / 2);
+    });
+    return canvas;
+  }
+
+  function closeQrShareOverlay() {
+    document.getElementById('qrShareOverlay')?.remove();
+    updateModalScrollLock();
+  }
+
+  // 全屏预览图片。capturing=true 时只放图片（供钉钉截取当前页面分享），否则带操作提示。
+  function showQrShareOverlay(dataUrl, fileName, { capturing = false } = {}) {
+    closeQrShareOverlay();
+    const overlay = document.createElement('div');
+    overlay.id = 'qrShareOverlay';
+    overlay.className = `qrShareOverlay${capturing ? ' isCapturing' : ''}`;
+    overlay.innerHTML =
+      '<img class="qrShareImage" alt="核销二维码" />' +
+      (capturing ? '' : (
+        '<div class="qrShareTip">长按或右键图片，转发给管理员核销</div>' +
+        '<div class="qrShareActions">' +
+        '<a class="qrShareBtn qrShareDownload" download>保存图片</a>' +
+        '<button class="secondary" type="button" data-qr-share-close>关闭</button>' +
+        '</div>'
+      ));
+    overlay.querySelector('.qrShareImage').src = dataUrl;
+    const download = overlay.querySelector('.qrShareDownload');
+    if (download) {
+      download.href = dataUrl;
+      download.setAttribute('download', fileName);
+    }
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target?.closest?.('[data-qr-share-close]')) closeQrShareOverlay();
+    });
+    document.body.appendChild(overlay);
+    updateModalScrollLock();
+    return overlay;
+  }
+
+  function waitForPaint() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  async function shareRedeemQrImage() {
+    const payload = state.qrModalPayload || {};
+    if (!payload.encoded) {
+      showNotice('二维码信息缺失，请刷新后再试', 'error');
+      return;
+    }
+    let dataUrl = '';
+    try {
+      const canvas = await buildRedeemShareCanvas({ encoded: payload.encoded, productTitle: payload.productTitle });
+      dataUrl = canvas.toDataURL('image/png');
+    } catch (err) {
+      showNotice(err?.message || '生成二维码图片失败', 'error');
+      return;
+    }
+    const safeName = String(payload.productTitle || payload.exchangeId || '订单').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+    const fileName = `核销码_${safeName}.png`;
+
+    const ua = navigator.userAgent || '';
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
+    const ddShareImage = /DingTalk/i.test(ua) && isMobile && typeof window.dd?.biz?.util?.shareImage === 'function';
+    if (!ddShareImage) {
+      showQrShareOverlay(dataUrl, fileName);
+      return;
+    }
+
+    // 手机钉钉：全屏只显示这张图，让钉钉截取当前页面直接分享到会话。
+    const overlay = showQrShareOverlay(dataUrl, fileName, { capturing: true });
+    const img = overlay.querySelector('.qrShareImage');
+    if (img && !img.complete) await new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; });
+    await waitForPaint();
+    const shared = await new Promise((resolve) => {
+      try {
+        window.dd.biz.util.shareImage({
+          autoCapture: true,
+          destChannelStyle: 'dd',
+          onSuccess: () => resolve(true),
+          onFail: () => resolve(false),
+        });
+      } catch (_) {
+        resolve(false);
+      }
+    });
+    if (shared) {
+      closeQrShareOverlay();
+      return;
+    }
+    // 分享没成功：换成带提示的预览，用户可以长按图片转发或保存。
+    showQrShareOverlay(dataUrl, fileName);
+  }
+
   function closeQrModal(options = {}) {
     const keepPayload = options?.keepPayload === true;
     state.qrModalExchangeId = null;
@@ -2893,150 +3056,6 @@
     } else if (next === 'products') {
       loadPopularProducts();
     }
-  }
-
-  // ===== 转发核销：把待核销订单通过钉钉分享发给管理员 =====
-  const REDEEM_SHARE_MAX = 10;
-
-  function isOrderShareable(row) {
-    const status = row?.status ? String(row.status) : '';
-    const isListed = status === 'listed' || row?.is_listed === true || Number(row?.is_listed || 0) === 1;
-    return status === 'pending' && !isListed && Boolean(row?.encoded);
-  }
-
-  function buildRedeemShareUrl(encodedList) {
-    const url = new URL('/admin/home', window.location.origin);
-    encodedList.forEach((encoded) => url.searchParams.append('encoded', String(encoded)));
-    return url.toString();
-  }
-
-  async function copyTextToClipboard(text) {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-    } catch (_) {
-      // fall through
-    }
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand('copy');
-      ta.remove();
-      return ok;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  async function shareRedeemOrders(items) {
-    const list = (items || []).filter((x) => x?.encoded).slice(0, REDEEM_SHARE_MAX);
-    if (!list.length) {
-      showNotice('没有可转发的待核销订单', 'error');
-      return false;
-    }
-    const url = buildRedeemShareUrl(list.map((x) => x.encoded));
-    const names = list.map((x) => String(x.title || '').trim()).filter(Boolean);
-    const who = String(state.me?.name || '').trim();
-    const title = 'BOB 币核销请求';
-    let content = `${who ? `${who} ` : ''}请你核销 ${list.length} 件：${names.join('、')}`;
-    if (content.length > 120) content = `${content.slice(0, 118)}…`;
-    const image = new URL('/assets/favicon.png', window.location.origin).toString();
-
-    const ddShare = /DingTalk/i.test(navigator.userAgent || '') ? window.dd?.biz?.util?.share : null;
-    if (typeof ddShare === 'function') {
-      const shared = await new Promise((resolve) => {
-        try {
-          window.dd.biz.util.share({
-            type: 1,
-            url,
-            title,
-            content,
-            image,
-            onSuccess: () => resolve(true),
-            onFail: () => resolve(false),
-          });
-        } catch (_) {
-          resolve(false);
-        }
-      });
-      if (shared) return true;
-    } else if (typeof navigator.share === 'function') {
-      try {
-        await navigator.share({ title, text: content, url });
-        return true;
-      } catch (err) {
-        if (err?.name === 'AbortError') return false;
-      }
-    }
-
-    const copied = await copyTextToClipboard(url);
-    showNotice(copied ? '已复制核销链接，发给管理员打开即可核销' : '转发失败，请截图二维码发给管理员', copied ? 'success' : 'error');
-    return copied;
-  }
-
-  function orderShareItem(row) {
-    return {
-      encoded: row?.encoded ? String(row.encoded) : '',
-      title: row?.product_name ? String(row.product_name) : String(row?.product_id || ''),
-    };
-  }
-
-  function updateOrdersShareUi() {
-    const rows = state.orders || [];
-    const hasShareable = rows.some(isOrderShareable);
-    if (!hasShareable && state.ordersShareMode) {
-      state.ordersShareMode = false;
-      state.ordersShareSelected = new Set();
-    }
-    setHidden('btnOrdersShareMode', !hasShareable || state.ordersShareMode);
-    setHidden('ordersShareBar', !state.ordersShareMode);
-    const count = state.ordersShareSelected.size;
-    const text = document.getElementById('ordersShareBarText');
-    if (text) {
-      text.textContent = `已选 ${count}/${REDEEM_SHARE_MAX} 单`;
-    }
-    const sendBtn = document.getElementById('btnOrdersShareSend');
-    if (sendBtn) sendBtn.disabled = count === 0;
-  }
-
-  function setOrdersShareMode(on) {
-    state.ordersShareMode = Boolean(on);
-    state.ordersShareSelected = new Set();
-    if (state.ordersShareMode) state.ordersFilter = 'pending';
-    renderOrdersWithFilter(state.orders || []);
-  }
-
-  function toggleOrderShareSelected(exchangeId) {
-    const id = String(exchangeId || '');
-    if (!id) return;
-    const selected = state.ordersShareSelected;
-    if (selected.has(id)) {
-      selected.delete(id);
-    } else {
-      if (selected.size >= REDEEM_SHARE_MAX) {
-        showNotice(`一次最多转发 ${REDEEM_SHARE_MAX} 单`, 'info');
-        return;
-      }
-      selected.add(id);
-    }
-    renderOrdersWithFilter(state.orders || []);
-  }
-
-  async function sendSelectedOrdersShare() {
-    const rows = (state.orders || []).filter((x) => state.ordersShareSelected.has(String(x?.exchange_id || '')) && isOrderShareable(x));
-    if (!rows.length) {
-      showNotice('请先选择要转发的订单', 'info');
-      return;
-    }
-    const ok = await shareRedeemOrders(rows.map(orderShareItem));
-    if (ok) setOrdersShareMode(false);
   }
 
   function renderOrdersStats(rows, visibleCount) {
@@ -3805,21 +3824,6 @@
         const auctionPill = isAuction ? ' <span class="pill pillAuction">竞拍竞得</span>' : '';
         const title = name || pid || '-';
 
-        if (state.ordersShareMode) {
-          const shareable = isOrderShareable(x);
-          const selected = shareable && state.ordersShareSelected.has(exchangeId);
-          const cls = shareable ? ` orderSelectable${selected ? ' orderSelected' : ''}` : ' orderDisabled';
-          const attr = shareable ? ` data-share-select="${escapeHtml(exchangeId)}" role="checkbox" aria-checked="${selected ? 'true' : 'false'}"` : '';
-          return (
-            `<div class="item${cls}"${attr}>` +
-            `<div class="orderTop">` +
-            `<div class="orderTitle">${shareable ? '<span class="orderCheck" aria-hidden="true">✓</span>' : ''}${pill}${auctionPill} <span style="margin-left:8px;">${escapeHtml(title)}</span></div>` +
-            `<div class="orderMeta mono">${escapeHtml(ts)}</div>` +
-            `</div>` +
-            `</div>`
-          );
-        }
-
         const clickableClass = isPending ? ' orderClickable' : '';
         const dataAttr = isPending ? ` data-show-qr="${escapeHtml(exchangeId)}"` : ` data-order-detail="${escapeHtml(exchangeId)}"`;
         return (
@@ -3875,7 +3879,6 @@
     });
     renderOrders(filtered);
     renderOrdersStats(rows, filtered.length);
-    updateOrdersShareUi();
   }
 
   function renderRichBoard(rows) {
@@ -5245,7 +5248,7 @@
       timeStamp: cfg.timeStamp,
       nonceStr: cfg.nonceStr,
       signature: cfg.signature,
-      jsApiList: ['runtime.permission.requestAuthCode', 'biz.util.share'],
+      jsApiList: ['runtime.permission.requestAuthCode', 'biz.util.shareImage'],
     });
 
     dd.ready(() => {
@@ -5495,17 +5498,6 @@
               if (exchangeId) listMarketOrder(exchangeId);
             });
           }
-          document.getElementById('btnOrdersShareMode')?.addEventListener('click', () => setOrdersShareMode(true));
-          document.getElementById('btnOrdersShareCancel')?.addEventListener('click', () => setOrdersShareMode(false));
-          document.getElementById('btnOrdersShareSend')?.addEventListener('click', () => sendSelectedOrdersShare());
-          document.getElementById('btnQrShare')?.addEventListener('click', () => {
-            const payload = state.qrModalPayload || {};
-            if (!payload.encoded) {
-              showNotice('二维码信息缺失，请刷新后再试', 'error');
-              return;
-            }
-            shareRedeemOrders([{ encoded: payload.encoded, title: payload.productTitle || '' }]);
-          });
           const btnQrToOrders = document.getElementById('btnQrToOrders');
           if (btnQrToOrders) {
             btnQrToOrders.addEventListener('click', () => {
@@ -5513,6 +5505,7 @@
               switchTab('orders');
             });
           }
+          document.getElementById('btnQrShare')?.addEventListener('click', () => shareRedeemQrImage());
           const btnQrRefund = document.getElementById('btnQrRefund');
           if (btnQrRefund) {
             btnQrRefund.addEventListener('click', () => {
@@ -5864,14 +5857,6 @@
 
           document.getElementById('orders').addEventListener('click', (ev) => {
             const target = ev?.target;
-
-            // 批量转发模式：点击切换选中
-            const shareItem = target?.closest ? target.closest('[data-share-select]') : null;
-            if (shareItem) {
-              toggleOrderShareSelected(shareItem.getAttribute('data-share-select'));
-              return;
-            }
-            if (state.ordersShareMode) return;
 
             // 处理QR码点击（未核销订单）
             const qrItem = target?.closest ? target.closest('[data-show-qr]') : null;

@@ -2323,62 +2323,47 @@ body:not(.onBalance) .coinBackdrop { display: none; }
 .orderClickable:hover { box-shadow: 0 18px 50px rgba(58, 42, 18, 0.14); }
 
 /* 转发核销 */
-.ordersStatRow { justify-content: space-between; }
-.ordersStatRow .ordersStat { flex: 1 1 auto; min-width: 0; white-space: normal; }
-button.secondary.ordersShareBtn {
-  flex: 0 0 auto;
-  margin: 0;
-  height: 32px;
-  min-height: 32px;
-  padding: 0 12px;
-  font-size: 13px;
-  white-space: nowrap;
-}
-.ordersShareBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 10px 0 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-m);
-  background: var(--card);
-  box-shadow: var(--shadow);
-  position: sticky;
-  top: calc(var(--appbar-h) + 8px);
-  z-index: 5;
-}
-.ordersShareBar.hidden { display: none; }
-.ordersShareBarText { font-size: 13px; color: var(--ink-2); min-width: 0; }
-.ordersShareBarActions { display: flex; gap: 8px; flex: 0 0 auto; }
-.ordersShareBarActions button { margin: 0; min-height: 36px; padding: 6px 12px; white-space: nowrap; }
-.ordersShareBarActions button:disabled { opacity: .5; cursor: not-allowed; }
-.orderSelectable { cursor: pointer; }
-.orderSelectable.orderSelected { border-color: var(--brass); background: var(--brass-soft); }
-.orderCheck {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 8px;
-  vertical-align: middle;
-  border: 1.5px solid var(--line-2);
-  border-radius: 50%;
-  background: var(--card);
-  color: transparent;
-  font-size: 12px;
-  font-weight: 900;
-  line-height: 1;
-}
-.orderSelected .orderCheck { border-color: var(--brass-d); background: var(--brass); color: #fff; }
-.orderDisabled { opacity: .5; }
 .qrShareBtn {
   border-color: rgba(184, 134, 43, 0.45) !important;
   background: var(--brass) !important;
   color: #fff !important;
   font-weight: 800;
+  text-decoration: none;
+}
+.qrShareOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px;
+  background: #ffffff;
+}
+.qrShareImage {
+  display: block;
+  width: min(100%, 72vh, 520px);
+  height: auto;
+  aspect-ratio: 1 / 1;
+  -webkit-touch-callout: default;
+  user-select: auto;
+}
+.qrShareTip { font-size: 14px; color: var(--ink-2); text-align: center; }
+.qrShareActions { display: flex; gap: 10px; }
+.qrShareActions a,
+.qrShareActions button {
+  margin: 0;
+  min-width: 112px;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
 }
 
 .gridProducts {

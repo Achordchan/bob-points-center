@@ -9,7 +9,8 @@ export function qrImageRouter() {
     try {
       const data = req.query?.data ? String(req.query.data) : '';
       const size = req.query?.size ? Number(req.query.size) : 240;
-      const buffer = await createQrPngBuffer(data, { size });
+      const ec = req.query?.ec ? String(req.query.ec) : 'M';
+      const buffer = await createQrPngBuffer(data, { size, ec });
       res.setHeader('Content-Type', 'image/png');
       res.setHeader('Cache-Control', 'private, max-age=3600');
       res.setHeader('X-Content-Type-Options', 'nosniff');
