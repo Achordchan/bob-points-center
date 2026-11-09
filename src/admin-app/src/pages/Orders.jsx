@@ -79,6 +79,7 @@ function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
   const [lastResult, setLastResult] = useState(null);
   const payload = useMemo(() => parseEncodedPayload(encoded), [encoded]);
   const trimmedEncoded = encoded.trim();
+  const order = preview?.encoded === trimmedEncoded ? (preview.data?.order || null) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +95,8 @@ function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
     setPreviewing(true);
     api(`/admin/orders/${encodeURIComponent(payload.exchange_id)}`)
       .then((result) => {
-        if (!cancelled) setPreview(result.data || null);
+        // 记下这份预览对应的 encoded，切换订单时旧预览不会被当成新订单的。
+        if (!cancelled) setPreview(result.data ? { encoded: trimmedEncoded, data: result.data } : null);
       })
       .catch((err) => {
         if (!cancelled) setPreviewError(err.message || '订单信息读取失败，请重新扫码');
@@ -121,7 +123,7 @@ function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
       message.error('二维码内容无效，请重新扫码');
       return false;
     }
-    if (preview?.order?.fulfilled_at) {
+    if (order?.fulfilled_at) {
       message.warning('该订单已核销，不能重复操作');
       return false;
     }
@@ -130,7 +132,7 @@ function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
     try {
       const result = await api('/admin/redeem/confirm', { method: 'POST', body: { encoded: trimmedEncoded } });
       message.success('核销完成');
-      setLastResult({ ...result, payload, order: preview?.order || null });
+      setLastResult({ ...result, payload, order: order || null });
       resetScan();
       if (queue.includes(trimmedEncoded)) {
         const nextDone = new Set(doneSet).add(trimmedEncoded);
@@ -148,7 +150,6 @@ function RedeemCenter({ onRedeemed, sharedQueue = [] }) {
     }
   };
 
-  const order = preview?.order || null;
   const confirmDisabled = !payload || !order || Boolean(order.fulfilled_at) || previewing || Boolean(previewError);
 
   // 转发来的订单如果别人已经核销过，列表里也标成已核销。
