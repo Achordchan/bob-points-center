@@ -169,7 +169,7 @@ export function registerAdminGalaRoutes(router) {
     // 预留名额的发放结果不能从这里体现；完整状态只在超管的 HTTP 回执里。
     publishMallRealtimeEvent('gala_changed', {
       round_id: result.round_id,
-      reason: result.pendingPublic === 0 ? 'round_granted' : 'round_grant_partial',
+      reason: result.pending === 0 ? 'round_granted' : 'round_grant_partial',
     });
     res.json({ ok: true, data: serializeGrantResult(result, { includeReserved: isSuper(req) }) });
   }));

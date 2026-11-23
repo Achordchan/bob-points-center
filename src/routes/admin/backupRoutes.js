@@ -24,7 +24,6 @@ import { computeAnnouncementContentHash } from '../../services/announcementAcces
 import {
   GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
 } from '../../services/galaService.js';
-import { GALA_PUBLIC_GRANT_BACKFILL_SQL } from '../../db/galaSchema.js';
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
@@ -32,7 +31,7 @@ const GALA_BACKUP_TABLES = [
   { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: JSON.stringify(Object.keys(GALA_SEGMENTS)) } },
   { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
   { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
-  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at', 'public_granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
+  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
   { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
@@ -263,16 +262,13 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 小于已发奖励合计 ${total}`);
     }
   }
-  // 轮次的完成状态必须与待发记录一致：普通奖励未发完却有 public_granted_at，非超管会看到“已发放”；
-  // 有任何待发记录却是 granted，超管也会看到整轮完成。普通奖励发完、只剩预留奖励待发是合法状态。
+  // 轮次的完成状态必须与待发记录一致，且 status 与 granted_at 必须同时成立或同时为空：
+  // 有任何待发记录却是 granted，会显示整轮完成；granted 却没有完成时间、或 drawn 却带完成时间，状态自相矛盾。
   const pendingCount = new Map();
   for (const w of winnersList) {
     if (w?.awarded_at != null || !(Number(w?.amount) > 0)) continue;
     const key = Number(w?.round_id);
-    const c = pendingCount.get(key) || { all: 0, pub: 0 };
-    c.all += 1;
-    if (Number(w?.is_reserved) !== 1) c.pub += 1;
-    pendingCount.set(key, c);
+    pendingCount.set(key, (pendingCount.get(key) || 0) + 1);
   }
   for (const r of rounds.values()) {
     const status = r?.status ?? 'drawn';
@@ -280,12 +276,14 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_rounds#${r?.id} 的状态 ${status} 无效`);
       continue;
     }
-    const c = pendingCount.get(Number(r?.id)) || { all: 0, pub: 0 };
-    if (r?.public_granted_at != null && c.pub > 0) {
-      errors.push(`gala_rounds#${r?.id} 已标记公开发放完成，但还有 ${c.pub} 条普通奖励待发`);
+    const hasGrantedAt = r?.granted_at != null;
+    if ((status === 'granted') !== hasGrantedAt) {
+      errors.push(`gala_rounds#${r?.id} 的状态 ${status} 与发放完成时间${hasGrantedAt ? '（已填写）' : '（为空）'}不一致`);
+      continue;
     }
-    if ((status === 'granted' || r?.granted_at != null) && c.all > 0) {
-      errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${c.all} 条奖励待发`);
+    const pending = pendingCount.get(Number(r?.id)) || 0;
+    if (status === 'granted' && pending > 0) {
+      errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${pending} 条奖励待发`);
     }
   }
   // 员工奖池：实际支出 + 待发普通奖励不能超过已分配额（在线时普通奖励都出自已分配的名额，这一关系恒成立）。
@@ -2753,15 +2751,6 @@ export function registerAdminBackupRoutes(router) {
                 }
               }
               report[table.name] = count;
-            }
-            // 旧格式备份的轮次没有 public_granted_at：按与旧库补列相同的规则回填，
-            // 否则已发放的历史轮次在非超管视图里会一直显示“已抽签”。
-            const legacyRoundIds = (requireArray('gala_rounds') || [])
-              .filter((r) => r && !Object.hasOwn(r, 'public_granted_at'))
-              .map((r) => Number(r.id))
-              .filter((n) => n > 0);
-            if (legacyRoundIds.length) {
-              await tx.run(`${GALA_PUBLIC_GRANT_BACKFILL_SQL} AND r.id = ANY(?::bigint[])`, [legacyRoundIds]);
             }
             // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
             // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。

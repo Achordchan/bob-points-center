@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matchPathPermission } from '../../src/services/adminPermissionService.js';
-import { GALA_MAX_RESERVED_SLOTS, pickRandom } from '../../src/services/galaService.js';
+import { GALA_MAX_RESERVED_SLOTS, pickRandom, serializeGrantResult } from '../../src/services/galaService.js';
 import { findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
 
 test('年会预留名额与预留奖池只允许超级管理员', () => {
@@ -360,20 +360,26 @@ test('年会备份：每轮中奖人数不超过抽签人数、已分配额不�
   assert.ok(findGalaFundingErrors(twoUsed).some((e) => e.startsWith('gala_reserved_slots#2') && e.includes('每轮最多 1 个')));
 
   // 完成状态与待发记录矛盾
-  const pubDone = ok();
-  pubDone.gala_rounds[0].public_granted_at = 1;
-  assert.ok(findGalaFundingErrors(pubDone).some((e) => e.startsWith('gala_rounds#1') && e.includes('公开发放完成')));
   const allDone = ok();
   allDone.gala_rounds[0].status = 'granted';
+  allDone.gala_rounds[0].granted_at = 1;
   assert.ok(findGalaFundingErrors(allDone).some((e) => e.startsWith('gala_rounds#1') && e.includes('整轮发放完成')));
+  // status 与 granted_at 必须同时成立或同时为空
+  const noTime = ok();
+  noTime.gala_rounds[0].status = 'granted';
+  noTime.gala_rounds[0].granted_at = null;
+  assert.ok(findGalaFundingErrors(noTime).some((e) => e.startsWith('gala_rounds#1') && e.includes('不一致')));
+  const timeOnDrawn = ok();
+  timeOnDrawn.gala_rounds[0].granted_at = 1;
+  assert.ok(findGalaFundingErrors(timeOnDrawn).some((e) => e.startsWith('gala_rounds#1') && e.includes('不一致')));
 });
 
-test('年会备份：普通奖励已发完、只剩预留奖励待发时允许公开状态为已发放', () => {
+test('年会备份：只剩预留奖励待发时整轮仍是 drawn，不能标记完成', () => {
   const snap = {
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 10 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', public_granted_at: 5 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
     gala_round_winners: [
       { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 9 },
       { id: 2, round_id: 1, event_id: 1, userid: 'k', amount: 10, pool_id: 2, is_reserved: 1, awarded_at: null },
@@ -382,6 +388,10 @@ test('年会备份：普通奖励已发完、只剩预留奖励待发时允许�
     ledger: [],
   };
   assert.deepEqual(findGalaFundingErrors(snap), []);
+  const marked = structuredClone(snap);
+  marked.gala_rounds[0].status = 'granted';
+  marked.gala_rounds[0].granted_at = 5;
+  assert.ok(findGalaFundingErrors(marked).some((e) => e.startsWith('gala_rounds#1') && e.includes('整轮发放完成')));
 });
 
 test('年会备份：已发放的正数奖励和已使用名额同样必须挂在奖池上', () => {
@@ -389,7 +399,7 @@ test('年会备份：已发放的正数奖励和已使用名额同样必须挂�
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 8 }, { id: 3, event_id: 1, is_reserved: 0, budget: 8, spent: 0 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'coin', pool_id: 3, amount_each: 8, status: 'granted', granted_at: 1, public_granted_at: 1 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'coin', pool_id: 3, amount_each: 8, status: 'granted', granted_at: 1 }],
     gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 8, pool_id: 2, is_reserved: 1, awarded_at: 1, ledger_id: 9 }],
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
     ledger: [{ id: 9, userid: 'k', delta: 8, ref_id: 'GALA_W1', reason: '年会奖励·测试' }],
@@ -409,7 +419,6 @@ test('年会备份：已发放的正数奖励和已使用名额同样必须挂�
   cancelled.ledger = [];
   cancelled.gala_rounds[0].status = 'drawn';
   cancelled.gala_rounds[0].granted_at = null;
-  cancelled.gala_rounds[0].public_granted_at = null;
   cancelled.gala_reserved_slots[0] = { id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', amount: 8, pool_id: null, status: 'cancelled' };
   // 待用名额必须指定预留奖池
   const noPool = structuredClone(cancelled);
@@ -476,7 +485,7 @@ test('年会备份：两条中奖记录不能共用同一付款凭据', () => {
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 20 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 1, public_granted_at: 1 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 1 }],
     gala_round_winners: [
       { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 77 },
       { id: 2, round_id: 1, event_id: 1, userid: 'b', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 78 },
@@ -510,4 +519,18 @@ test('年会备份：已使用名额的持有人不能以普通中奖记录出�
   };
   const errors = findGalaFundingErrors(snap);
   assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('普通中奖记录')), errors.join('\n'));
+});
+
+test('年会发放回执：非超管回执把预留奖励失败与普通失败一样计入，不暴露出处', () => {
+  const result = {
+    round_id: 7,
+    granted: [{ userid: 'a', amount: 10, is_reserved: 0 }],
+    failed: [{ userid: 'k', error: 'pool_budget_exceeded', is_reserved: 1 }],
+    pending: 1,
+  };
+  assert.deepEqual(serializeGrantResult(result), {
+    round_id: 7, failed_count: 1, failed_reasons: { pool_budget_exceeded: 1 }, pending: 1,
+  });
+  const sup = serializeGrantResult(result, { includeReserved: true });
+  assert.equal(sup.failed[0].is_reserved, 1);
 });

@@ -359,8 +359,8 @@ async function main() {
       assert.equal(Number(spentC.spent), 9, '员工奖池只应扣普通中奖的 9');
       assert.deepEqual(
         serializeGrantResult(gC, { includeReserved: false }),
-        { round_id: Number(dC.round.id), failed_count: 0, failed_reasons: {}, pending: 0 },
-        '预留奖励失败不出现在普通回执里',
+        { round_id: Number(dC.round.id), failed_count: 1, failed_reasons: { winner_pool_missing: 1 }, pending: 1 },
+        '预留奖励失败与普通失败一样计入汇总（原因码相同，看不出出处）',
       );
       const reasonRow = await db.get('SELECT reason FROM ledger WHERE ref_id = ?', [`GALA_W${dC.winners.find((w) => w.userid === uid(2)).id}`]);
       assert.ok(reasonRow.reason.startsWith(`年会奖励·${GALA_SEGMENTS.lottery}`), reasonRow.reason);
@@ -470,8 +470,7 @@ async function main() {
       assert.equal(reservedWin.winners[0].name_snapshot, snap14.name, '预留中奖人用名单快照里的名字');
       const reservedFail = await drawGalaRound(db, { eventId: evS.id, segment: 'giveaway', drawCount: 1, prizeType: 'coin', poolId: pS.id, amountEach: 5 });
       assert.equal(reservedFail.winners[0].userid, uid(15));
-      await db.exec(`UPDATE gala_pools SET spent = budget WHERE id = ${Number(rS.id)}`);
-      for (const d of [normal, reservedWin, reservedFail]) {
+      for (const d of [normal, reservedWin]) {
         // eslint-disable-next-line no-await-in-loop
         const g = await grantGalaRound(db, { roundId: d.round.id });
         assert.deepEqual(
@@ -479,14 +478,23 @@ async function main() {
           { round_id: Number(d.round.id), failed_count: 0, failed_reasons: {}, pending: 0 },
         );
       }
+      await db.exec(`UPDATE gala_pools SET spent = budget WHERE id = ${Number(rS.id)}`);
+      // 预留奖励发放失败：公开回执与普通中奖人因奖池不足失败时完全一样（同样计入失败和待发），整轮保持 drawn
+      const gFail = await grantGalaRound(db, { roundId: reservedFail.round.id });
+      assert.deepEqual(
+        serializeGrantResult(gFail, { includeReserved: false }),
+        { round_id: Number(reservedFail.round.id), failed_count: 1, failed_reasons: { pool_budget_exceeded: 1 }, pending: 1 },
+      );
       const pubS = await listGalaRounds(db, { eventId: evS.id });
-      assert.deepEqual(pubS.map((r) => r.status), ['granted', 'granted', 'granted'], '三种情况公开状态一致');
       const supS = await listGalaRounds(db, { eventId: evS.id, includeReserved: true });
-      assert.equal(supS.find((r) => r.id === Number(reservedFail.round.id)).status, 'drawn', '超管仍能看到预留奖励没发出去');
+      const order = [normal, reservedWin, reservedFail].map((d) => Number(d.round.id));
+      const statusOf = (rounds) => order.map((rid) => rounds.find((r) => r.id === rid).status);
+      assert.deepEqual(statusOf(pubS), ['granted', 'granted', 'drawn']);
+      assert.deepEqual(statusOf(supS), statusOf(pubS), '超管与非超管看到同一个整轮状态');
 
       const pubPoolS = (await getGalaEventDetail(db, { eventId: evS.id })).pools.find((p) => p.id === pS.id);
       assert.deepEqual([pubPoolS.allocated, pubPoolS.remaining, 'spent' in pubPoolS], [15, 85, false], '三轮都按 1 × 5 计入已分配额');
-      console.log('✓ 单人轮次公开状态与公开账面都与预留无关');
+      console.log('✓ 单人轮次：预留奖励成败与普通奖励同样呈现，公开账面与预留无关');
     }
 
     // 公开抽签人数上限：只由名单人数和本环节已中奖人数决定，有没有预留、预留几个，准入结果都一样
@@ -851,7 +859,7 @@ async function main() {
       r = await call(operatorId, 'GET', `/gala/rounds?event_id=${hid}`);
       assert.ok(r.body.data[0].winners.every(noPayout), '运营管理员的轮次列表不含逐人发放信息');
       assert.equal(r.body.data[0].draw_count, 2);
-      assert.equal(r.body.data[0].status, 'granted', '执行过发放后公开状态为 granted，与预留奖励无关');
+      assert.equal(r.body.data[0].status, 'granted', '全部奖励到账后整轮为 granted');
       r = await call(superId, 'GET', `/gala/rounds?event_id=${hid}`);
       assert.equal(r.body.data[0].status, 'granted');
       assert.equal(r.body.data[0].winners.find((w) => w.is_reserved === 1).awarded, 1);

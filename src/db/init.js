@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
-import { GALA_PUBLIC_GRANT_BACKFILL_SQL, galaSchemaSql } from './galaSchema.js';
+import { galaSchemaSql } from './galaSchema.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -767,19 +767,6 @@ export async function initDb(input) {
   await db.transaction(async (tx) => {
     await tx.get("SELECT pg_advisory_xact_lock(hashtext('bob.gala.migration')) AS locked");
     await tx.exec(galaSchemaSql);
-    // 早期建出的 gala_rounds 没有 public_granted_at：补列（幂等），并为已经发放过的轮次回填，
-    // 否则发币会在更新公开状态时失败，且重试一直卡在同一步。
-    await tx.exec(`DO $$ BEGIN
-      -- 多个实例同时升级同一旧库时串行执行：后到的实例等前一个提交后再检查，不会重复 ALTER 失败。
-      PERFORM pg_advisory_xact_lock(hashtext('bob.gala.migration'));
-      IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema() AND table_name = 'gala_rounds' AND column_name = 'public_granted_at'
-      ) THEN
-        ALTER TABLE gala_rounds ADD COLUMN public_granted_at BIGINT;
-        ${GALA_PUBLIC_GRANT_BACKFILL_SQL};
-      END IF;
-    END $$`);
     // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
     await tx.exec(`DO $$ BEGIN
       -- 同上，与补列串行；按 conrelid 限定目标表，别的 schema 里的同名约束不算数。

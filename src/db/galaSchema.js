@@ -61,10 +61,9 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   created_by TEXT,
   created_name TEXT,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  -- status = 'granted' 当且仅当 granted_at 非空：本轮全部正数奖励都已到账。超管与非超管看同一个状态。
+  -- （早期测试库里可能还留着已不再使用的 public_granted_at 列，可为空、无人读写，不做删除以免滚动升级时旧实例出错。）
   granted_at BIGINT,
-  -- 非超管看到的“已发放”时间：只要普通中奖记录全部发完（或本轮没有普通奖励）且执行过发放就写入，
-  -- 与预留名额发放成败无关，避免公开状态随预留奖励变化而暴露预留对象。
-  public_granted_at BIGINT,
   CONSTRAINT uq_gala_rounds_segment_no UNIQUE (event_id, segment, round_no),
   CONSTRAINT chk_gala_rounds_prize CHECK (prize_type IN ('none', 'coin')),
   CONSTRAINT chk_gala_rounds_status CHECK (status IN ('drawn', 'granted'))
@@ -126,14 +125,3 @@ CREATE TABLE IF NOT EXISTS gala_restore_state (
 );
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
 `;
-
-// public_granted_at 的回填规则（旧库补列、导入旧备份时共用）：执行过发放（整轮已完成、已有人到账或留有发放失败原因），
-// 且没有待发的普通中奖记录。表别名必须是 r。
-export const GALA_PUBLIC_GRANT_BACKFILL_SQL = `UPDATE gala_rounds r
-   SET public_granted_at = COALESCE(r.granted_at, EXTRACT(EPOCH FROM now())::BIGINT)
- WHERE r.public_granted_at IS NULL
-   AND (r.granted_at IS NOT NULL
-        OR EXISTS (SELECT 1 FROM gala_round_winners w
-                    WHERE w.round_id = r.id AND (w.awarded_at IS NOT NULL OR w.award_error IS NOT NULL)))
-   AND NOT EXISTS (SELECT 1 FROM gala_round_winners w
-                    WHERE w.round_id = r.id AND w.is_reserved = 0 AND w.awarded_at IS NULL AND w.amount > 0)`;

@@ -235,21 +235,11 @@ function serializeWinner(row, { includeReserved }) {
   return out;
 }
 
-// 非超管看到的轮次状态只由普通中奖记录决定，完全不读整轮状态（整轮状态包含预留名额的发放结果）。
-// 没有普通待发奖励的轮次（不发币、或只有预留名额带奖励）没有“发放”这一步，固定显示 drawn。
-function publicRoundStatus(row) {
-  // 只看 public_granted_at：执行发放后普通奖励已全部发完（或本轮没有普通奖励）即写入，
-  // 与预留名额是否发放成功无关。单人轮次里无论中奖的是普通人还是预留对象，公开状态都一样。
-  return row.public_granted_at
-    ? { status: 'granted', granted_at: Number(row.public_granted_at) }
-    : { status: 'drawn', granted_at: null };
-}
-
 function serializeRound(row, winners, { includeReserved }) {
   const sorted = (winners || []).slice().sort((a, b) => Number(a.display_order) - Number(b.display_order));
-  const state = includeReserved
-    ? { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null }
-    : publicRoundStatus(row);
+  // 预留对象的奖励与本轮普通中奖人相同（同单价、同样的失败原因），整轮状态不再能区分谁是预留对象，
+  // 所以超管与非超管看到同一个完成状态：全部正数奖励发完才是 granted，任何一笔待发都保持 drawn。
+  const state = { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null };
   return {
     id: Number(row.id),
     event_id: Number(row.event_id),
@@ -861,13 +851,9 @@ export async function grantGalaRound(db, { roundId }) {
     const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR UPDATE', [id]);
     if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     const counts = await tx.get(
-      `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_reserved = 0) AS public_n
-         FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0`,
+      'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0',
       [id],
     );
-    if (Number(counts?.public_n || 0) === 0) {
-      await tx.run('UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ?', [id]);
-    }
     if (Number(counts?.n || 0) === 0) {
       await tx.run(`UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND status = 'drawn'`, [id]);
     }
@@ -878,7 +864,6 @@ export async function grantGalaRound(db, { roundId }) {
     granted,
     failed,
     pending: Number(pending?.n || 0),
-    pendingPublic: Number(pending?.public_n || 0),
   };
 }
 
@@ -894,12 +879,12 @@ export function serializeGrantResult(result, { includeReserved = false } = {}) {
       pending: result.pending,
     };
   }
-  // 失败者也不逐人列出：员工奖池耗尽时普通中奖人全部失败，而预留对象不在失败名单里，
-  // 一对照中奖名单就能认出来。普通回执只给失败数量、按原因汇总和待发数量。
+  // 失败者不逐人列出，只给失败数量、按原因汇总和待发数量。预留对象的失败与普通中奖人一样计入：
+  // 两者金额相同、失败原因同一套，汇总里看不出出处；若把预留失败剔除，整轮“已无失败”而某位中奖人
+  // 余额没变，反而暴露他是预留对象。
   const reasons = {};
   let failedCount = 0;
   for (const f of result.failed) {
-    if (f.is_reserved === 1) continue;
     failedCount += 1;
     reasons[f.error] = (reasons[f.error] || 0) + 1;
   }
@@ -907,7 +892,7 @@ export function serializeGrantResult(result, { includeReserved = false } = {}) {
     round_id: result.round_id,
     failed_count: failedCount,
     failed_reasons: reasons,
-    pending: result.pendingPublic,
+    pending: result.pending,
   };
 }
 
