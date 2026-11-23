@@ -22,6 +22,16 @@ import {
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 
+// 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
+const GALA_BACKUP_TABLES = [
+  { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: '[]' } },
+  { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
+  { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
+  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
+  { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
+  { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
+];
+
 export function registerAdminBackupRoutes(router) {
 
   // 设置类表：结构配置，适合日常导出恢复
@@ -61,6 +71,12 @@ export function registerAdminBackupRoutes(router) {
     'red_packet_items',
     'auction_activities',
     'auction_bids',
+    'gala_events',
+    'gala_pools',
+    'gala_participants',
+    'gala_rounds',
+    'gala_round_winners',
+    'gala_reserved_slots',
     'content_faq',
     'content_announcements',
     'content_announcement_revisions',
@@ -402,6 +418,8 @@ export function registerAdminBackupRoutes(router) {
     // 例外：拍卖表与外部账号表晚于备份版本号引入，早于该功能的旧全量备份（v1 或对应功能之前的 v2）
     // 都不含这些表，不能因此拒绝旧备份恢复；仍需校验快照内的关联数据完整性。
     const optionalFullTables = new Set(['auction_activities', 'auction_bids', 'external_accounts']);
+    // 年会表同理：早于年会功能的全量备份不含这些表；含其一则下面要求六张齐全。
+    for (const table of GALA_BACKUP_TABLES) optionalFullTables.add(table.name);
     const expectedTables = versionTables.filter((name) => !optionalFullTables.has(name));
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
@@ -412,6 +430,17 @@ export function registerAdminBackupRoutes(router) {
           missingTables,
           backupMode,
         });
+      }
+    }
+
+    // 年会表晚于拍卖引入：旧备份可以一张都没有；只要含其中任意一张，就必须六张齐全，
+    // 否则会恢复出有中奖记录却无奖池/活动、或有发放流水却无幂等记录的残缺账目。
+    if (backupMode === 'full') {
+      const present = GALA_BACKUP_TABLES.filter((t) => backupData[t.name] != null).map((t) => t.name);
+      if (present.length > 0 && present.length < GALA_BACKUP_TABLES.length) {
+        const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
+        await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
+        return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
       }
     }
 
@@ -1362,6 +1391,7 @@ export function registerAdminBackupRoutes(router) {
             const rows = Array.isArray(backupData.users) ? backupData.users : null;
             if (rows && mode === 'overwrite') {
               const deleteOrder = [
+                ...[...GALA_BACKUP_TABLES].reverse().map((t) => t.name),
                 'admin_user_roles',
                 'auction_bids',
                 'auction_activities',
@@ -2221,6 +2251,59 @@ export function registerAdminBackupRoutes(router) {
               markAndThrow('auction_bids', null, err);
             }
             report.auction_bids = count;
+          }
+
+          // 年会（父表在前）。merge 模式任何 ID 冲突都拒绝：中奖记录的 awarded_at 是发币幂等闸门，
+          // 挂到目标库不相关的轮次或奖池上会造成重复发币或奖池账目错乱。
+          {
+            const hasGala = GALA_BACKUP_TABLES.some((t) => requireArray(t.name) !== null);
+            if (hasGala && mode !== 'overwrite') {
+              for (const table of GALA_BACKUP_TABLES) {
+                const ids = [...new Set((requireArray(table.name) || []).map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
+                if (!ids.length) continue;
+                // eslint-disable-next-line no-await-in-loop
+                const rows = await tx.all(`SELECT id FROM ${table.name} WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+                if (rows.length) {
+                  throw new Error(`合并导入存在年会数据 ID 冲突（${table.name}: ${rows.map((r) => r.id).join(', ')}），已拒绝导入`);
+                }
+              }
+            }
+            if (hasGala && mode === 'overwrite') {
+              for (const table of [...GALA_BACKUP_TABLES].reverse()) {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
+              }
+            }
+            for (const table of GALA_BACKUP_TABLES) {
+              const rows = requireArray(table.name) || [];
+              let count = 0;
+              const placeholders = table.columns.map((_, i) => `$${i + 1}`).join(',');
+              for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (!row?.id) continue;
+                try {
+                  // eslint-disable-next-line no-await-in-loop
+                  await execOrThrow(
+                    tx,
+                    `INSERT INTO ${table.name}(${table.columns.join(', ')}) VALUES(${placeholders}) ON CONFLICT(id) DO NOTHING`,
+                    table.columns.map((col) => (row[col] === undefined ? (table.defaults?.[col] ?? null) : row[col])),
+                    `${table.name}[${i}]`,
+                  );
+                  count++;
+                } catch (err) {
+                  markAndThrow(table.name, i, err);
+                }
+              }
+              if (rows.length) {
+                try {
+                  // eslint-disable-next-line no-await-in-loop
+                  await bumpSerial(tx, table.name);
+                } catch (err) {
+                  markAndThrow(table.name, null, err);
+                }
+              }
+              report[table.name] = count;
+            }
           }
         }
 

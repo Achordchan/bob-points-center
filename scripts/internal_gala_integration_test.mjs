@@ -18,7 +18,9 @@ import {
   grantGalaRound,
   listGalaRounds,
   updateGalaEvent,
+  updateGalaPool,
 } from '../src/services/galaService.js';
+import { purgeUserBusinessData } from '../src/services/userDataPurgeService.js';
 
 const PREFIX = `TEST_GALA_${Date.now()}`;
 const USERS = 30;
@@ -150,6 +152,62 @@ async function main() {
     const poolFinal = await db.get('SELECT spent, budget FROM gala_pools WHERE id = ?', [pool.id]);
     assert.equal(Number(poolFinal.spent), 600);
     console.log('✓ 奖池花完后拒绝发币，失败记录可见');
+
+    // 并发：奖池更新与抽签同时进行不应死锁（40P01）
+    {
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 并发`, totalBudget: 0 });
+      const p2 = await createGalaPool(db, { eventId: ev.id, name: '并发池', budget: 100000 });
+      await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 10 }, (_, i) => uid(i + 1)) });
+      const jobs = [];
+      for (let i = 0; i < 12; i += 1) {
+        jobs.push(drawGalaRound(db, {
+          eventId: ev.id, segment: 'giveaway', drawCount: 1, prizeType: 'coin', poolId: p2.id, amountEach: 1,
+          excludePreviousWinners: false,
+        }));
+        jobs.push(updateGalaPool(db, { poolId: p2.id, budget: 100000 + i }));
+      }
+      const settled = await Promise.allSettled(jobs);
+      const failures = settled.filter((x) => x.status === 'rejected').map((x) => String(x.reason?.code || x.reason?.message));
+      assert.deepEqual(failures, [], `并发抽签与改奖池不应失败：${failures.join(', ')}`);
+
+      // 预留名额与抽签并发：要么在抽签前提交并被本轮使用，要么因该轮已抽而拒绝，不能留下悬挂名额
+      for (let round = 1; round <= 6; round += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const [d, r] = await Promise.allSettled([
+          drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 1 }),
+          createGalaReservedSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: round, userid: uid(USERS - round) }),
+        ]);
+        assert.equal(d.status, 'fulfilled', String(d.reason?.code || d.reason));
+        if (r.status === 'rejected') assert.equal(r.reason?.code, 'round_already_drawn');
+      }
+      const dangling = await db.get(
+        `SELECT COUNT(*) AS n FROM gala_reserved_slots s
+          WHERE s.event_id = ? AND s.status = 'pending'
+            AND EXISTS (SELECT 1 FROM gala_rounds r WHERE r.event_id = s.event_id AND r.segment = s.segment AND r.round_no = s.round_no)`,
+        [ev.id],
+      );
+      assert.equal(Number(dangling.n), 0, '不应存在对应轮次已抽完却仍待用的预留名额');
+      console.log('✓ 并发：改奖池与抽签不死锁，预留名额不会悬挂');
+    }
+
+    // 用户重置：未发放的中奖记录被清理，之后发币不会再入账
+    {
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 重置`, totalBudget: 0 });
+      const p3 = await createGalaPool(db, { eventId: ev.id, name: '重置池', budget: 1000 });
+      const target = uid(USERS);
+      await addGalaParticipants(db, { eventId: ev.id, userids: [target] });
+      const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: p3.id, amountEach: 50 });
+      assert.equal(d.winners[0].userid, target);
+      const before = await balanceOf(db, target);
+      await db.transaction((tx) => purgeUserBusinessData(tx, [target]));
+      const g = await grantGalaRound(db, { roundId: d.round.id });
+      assert.equal(g.granted.length, 0, '重置后不应再发放旧奖励');
+      assert.equal(await balanceOf(db, target), 0);
+      assert.ok(before >= 0);
+      const left = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [ev.id, target]);
+      assert.equal(Number(left.n), 0);
+      console.log('✓ 用户重置会清理未发放的年会奖励与参与记录');
+    }
 
     // 环节停用后不能抽签
     await updateGalaEvent(db, { eventId: event.id, enabledSegments: ['lottery', 'giveaway'] });

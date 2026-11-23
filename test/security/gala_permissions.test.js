@@ -50,3 +50,15 @@ test('pickRandom 近似均匀', () => {
     assert.ok(share > 0.22 && share < 0.28, `${key} 占比 ${share}`);
   }
 });
+
+test('年会六张表纳入全量备份，且必须整组导入', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../src/routes/admin/backupRoutes.js', import.meta.url), 'utf8');
+  const fullTablesBlock = source.match(/const FULL_TABLES = \[[\s\S]*?\n  \];/)?.[0] || '';
+  for (const name of ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) {
+    assert.match(fullTablesBlock, new RegExp(`'${name}'`));
+  }
+  assert.match(source, /for \(const table of GALA_BACKUP_TABLES\) optionalFullTables\.add\(table\.name\)/);
+  assert.match(source, /年会数据必须整组导入/);
+  assert.match(source, /合并导入存在年会数据 ID 冲突/);
+});

@@ -291,9 +291,13 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
   const id = toPositiveId(poolId);
   if (!id) throw new GalaError('invalid_pool_id');
   return await inTx(db, async (tx) => {
+    // 加锁顺序与抽签一致：先活动、后奖池。抽签持有活动锁后插入轮次会对奖池加 KEY SHARE，
+    // 若这里先锁奖池再等活动，两者会互相等待而死锁。
+    const ref = await tx.get('SELECT event_id FROM gala_pools WHERE id = ?', [id]);
+    if (!ref) throw new GalaError('pool_not_found', 404);
+    const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [ref.event_id]);
     const pool = await tx.get('SELECT * FROM gala_pools WHERE id = ? FOR UPDATE', [id]);
     if (!pool || (Number(pool.is_reserved) === 1 && !allowReserved)) throw new GalaError('pool_not_found', 404);
-    const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [pool.event_id]);
     const nextBudget = budget === undefined ? Number(pool.budget) : toNonNegativeInt(budget);
     if (nextBudget === null) throw new GalaError('invalid_budget');
     if (nextBudget < Number(pool.spent)) throw new GalaError('budget_below_spent', 409, { spent: Number(pool.spent) });
@@ -610,22 +614,27 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
     const pool = pid ? await db.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1', [pid, id]) : null;
     if (!pool) throw new GalaError('reserved_pool_required');
   }
-  const drawn = await db.get(
-    'SELECT 1 AS x FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?',
-    [id, seg, no],
-  );
-  if (drawn) throw new GalaError('round_already_drawn', 409);
-  try {
-    const row = await db.get(
+  // 锁活动行与抽签串行：避免抽签进行中插入的预留名额在该轮结束后才提交，变成永远用不到的悬挂名额。
+  return await inTx(db, async (tx) => {
+    const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
+    if (!event) throw new GalaError('event_not_found', 404);
+    const drawn = await tx.get(
+      'SELECT 1 AS x FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?',
+      [id, seg, no],
+    );
+    if (drawn) throw new GalaError('round_already_drawn', 409);
+    const existing = await tx.get(
+      `SELECT 1 AS x FROM gala_reserved_slots WHERE event_id = ? AND segment = ? AND round_no = ? AND status = 'pending'`,
+      [id, seg, no],
+    );
+    if (existing) throw new GalaError('slot_already_exists', 409);
+    const row = await tx.get(
       `INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, amount, note, created_by)
        VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       [id, seg, no, uid, pid, value, cleanText(note, 200) || null, actor.userid || null],
     );
     return serializeSlot(row);
-  } catch (err) {
-    if (err?.code === '23505') throw new GalaError('slot_already_exists', 409);
-    throw err;
-  }
+  });
 }
 
 function serializeSlot(row) {

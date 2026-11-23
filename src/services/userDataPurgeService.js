@@ -47,6 +47,16 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
        FOR UPDATE`,
     [...targets, ...targets, ...targets],
   );
+  // 年会发币顺序是「中奖记录 → 奖池 → 账户」，这里同样先锁未发放的中奖记录再锁账户：
+  // 并发发币要么在清理前完成（随后流水被删、余额清零），要么等清理提交后发现记录已删除而跳过，
+  // 不会给已重置的账户补发旧奖励。
+  await tx.all(
+    `SELECT id FROM gala_round_winners
+      WHERE userid IN (${placeholders}) AND awarded_at IS NULL
+      ORDER BY id
+      FOR UPDATE`,
+    targets,
+  );
   await tx.all(
     `SELECT userid FROM accounts WHERE userid IN (${placeholders}) ORDER BY userid FOR UPDATE`,
     targets,
@@ -81,6 +91,18 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   counts.user_dingtalk_profiles = await del(
     tx,
     `DELETE FROM user_dingtalk_profiles WHERE userid IN (${placeholders})`,
+    targets,
+  );
+  counts.gala_round_winners_unawarded = await del(
+    tx,
+    `DELETE FROM gala_round_winners WHERE userid IN (${placeholders}) AND awarded_at IS NULL`,
+    targets,
+  );
+  counts.gala_participants = await del(tx, `DELETE FROM gala_participants WHERE userid IN (${placeholders})`, targets);
+  counts.gala_reserved_slots_cancelled = await del(
+    tx,
+    `UPDATE gala_reserved_slots SET status = 'cancelled', updated_at = unixepoch()
+      WHERE userid IN (${placeholders}) AND status = 'pending'`,
     targets,
   );
   // 拍卖在押出价：置为失效并回退竞拍最高价指针（不退款入账，余额随后清零）。
