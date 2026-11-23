@@ -103,6 +103,8 @@ function cleanText(value, max = MAX_TITLE_LENGTH) {
 const MAX_USERID_LENGTH = 512;
 function cleanUserid(value) {
   if (value === null || value === undefined || (typeof value !== 'string' && typeof value !== 'number')) return '';
+  // 数字形式的 userid 只接受安全整数：超出范围的 JSON 数字在解析时已被舍入，可能恰好等于别人的 ID。
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new GalaError('invalid_userid');
   const uid = String(value).trim();
   if (uid.length > MAX_USERID_LENGTH) throw new GalaError('invalid_userid');
   return uid;
@@ -542,13 +544,17 @@ export async function removeGalaParticipant(db, { eventId, userid, expectedVersi
 export async function listGalaParticipants(db, { eventId, includeReserved = false }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const rows = await db.all(
-    `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at,
-            EXISTS (SELECT 1 FROM gala_reserved_slots s
-                     WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved
-       FROM gala_participants p WHERE p.event_id = ? ORDER BY p.id`,
-    [id],
-  );
+  // 名单与数据版本在同一个快照里读：移出名单要带回这个版本。
+  const { rows, version } = await inSnapshot(db, async (snap) => ({
+    rows: await snap.all(
+      `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at,
+              EXISTS (SELECT 1 FROM gala_reserved_slots s
+                       WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved
+         FROM gala_participants p WHERE p.event_id = ? ORDER BY p.id`,
+      [id],
+    ),
+    version: await readRestoreGeneration(snap),
+  }));
   return rows.map((r) => {
     const out = {
       userid: r.userid,
@@ -556,6 +562,7 @@ export async function listGalaParticipants(db, { eventId, includeReserved = fals
       table_no: r.table_no === null ? null : Number(r.table_no),
       source: r.source,
       joined_at: Number(r.joined_at),
+      gala_version: version,
     };
     if (includeReserved) out.is_reserved = r.reserved === true || Number(r.reserved) === 1 ? 1 : 0;
     return out;
@@ -844,7 +851,9 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
   });
 }
 
-export async function grantGalaRound(db, { roundId, grantToken }) {
+// onAwarded：每笔发放事务提交后立即回调（用于余额变更通知）。整次发放中途因恢复停止时，
+// 已经到账的人也已经收到通知；重试会跳过已发记录，不会再补发通知。回调出错不影响发放。
+export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
   const id = toPositiveId(roundId);
   if (!id) throw new GalaError('invalid_round_id');
   // 发放只认操作者看到的那一轮：凭据里的代数必须等于当前代数。请求若在恢复持锁期间排队，
@@ -872,7 +881,14 @@ export async function grantGalaRound(db, { roundId, grantToken }) {
     const reserved = Number(w.is_reserved) === 1 ? 1 : 0;
     try {
       const r = await awardWinner(db, { winnerId: w.id, round, reason, generation });
-      if (!r.skipped) granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
+      if (!r.skipped) {
+        granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
+        try {
+          onAwarded?.({ userid: r.userid, amount: r.amount });
+        } catch {
+          // 通知失败不影响已提交的发放
+        }
+      }
     } catch (err) {
       // 本轮已被恢复替换：整次发放作废，不把错误写到新数据的中奖记录上。
       if (err?.code === 'round_changed') throw err;
@@ -1030,12 +1046,16 @@ function serializeSlot(row) {
 export async function listGalaReservedSlots(db, { eventId }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const rows = await db.all(
-    `SELECT s.*, u.name AS user_name FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
-      WHERE s.event_id = ? ORDER BY s.id DESC`,
-    [id],
-  );
-  return rows.map(serializeSlot);
+  // 名额与数据版本在同一个快照里读：取消名额要带回这个版本，恢复前的名额 ID 不会配上恢复后的版本。
+  return await inSnapshot(db, async (snap) => {
+    const rows = await snap.all(
+      `SELECT s.*, u.name AS user_name FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
+        WHERE s.event_id = ? ORDER BY s.id DESC`,
+      [id],
+    );
+    const version = await readRestoreGeneration(snap);
+    return rows.map((r) => ({ ...serializeSlot(r), gala_version: version }));
+  });
 }
 
 export async function cancelGalaReservedSlot(db, { slotId, expectedVersion }) {

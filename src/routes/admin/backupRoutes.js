@@ -451,6 +451,11 @@ export function findGalaFundingErrors(backupData) {
         errors.push(`gala_reserved_slots#${slot?.id} 引用的轮次 ${slot.used_round_id} 不在备份的同一活动中`);
       } else if (String(used.segment) !== String(slot?.segment) || Number(used.round_no) !== Number(slot?.round_no)) {
         errors.push(`gala_reserved_slots#${slot?.id} 预定的是 ${slot?.segment} 第 ${slot?.round_no} 轮，却记在轮次 ${used.id}（${used.segment} 第 ${used.round_no} 轮）上`);
+      } else if (slot?.status === 'used'
+        && Number(slot?.amount || 0) !== (String(used.prize_type) === 'coin' ? Number(used.amount_each || 0) : 0)) {
+        // 已使用名额记下的奖励必须等于关联轮次的奖励（发币轮为单价、无币轮为 0），与中奖记录是否还在无关：
+        // 用户重置后中奖记录可以合法消失，名额金额仍是超管看到的历史奖励。
+        errors.push(`gala_reserved_slots#${slot?.id} 已使用名额的奖励 ${Number(slot?.amount || 0)} 与轮次 ${used.id} 的奖励不一致`);
       } else if (slot?.status === 'used') {
         // 已使用的名额占本轮一个位置。对应的预留中奖记录只会因用户重置被删掉，那时本轮一定空出一个位置；
         // 记录不在、位置却被别人占满，说明这一位被换成了普通中奖人，恢复后会从员工奖池发给错误的人。
@@ -2890,22 +2895,30 @@ export function registerAdminBackupRoutes(router) {
         return report;
       });
 
-      await flushRecoveryHistory();
       // 清理内部字段
       delete report._failedTable;
       delete report._failedIndex;
 
-      await appendBackupHistory(db, req, {
-        action: '导入',
-        mode,
-        filename: requestedFilename,
-        status: '完成',
-        details: {
-          backupMode,
-          report,
-          recoveryPoint,
-        },
-      });
+      // 走到这里导入事务已经提交，数据库已恢复。之后的登记只是记录：失败也不能报告“导入失败”，
+      // 否则调用方可能再执行一次覆盖导入。登记失败单独告警，并照常返回成功结果和恢复点文件名。
+      let historyWarning = null;
+      try {
+        await flushRecoveryHistory();
+        await appendBackupHistory(db, req, {
+          action: '导入',
+          mode,
+          filename: requestedFilename,
+          status: '完成',
+          details: {
+            backupMode,
+            report,
+            recoveryPoint,
+          },
+        });
+      } catch (histErr) {
+        historyWarning = `导入已完成，但写入备份历史失败：${String(histErr?.message || histErr)}`;
+        console.error('[backup] import committed but history append failed', histErr);
+      }
       publishMallRealtimeFullRefresh('backup_import');
       return res.json({
         ok: true,
@@ -2913,11 +2926,12 @@ export function registerAdminBackupRoutes(router) {
         backupMode,
         report,
         recoveryPoint,
+        ...(historyWarning ? { historyWarning } : {}),
       });
     } catch (err) {
       if (err?.recoveryPointFailed) return await recoveryPointFailed(err.cause || err);
-      // 恢复点已在事务内写好（之后的导入步骤失败）：照常登记，便于下载还原。
-      await flushRecoveryHistory();
+      // 恢复点已在事务内写好（之后的导入步骤失败）：照常登记，便于下载还原；登记失败不掩盖原始错误。
+      await flushRecoveryHistory().catch((histErr) => console.error('[backup] recovery point history append failed', histErr));
       const message = String(err?.message || err);
       // 从错误消息解析失败表/行
       let failedTable = null;

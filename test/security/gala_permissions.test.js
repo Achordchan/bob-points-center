@@ -447,11 +447,15 @@ test('年会备份：已使用名额缺少预留中奖记录时，本轮必须�
     gala_participants: [],
     gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
     gala_round_winners: winners,
-    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 1 }],
     ledger: [],
   });
   // 预留记录被用户重置删掉、位置空着：合法
   assert.deepEqual(findGalaFundingErrors(snap([])), []);
+  // 中奖记录不在时仍按关联轮次核对名额金额（本轮单价 10）
+  const wrongAmount = snap([]);
+  wrongAmount.gala_reserved_slots[0].amount = 8;
+  assert.ok(findGalaFundingErrors(wrongAmount).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('奖励不一致')));
   // 单人轮：名额已使用，唯一的位置却是另一个普通中奖人
   const errors = findGalaFundingErrors(snap([{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null }]));
   assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('名额已被占满')), errors.join('\n'));

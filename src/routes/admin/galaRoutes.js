@@ -169,10 +169,12 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.post('/gala/rounds/grant', requireAdminSession(), handle(async (req, res, db) => {
-    const result = await grantGalaRound(db, { roundId: req.body?.round_id, grantToken: req.body?.grant_token });
-    for (const g of result.granted) {
-      publishMallRealtimeEvent('balance_changed', { userid: g.userid, reason: 'gala_award' });
-    }
+    const result = await grantGalaRound(db, {
+      roundId: req.body?.round_id,
+      grantToken: req.body?.grant_token,
+      // 每笔到账事务提交后立即通知，不等整次发放结束：中途因恢复停止时已到账的人也能收到。
+      onAwarded: (g) => publishMallRealtimeEvent('balance_changed', { userid: g.userid, reason: 'gala_award' }),
+    });
     // 广播给所有订阅者（含大屏、商城）的公共事件：只说整轮是否发完，不含逐人结果。
     publishMallRealtimeEvent('gala_changed', {
       round_id: result.round_id,
