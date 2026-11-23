@@ -511,6 +511,18 @@ async function main() {
         console.log('✓ 抽签重试：活动结束后仍能拿回已抽结果；排除规则不同则拒绝');
       }
 
+      // 无币轮不能走发币：拒绝，不把它标成已发币
+      {
+        const evZ = await createGalaEvent(db, { title: `${PREFIX} 无币发放`, totalBudget: 0 });
+        await addGalaParticipants(db, { eventId: evZ.id, userids: [uid(1), uid(2)] });
+        await addFiller(db, evZ.id);
+        const z = await drawGalaRound(db, { eventId: evZ.id, segment: 'lottery', drawCount: 1, expectedRoundNo: 1 });
+        await assert.rejects(grantRound(db, z.round.id), (e) => e.code === 'round_not_coin' && e.status === 409);
+        const st = await db.get('SELECT status, granted_at FROM gala_rounds WHERE id = ?', [z.round.id]);
+        assert.deepEqual([st.status, st.granted_at], ['drawn', null]);
+        console.log('✓ 无币轮调用发币被拒绝，状态不变');
+      }
+
       // 标题按完整字符截断：第 80 个字符是 emoji 时不会留下半个代理对，重试仍能识别为同一请求
       {
         const evE = await createGalaEvent(db, { title: `${PREFIX} 表情`, totalBudget: 0 });
@@ -1764,6 +1776,64 @@ async function realRestoreChecks(cfg) {
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
       assert.equal(await generation(), String(Number(genHeld) + 1));
       console.log('✓ 恢复等年会写入锁有上限，等待期间不长期占用账号保护锁');
+    }
+    // 5b) 发出 r1，供下面的恢复用例使用已到账的奖励
+    {
+      const tok = (await call('GET', `/gala/rounds?event_id=${ev.id}`)).body.data.find((x) => x.id === Number(r1.round.id)).grant_token;
+      r = await call('POST', '/gala/rounds/grant', { round_id: Number(r1.round.id), grant_token: tok });
+      assert.equal(r.body.data.pending, 0, JSON.stringify(r.body));
+    }
+    // 5c) 有 ledger_id 关联的付款不按时钟先后否定：付款流水时间早于中奖记录（时钟回拨）的备份照常覆盖恢复
+    {
+      r = await call('GET', '/backup/export?mode=full');
+      const skew = r.body;
+      const paid = skew.data.gala_round_winners.filter((w) => w.awarded_at != null && w.ledger_id != null && Number(w.round_id) === Number(r1.round.id));
+      assert.equal(paid.length, 2);
+      for (const w of paid) {
+        const l = skew.data.ledger.find((x) => Number(x.id) === Number(w.ledger_id));
+        l.created_at = Number(w.created_at) - 100;
+      }
+      r = await call('POST', '/backup/import', { backup: skew, mode: 'overwrite' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      console.log('✓ 付款流水早于中奖记录（时钟回拨）但凭据吻合的备份可以恢复');
+    }
+    // 5d) 在线能分配出的 ID 都能恢复：恢复到接近上限 → 在线新建用掉最后一个 ID → 再导出 → 再恢复
+    {
+      r = await call('GET', '/backup/export?mode=full');
+      const near = r.body;
+      const lastPart = near.data.gala_participants.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a));
+      lastPart.id = Number.MAX_SAFE_INTEGER - 1;
+      // 一笔已到账奖励的凭据用到流水序列上限、流水已被用户重置删除：照常恢复，流水序列停在已用尽，不会复用这个 id
+      const kept = near.data.gala_round_winners.find((w) => w.awarded_at != null && w.ledger_id != null);
+      near.data.ledger = near.data.ledger.filter((l) => Number(l.id) !== Number(kept.ledger_id));
+      kept.ledger_id = Number.MAX_SAFE_INTEGER;
+      near._meta.tables.ledger = near.data.ledger.length;
+      r = await call('POST', '/backup/import', { backup: near, mode: 'overwrite' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      await assert.rejects(tdb.get("SELECT nextval('ledger_id_seq') AS n"), /maximum value/, '流水序列已用尽，不会分出仍被引用的 id');
+      await tdb.run('INSERT INTO users(userid, name) VALUES(?, ?)', ['rt_extra', 'rt_extra']);
+      await tdb.run('INSERT INTO accounts(userid, balance) VALUES(?, 0)', ['rt_extra']);
+      await addGalaParticipants(tdb, { eventId: ev.id, userids: ['rt_extra'] });
+      const top = await tdb.get('SELECT MAX(id) AS m FROM gala_participants');
+      assert.equal(String(top.m), String(Number.MAX_SAFE_INTEGER), '在线用掉了最后一个 ID');
+      r = await call('GET', '/backup/export?mode=full');
+      assert.equal(r.status, 200);
+      const again = r.body;
+      r = await call('POST', '/backup/import', { backup: again, mode: 'overwrite' });
+      assert.equal(r.status, 200, `含最后一个 ID 的备份应能恢复：${JSON.stringify(r.body).slice(0, 300)}`);
+      // 恢复后序列停在上限：再新建会失败，已有数据照常可用
+      await tdb.run('INSERT INTO users(userid, name) VALUES(?, ?)', ['rt_extra2', 'rt_extra2']);
+      await assert.rejects(addGalaParticipants(tdb, { eventId: ev.id, userids: ['rt_extra2'] }));
+      assert.ok((await call('GET', `/gala/participants?event_id=${ev.id}`)).body.data.length > 0);
+      // 恢复的名单 userid 不能原样操作（首尾空白）：写库前拒绝并报告位置
+      const padded = structuredClone(again);
+      padded.data.gala_participants[0].userid = ` ${padded.data.gala_participants[0].userid}`;
+      const before9 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: padded, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('userid'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before9);
+      console.log('✓ 在线分配出的最后一个 ID 可以导出再恢复；恢复的名单 userid 按在线规则校验');
     }
     // 6) 覆盖导入的备份里某张年会表为空：表被清空，序列也要重置；接近上限的旧序列不能留到恢复后
     {

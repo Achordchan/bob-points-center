@@ -174,7 +174,9 @@ export function registerAdminGalaRoutes(router) {
       expectedRoundNo: b.round_no === undefined ? null : b.round_no,
     });
     const data = serializeDrawResult(result, { includeReserved: isSuper(req) });
-    if (!result.replayed) publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
+    // 重放也发：上一次请求可能在事务提交后、发通知前退出，重试是补发的唯一机会。通知只是“按轮次 ID 刷新”的信号，
+    // 订阅端收到重复的同一轮次不会有副作用。通知走进程内订阅表，只送达本实例的连接（与其他实时事件相同）。
+    publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
     res.json({ ok: true, data });
   }));
 

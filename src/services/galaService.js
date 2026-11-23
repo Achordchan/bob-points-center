@@ -124,6 +124,15 @@ function cleanText(value, max = MAX_TITLE_LENGTH) {
 // （例如存量库里同时有 "u1" 和 " u1"），操作会落到别人身上。不能原样使用的一律拒绝。
 // 长度按 Unicode 字符（码点）计，与数据库 char_length 一致：全员导入在库里按同一规则筛选。
 const MAX_USERID_LENGTH = 512;
+// 备份恢复用：值能否被 cleanUserid 原样接受（恢复的名单、待发记录、待用名额都必须之后能按同一个 ID 操作）。
+export function isOperableGalaUserid(value) {
+  try {
+    return typeof value === 'string' && cleanUserid(value) === value && value !== '';
+  } catch {
+    return false;
+  }
+}
+
 function cleanUserid(value) {
   if (value === null || value === undefined || (typeof value !== 'string' && typeof value !== 'number')) return '';
   // 数字形式的 userid 只接受安全整数：超出范围的 JSON 数字在解析时已被舍入，可能恰好等于别人的 ID。
@@ -1058,6 +1067,8 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
   });
   const { generation, round, winners } = start;
   if (!round) throw new GalaError('round_not_found', 404);
+  // 无币轮没有可发的奖励：拒绝，不把它标成“已发币”、也不广播发放完成。
+  if (round.prize_type !== 'coin') throw new GalaError('round_not_coin', 409);
   const label = GALA_SEGMENTS[round.segment] || round.segment;
   // 流水原因固定带环节名称，方便按环节对账；自定义标题附在后面。
   const reason = `${GALA_PAYOUT_REASON_PREFIX}${label}${round.title ? `（${round.title}）` : ''}·第${round.round_no}轮`;

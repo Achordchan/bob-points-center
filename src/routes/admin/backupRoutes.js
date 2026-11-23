@@ -22,7 +22,8 @@ import {
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 import {
-  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_ROW_ID, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  isOperableGalaUserid,
 } from '../../services/galaService.js';
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
@@ -171,9 +172,10 @@ export function prepareGalaRoundFlags(backupData, meta) {
 // 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
 // 只看备份内部：merge 拒绝任何年会 ID 冲突、overwrite 会先清空年会表，所以每条子记录引用的
 // 活动/轮次/奖池都必须在同一份备份里，不能落到目标库里已有的无关记录上。
-// 一条形似 GALA_W<id> 的流水能否是这条中奖记录的付款：收款人、金额一致，且不早于中奖记录产生。
-// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同、或早于抽签的，不可能是这笔奖励。
+// 没有 ledger_id 关联时，一条形似 GALA_W<id> 的流水能否是这条（未发放）中奖记录的付款：收款人、金额一致，且不早于中奖记录产生。
+// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同、或早于抽签的，按历史同名流水处理。
 // 缺少时间字段时按“可能是”处理（宁可拒绝也不重复发放）。与导入后合并库上的 paidPending 查询保持同一判定。
+// 有 ledger_id 关联的已发放记录不用它判断（见下方逐笔核对）。
 function couldPayWinner(row, w) {
   if (String(row?.userid) !== String(w?.userid) || Number(row?.delta) !== Number(w?.amount)) return false;
   if (row?.created_at != null && w?.created_at != null && Number(row.created_at) < Number(w.created_at)) return false;
@@ -215,12 +217,11 @@ export function findGalaFundingErrors(backupData) {
     const w = winners.get(wid);
     if (!w) continue;
     if (w.ledger_id != null && Number(w.ledger_id) === Number(row.id)) {
+      // 中奖记录的 ledger_id 是发放事务里写下的关联，引用号、收款人、金额也对得上，就是这笔付款。
+      // 不再按时间先后否定：数据库时钟回拨、或恢复到时钟稍慢的新主库后立即发币，都会产生“早于中奖记录”的真实付款。
+      // 合并时凭据挂到目标库旧流水的情况另有检查（备份里没有的流水，目标库里也不能有）。
       if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
         errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
-      } else if (!couldPayWinner(row, w)) {
-        // 付款不可能早于抽签：更早的同名流水是升级前的历史记录，不是这笔奖励的付款。
-        // 接受它会让 awarded_at 挡住之后的发放，真正的奖励却从未支付。
-        errors.push(`ledger#${row?.id} 早于中奖记录 ${row.ref_id} 产生，不可能是它的付款凭据`);
       }
     } else if (w.awarded_at == null && couldPayWinner(row, w)) {
       errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
@@ -257,6 +258,15 @@ export function findGalaFundingErrors(backupData) {
     }
   }
 
+  // 恢复出的名单、待发中奖记录、待用名额之后都要按同一个 userid 操作（移出名单、发放、兑现名额），
+  // 必须符合在线入口的标识规则（见 isOperableGalaUserid：不去首尾空白、不超长等）。不裁剪修复，直接拒绝并报告位置。
+  const checkUserid = (table, row) => {
+    if (!isOperableGalaUserid(row?.userid)) errors.push(`${table}#${row?.id} 的 userid 无法按名单接口原样操作（首尾空白、超长或为空）`);
+  };
+  for (const p of asList(backupData?.gala_participants)) checkUserid('gala_participants', p);
+  for (const w of winnersList) if (w?.awarded_at == null) checkUserid('gala_round_winners', w);
+  for (const slot of asList(backupData?.gala_reserved_slots)) if ((slot?.status ?? 'pending') === 'pending') checkUserid('gala_reserved_slots', slot);
+
   // 金额类字段先做与在线写入相同的安全整数校验：后续校验和发币都用 Number，
   // 超出安全整数范围的值会被悄悄改写，导致数据库里存的和实际扣减、入账的不是同一个数。
   const safeInt = (v) => (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) && Number.isSafeInteger(Number(v)) && Number(v) >= 0;
@@ -284,16 +294,9 @@ export function findGalaFundingErrors(backupData) {
         if (row?.[f] == null) continue;
         if (!safeInt(row[f]) || Number(row[f]) <= 0) errors.push(`${t.name}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的正整数`);
       }
-      // 年会表自己的 ID 还要给后续新建的行留出空间：恢复后序列从 MAX(id)+1 继续，
-      // 必须仍是安全整数（序列的 MAXVALUE 也设在这里），否则新建的活动/轮次无法通过接口操作。
-      if (row?.id != null && safeInt(row.id) && Number(row.id) >= GALA_MAX_ROW_ID) {
-        errors.push(`${t.name}#${row.id} 的 id 已到上限，恢复后无法再新建记录`);
-      }
-      // 中奖记录保留的流水 id 同理：恢复会把流水序列推到它之后（即使那条流水已被重置删除），
-      // 下一笔流水的 id 必须仍是安全整数。
-      if (row?.ledger_id != null && safeInt(row.ledger_id) && Number(row.ledger_id) >= GALA_MAX_ROW_ID) {
-        errors.push(`${t.name}#${row?.id} 的 ledger_id 已到上限，恢复后新流水的序号会超出安全范围`);
-      }
+      // 能否恢复只看已有记录：在线能分配出的 ID（年会表序列的上限就是最大安全整数）都必须能恢复，
+      // 否则在线新建了一条合法记录后，下一份备份和自动恢复点都无法恢复。序列还能否分配新号是另一回事：
+      // 恢复后序列停在上限，新建会失败，但已有数据照常可用。保留的 ledger_id 同理，在线发放只写安全整数的凭据。
     }
   }
   // 抽签人数与轮次号按在线抽签的范围校验：已分配额 = 单价 × 抽签人数，负数或超大值会让账面倒扣或溢出；
@@ -1253,10 +1256,20 @@ export function registerAdminBackupRoutes(router) {
     const bumpSerial = async (tx, tableName) => {
       if (backupMode === 'full') {
         await tx.exec(
-          `DO $$ BEGIN
-             EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s',
-               pg_get_serial_sequence('${tableName}', 'id')::regclass,
-               COALESCE((SELECT MAX(id) FROM ${tableName}), 1) + 1);
+          // 已用到序列上限（年会表、流水为最大安全整数）的表照常恢复，序列停在“已用尽”：之后新建报序列耗尽，
+          // 不会再分出重复的 ID。RESTART 之后同一事务里的 nextval 随事务回滚，恢复失败时在线序列不变。
+          `DO $$
+           DECLARE
+             seq regclass := pg_get_serial_sequence('${tableName}', 'id')::regclass;
+             mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('${tableName}', 'id')::regclass);
+             target NUMERIC := COALESCE((SELECT MAX(id) FROM ${tableName}), 1) + 1;
+           BEGIN
+             IF target > mx THEN
+               EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+               PERFORM nextval(seq);
+             ELSE
+               EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
+             END IF;
            END $$`,
           [],
         );
@@ -3194,14 +3207,13 @@ export function registerAdminBackupRoutes(router) {
             }
             // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水。
             // 导入后对整张表核对，而不只是本次导入的中奖记录：备份里一条无关流水也可能恰好占用目标库
-            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录，且不早于中奖记录产生。
+            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id、收款人、金额必须正是这条中奖记录的（不按时间先后判断）。
             const mismatched = await tx.all(
               `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
                 WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
                    OR l.userid IS DISTINCT FROM w.userid
                    OR l.delta IS DISTINCT FROM w.amount
                    OR NOT starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
-                   OR l.created_at < w.created_at
                 ORDER BY w.id LIMIT 20`,
               [],
             );
@@ -3233,7 +3245,8 @@ export function registerAdminBackupRoutes(router) {
               `DO $$
                DECLARE
                  seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
-                 target BIGINT;
+                 mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass);
+                 target NUMERIC;
                BEGIN
                  SELECT GREATEST(
                           COALESCE(pg_sequence_last_value(seq), 0),
@@ -3241,9 +3254,12 @@ export function registerAdminBackupRoutes(router) {
                           COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 0)
                         ) + 1
                    INTO target;
-                 -- 下一笔流水的 id 必须仍是安全整数（接口与年会付款凭据都按 Number 处理），否则拒绝导入。
-                 IF target > 9007199254740991 THEN
-                   RAISE EXCEPTION '流水序号将超出安全整数范围（下一个为 %），已拒绝导入', target;
+                 -- 与在线一致：保留的凭据用到序列上限（最大安全整数）时照常恢复，序列停在“已用尽”，
+                 -- 之后新流水报序列耗尽，而不是复用这个仍被引用的 id。同一事务里的 nextval 随事务回滚。
+                 IF target > mx THEN
+                   EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+                   PERFORM nextval(seq);
+                   RETURN;
                  END IF;
                  EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
                END $$`,
