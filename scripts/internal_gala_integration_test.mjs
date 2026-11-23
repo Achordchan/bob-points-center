@@ -4,6 +4,9 @@
 import 'dotenv/config';
 import { Client } from 'pg';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { loadConfig } from '../src/config.js';
 import { initDb } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
@@ -834,18 +837,26 @@ async function main() {
       let r = await call(superId, 'POST', '/gala/events/create', { title: `${PREFIX} HTTP`, total_budget: 0 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const hid = r.body.data.id;
-      r = await call(operatorId, 'POST', '/gala/reserved/pools/create', { event_id: hid, name: 'x', budget: 10 });
+      // 活动范围内的写接口必须带回读到的数据版本
+      const gv = (await call(operatorId, 'GET', `/gala/events/detail?id=${hid}`)).body.data.gala_version;
+      assert.match(String(gv), /^\d+$/);
+      assert.equal((await call(operatorId, 'GET', '/gala/events')).body.data.find((e) => e.id === hid).gala_version, gv);
+      r = await call(superId, 'POST', '/gala/pools/create', { event_id: hid, name: '无版本', budget: 1 });
+      assert.deepEqual([r.status, r.body?.error], [400, 'invalid_gala_version']);
+      r = await call(superId, 'POST', '/gala/pools/create', { gala_version: `${Number(gv) + 1}`, event_id: hid, name: '旧版本', budget: 1 });
+      assert.deepEqual([r.status, r.body?.error], [409, 'gala_data_changed'], '版本与当前数据不符时拒绝写入');
+      r = await call(operatorId, 'POST', '/gala/reserved/pools/create', { gala_version: gv, event_id: hid, name: 'x', budget: 10 });
       assert.equal(r.status, 403, '运营管理员不能创建预留奖池');
       r = await call(operatorId, 'GET', `/gala/reserved?event_id=${hid}`);
       assert.equal(r.status, 403, '运营管理员看不到预留名额');
-      r = await call(superId, 'POST', '/gala/reserved/pools/create', { event_id: hid, name: '预留', budget: 50 });
+      r = await call(superId, 'POST', '/gala/reserved/pools/create', { gala_version: gv, event_id: hid, name: '预留', budget: 50 });
       assert.equal(r.status, 200);
       const rp = r.body.data.id;
-      r = await call(superId, 'POST', '/gala/reserved/create', {
+      r = await call(superId, 'POST', '/gala/reserved/create', { gala_version: gv,
         event_id: hid, segment: 'lottery', round_no: 1, userid: kid, pool_id: rp,
       });
       assert.equal(r.status, 200, JSON.stringify(r.body));
-      r = await call(operatorId, 'POST', '/gala/participants/add', { event_id: hid, userids: [uid(3), uid(4), uid(5)] });
+      r = await call(operatorId, 'POST', '/gala/participants/add', { gala_version: gv, event_id: hid, userids: [uid(3), uid(4), uid(5)] });
       assert.equal(r.status, 200);
       await addFiller(db, hid);
       // 活动列表经 HTTP 路由（含分页参数）
@@ -860,13 +871,13 @@ async function main() {
       // 显式传了无效的奖品类型（空串、false、0）不会被当成无币轮
       for (const bad of ['', false, 0]) {
         // eslint-disable-next-line no-await-in-loop
-        r = await call(operatorId, 'POST', '/gala/rounds/draw', { event_id: hid, segment: 'lottery', draw_count: 1, prize_type: bad });
+        r = await call(operatorId, 'POST', '/gala/rounds/draw', { gala_version: gv, event_id: hid, segment: 'lottery', draw_count: 1, prize_type: bad });
         assert.deepEqual([r.status, r.body?.error], [400, 'invalid_prize_type'], JSON.stringify(bad));
       }
-      r = await call(superId, 'POST', '/gala/pools/create', { event_id: hid, name: '员工池', budget: 1000 });
+      r = await call(superId, 'POST', '/gala/pools/create', { gala_version: gv, event_id: hid, name: '员工池', budget: 1000 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const hPool = r.body.data.id;
-      r = await call(operatorId, 'POST', '/gala/rounds/draw', {
+      r = await call(operatorId, 'POST', '/gala/rounds/draw', { gala_version: gv,
         event_id: hid, segment: 'lottery', draw_count: 2, prize_type: 'coin', pool_id: hPool, amount_each: 50,
       });
       assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -940,10 +951,123 @@ async function main() {
       server.close();
     }
 
+    await realRestoreChecks(cfg);
     console.log('ALL GALA INTEGRATION CHECKS PASSED');
   } finally {
     await cleanup(db);
     await db.close();
+  }
+}
+
+// 真实全量恢复路径：在一次性数据库里走导入路由（全表锁、锁超时重试、序列重置、导入后核对、恢复点），
+// 不碰共享开发库的数据。没有建库权限时跳过并说明。
+async function realRestoreChecks(cfg) {
+  const tmpName = `${cfg.db.database}_gala_rt_${process.pid}`;
+  const admin = new Client({ host: cfg.db.host, port: cfg.db.port, database: cfg.db.database, user: cfg.db.user, password: cfg.db.password });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${tmpName}"`);
+  } catch (err) {
+    await admin.end();
+    console.log(`- 跳过真实全量恢复检查：无法创建一次性数据库（${err?.code || err?.message}）`);
+    return;
+  }
+  const backupDir = mkdtempSync(path.join(os.tmpdir(), 'gala-rt-'));
+  const prevBackupDir = process.env.BOB_BACKUP_DIR;
+  process.env.BOB_BACKUP_DIR = backupDir;
+  let tdb = null;
+  let server = null;
+  try {
+    tdb = await initDb({ db: { ...cfg.db, kind: 'postgres', database: tmpName } });
+    const superId = 'rt_super';
+    const tcfg = { ...cfg, adminUserids: [superId] };
+    const users = Array.from({ length: 12 }, (_, i) => `rt_u${i + 1}`);
+    for (const u of users) {
+      // eslint-disable-next-line no-await-in-loop
+      await tdb.run('INSERT INTO users(userid, name) VALUES(?, ?)', [u, u]);
+      // eslint-disable-next-line no-await-in-loop
+      await tdb.run('INSERT INTO accounts(userid, balance) VALUES(?, 0)', [u]);
+    }
+    const ev = await createGalaEvent(tdb, { title: 'RT', totalBudget: 0 });
+    const pool = await createGalaPool(tdb, { eventId: ev.id, name: '池', budget: 100 });
+    await addGalaParticipants(tdb, { eventId: ev.id, userids: users });
+    const r1 = await drawGalaRound(tdb, { eventId: ev.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pool.id, amountEach: 5 });
+
+    const app = createApp({ db: tdb, cfg: tcfg });
+    server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const cookie = `bob_admin_session=${createSessionToken(adminSessionSigningSecret(tcfg), { userid: superId, name: superId })}`;
+    const call = async (method, p, body) => {
+      const res = await fetch(`${base}/admin${p}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+    const generation = async () => String((await tdb.get('SELECT generation FROM gala_restore_state WHERE id = 1')).generation);
+    const ledgerSeq = async () => tdb.get('SELECT last_value, is_called FROM ledger_id_seq');
+
+    let r = await call('GET', '/backup/export?mode=full');
+    assert.equal(r.status, 200);
+    const b0 = r.body; // r1 待发
+    // 覆盖前最后一笔已提交的奖励：r1 发放到账
+    let rounds = (await call('GET', `/gala/rounds?event_id=${ev.id}`)).body.data;
+    const oldToken = rounds.find((x) => x.id === Number(r1.round.id)).grant_token;
+    r = await call('POST', '/gala/rounds/grant', { round_id: Number(r1.round.id), grant_token: oldToken });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const paidIds = (await tdb.all('SELECT id, ledger_id FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [r1.round.id]));
+    assert.equal(paidIds.length, 2);
+    const oldVersion = (await call('GET', `/gala/events/detail?id=${ev.id}`)).body.data.gala_version;
+    const genBefore = await generation();
+
+    // 1) 成功的覆盖恢复：恢复点里有恢复前刚到账的奖励；恢复后旧凭据、旧版本作废
+    r = await call('POST', '/backup/import', { backup: b0, mode: 'overwrite' });
+    assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+    assert.equal(await generation(), String(Number(genBefore) + 1));
+    const rp = JSON.parse(readFileSync(path.join(backupDir, r.body.recoveryPoint.filename), 'utf8'));
+    const rpWinners = rp.data.gala_round_winners.filter((w) => Number(w.round_id) === Number(r1.round.id));
+    assert.ok(rpWinners.every((w) => w.awarded_at != null && w.ledger_id != null), '恢复点包含覆盖前最后一笔已到账的奖励');
+    assert.ok(paidIds.every((w) => rp.data.ledger.some((l) => Number(l.id) === Number(w.ledger_id))), '恢复点包含对应流水');
+    r = await call('POST', '/gala/rounds/grant', { round_id: Number(r1.round.id), grant_token: oldToken });
+    assert.deepEqual([r.status, r.body?.error], [409, 'round_changed'], '恢复前的发放凭据在恢复后作废');
+    r = await call('POST', '/gala/pools/create', { gala_version: oldVersion, event_id: ev.id, name: '旧页面', budget: 1 });
+    assert.deepEqual([r.status, r.body?.error], [409, 'gala_data_changed'], '恢复前的数据版本在恢复后作废');
+    const paidAfter = await tdb.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [r1.round.id]);
+    assert.equal(Number(paidAfter.n), 0, '旧凭据没有发出任何一笔');
+
+    // 2) 导入后置核对失败（合并库里已有付给待发中奖记录的流水）：数据、代数、下一笔流水 ID 都不变
+    const pend = await tdb.get('SELECT id, userid, amount FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL ORDER BY id LIMIT 1', [r1.round.id]);
+    const now = Math.floor(Date.now() / 1000);
+    const bad = structuredClone(b0);
+    for (const k of Object.keys(bad.data)) {
+      if (!['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'].includes(k)) delete bad.data[k];
+    }
+    bad.data.ledger = [{ id: 7900000000000001, userid: pend.userid, delta: Number(pend.amount), reason: '年会奖励·抽奖·第1轮', ref_id: `GALA_W${pend.id}`, created_at: now + 10 }];
+    bad.data.gala_events = [{ ...b0.data.gala_events[0], id: 990001, title: 'RT 合并' }];
+    bad.data.gala_pools = [{ ...b0.data.gala_pools[0], id: 990001, event_id: 990001, budget: 10, spent: 10 }];
+    bad.data.gala_participants = [];
+    bad.data.gala_rounds = [{ ...b0.data.gala_rounds[0], id: 990001, event_id: 990001, pool_id: 990001, amount_each: 10, draw_count: 1, status: 'granted', granted_at: now }];
+    bad.data.gala_round_winners = [{ ...b0.data.gala_round_winners[0], id: 990001, round_id: 990001, event_id: 990001, userid: users[0], pool_id: 990001, amount: 10, is_reserved: 0, awarded_at: now, ledger_id: 8000000000000000, award_error: null }];
+    bad.data.gala_reserved_slots = [];
+    const snapshot = async () => ({
+      generation: await generation(),
+      seq: await ledgerSeq(),
+      ledger: await tdb.all('SELECT id, userid, delta, ref_id FROM ledger ORDER BY id'),
+      winners: await tdb.all('SELECT id, awarded_at, ledger_id FROM gala_round_winners ORDER BY id'),
+      events: await tdb.all('SELECT id FROM gala_events ORDER BY id'),
+    });
+    const before = await snapshot();
+    r = await call('POST', '/backup/import', { backup: bad, mode: 'merge' });
+    assert.notEqual(r.status, 200);
+    assert.ok(JSON.stringify(r.body).includes('已有它的发放流水'), JSON.stringify(r.body).slice(0, 300));
+    assert.deepEqual(await snapshot(), before, '被拒绝的导入不改变数据、恢复代数和流水序号');
+    console.log('✓ 真实全量恢复：恢复点含最后一笔已到账奖励，旧凭据/旧版本作废，后置核对失败时一切不变');
+  } finally {
+    if (server) server.close();
+    if (tdb) await tdb.close();
+    if (prevBackupDir === undefined) delete process.env.BOB_BACKUP_DIR;
+    else process.env.BOB_BACKUP_DIR = prevBackupDir;
+    rmSync(backupDir, { recursive: true, force: true });
+    await admin.query(`DROP DATABASE IF EXISTS "${tmpName}" WITH (FORCE)`).catch(() => null);
+    await admin.end();
   }
 }
 

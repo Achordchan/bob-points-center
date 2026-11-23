@@ -510,12 +510,12 @@ test('年会备份：两条中奖记录不能共用同一付款凭据', () => {
   assert.ok(findGalaFundingErrors(snap).some((e) => e.startsWith('gala_round_winners#2') && e.includes('共用付款凭据')));
 });
 
-test('外部发币不能使用年会发放的引用号前缀', async () => {
+test('外部发币只拒绝与年会发放格式完全相同的引用号（GALA_W<正整数>）', async () => {
   const { assertExternalRefIdAllowed, RESERVED_REF_ID_ERROR } = await import('../../src/services/bobOpsService.js');
-  for (const ref of ['GALA_W1', 'gala_w99', ' GALA_Wx']) {
+  for (const ref of ['GALA_W1', 'GALA_W990001']) {
     assert.throws(() => assertExternalRefIdAllowed(ref), (e) => e.message === RESERVED_REF_ID_ERROR, ref);
   }
-  for (const ref of [undefined, null, 'ORDER_1', 'GALA1']) assert.doesNotThrow(() => assertExternalRefIdAllowed(ref));
+  for (const ref of [undefined, null, 'ORDER_1', 'GALA1', 'GALA_WEEKLY_2026', 'gala_w99', ' GALA_W1', 'GALA_W0', 'GALA_W01', 'GALA_W1a']) assert.doesNotThrow(() => assertExternalRefIdAllowed(ref));
 });
 
 test('年会备份：已使用名额的持有人不能以普通中奖记录出现在本轮', () => {

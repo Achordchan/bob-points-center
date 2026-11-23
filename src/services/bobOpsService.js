@@ -21,10 +21,12 @@ export async function getTrustedAccountOptions(db, cfg, userid) {
   return { userid: uid, name, createUser };
 }
 
-// GALA_W 前缀的引用号留给年会发放：外部发币（单发、批量、后台批量）都走这里，统一拒绝。
+// 年会发放的引用号格式是 GALA_W<正整数>（与 galaPayoutWinnerId 的识别规则一致）。外部发币（单发、批量、后台批量）
+// 只拒绝恰好是这个格式的引用号；GALA_WEEKLY_2026 这类既有批次号不可能被识别为年会流水，照常放行。
 export const RESERVED_REF_ID_ERROR = 'reserved refId prefix';
+const GALA_PAYOUT_REF_RE = new RegExp(`^${GALA_PAYOUT_REF_PREFIX}[1-9][0-9]*$`);
 export function assertExternalRefIdAllowed(refId) {
-  if (refId != null && String(refId).trim().toUpperCase().startsWith(GALA_PAYOUT_REF_PREFIX)) {
+  if (refId != null && GALA_PAYOUT_REF_RE.test(String(refId))) {
     throw new Error(RESERVED_REF_ID_ERROR);
   }
 }

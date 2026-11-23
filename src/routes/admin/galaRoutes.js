@@ -21,6 +21,7 @@ import {
   removeGalaParticipant,
   serializeDrawResult,
   serializeGrantResult,
+  parseGalaVersion,
   updateGalaEvent,
   updateGalaPool,
 } from '../../services/galaService.js';
@@ -55,6 +56,10 @@ function handle(fn) {
     }
   };
 }
+
+// 活动范围内的写接口必须带回读到数据时的 gala_version（活动详情、活动列表返回）：
+// 全量恢复可能复用同一个活动/奖池/名额 ID，旧页面的请求不能落到恢复后的另一份数据上。
+const versionOf = (b) => parseGalaVersion(b?.gala_version);
 
 export function registerAdminGalaRoutes(router) {
   router.get('/gala/segments', requireAdminSession(), handle(async (_req, res) => {
@@ -94,6 +99,7 @@ export function registerAdminGalaRoutes(router) {
       totalBudget: b.total_budget,
       status: b.status,
       enabledSegments: b.enabled_segments,
+      expectedVersion: versionOf(b),
     });
     publishMallRealtimeEvent('gala_changed', { event_id: data.id, reason: 'event_updated' });
     res.json({ ok: true, data });
@@ -101,13 +107,13 @@ export function registerAdminGalaRoutes(router) {
 
   router.post('/gala/pools/create', requireAdminSession(), handle(async (req, res, db) => {
     const b = req.body || {};
-    const data = await createGalaPool(db, { eventId: b.event_id, name: b.name, sponsor: b.sponsor, budget: b.budget });
+    const data = await createGalaPool(db, { eventId: b.event_id, name: b.name, sponsor: b.sponsor, budget: b.budget, expectedVersion: versionOf(b) });
     res.json({ ok: true, data });
   }));
 
   router.post('/gala/pools/update', requireAdminSession(), handle(async (req, res, db) => {
     const b = req.body || {};
-    const data = await updateGalaPool(db, { poolId: b.id, name: b.name, sponsor: b.sponsor, budget: b.budget });
+    const data = await updateGalaPool(db, { poolId: b.id, name: b.name, sponsor: b.sponsor, budget: b.budget, expectedVersion: versionOf(b) });
     res.json({ ok: true, data });
   }));
 
@@ -122,13 +128,14 @@ export function registerAdminGalaRoutes(router) {
       userids: b.userids,
       allActiveDingtalk: b.all_active_dingtalk === true,
       tableNo: b.table_no,
+      expectedVersion: versionOf(b),
     });
     res.json({ ok: true, data });
   }));
 
   router.post('/gala/participants/remove', requireAdminSession(), handle(async (req, res, db) => {
     const b = req.body || {};
-    res.json({ ok: true, data: await removeGalaParticipant(db, { eventId: b.event_id, userid: b.userid }) });
+    res.json({ ok: true, data: await removeGalaParticipant(db, { eventId: b.event_id, userid: b.userid, expectedVersion: versionOf(b) }) });
   }));
 
   router.get('/gala/rounds', requireAdminSession(), handle(async (req, res, db) => {
@@ -154,6 +161,7 @@ export function registerAdminGalaRoutes(router) {
       amountEach: b.amount_each,
       excludePreviousWinners: b.exclude_previous_winners !== false,
       actor: actorOf(req),
+      expectedVersion: versionOf(b),
     });
     const data = serializeDrawResult(result, { includeReserved: isSuper(req) });
     publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
@@ -185,6 +193,7 @@ export function registerAdminGalaRoutes(router) {
       sponsor: b.sponsor,
       budget: b.budget,
       reserved: true,
+      expectedVersion: versionOf(b),
     });
     res.json({ ok: true, data });
   }));
@@ -197,6 +206,7 @@ export function registerAdminGalaRoutes(router) {
       sponsor: b.sponsor,
       budget: b.budget,
       allowReserved: true,
+      expectedVersion: versionOf(b),
     });
     res.json({ ok: true, data });
   }));
@@ -211,11 +221,12 @@ export function registerAdminGalaRoutes(router) {
       poolId: b.pool_id,
       note: b.note,
       actor: actorOf(req),
+      expectedVersion: versionOf(b),
     });
     res.json({ ok: true, data });
   }));
 
   router.post('/gala/reserved/cancel', requireAdminSession(), handle(async (req, res, db) => {
-    res.json({ ok: true, data: await cancelGalaReservedSlot(db, { slotId: req.body?.id }) });
+    res.json({ ok: true, data: await cancelGalaReservedSlot(db, { slotId: req.body?.id, expectedVersion: versionOf(req.body) }) });
   }));
 }

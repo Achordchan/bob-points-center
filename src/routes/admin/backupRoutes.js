@@ -66,10 +66,18 @@ export function findGalaFundingErrors(backupData) {
   //   恢复后会再发一次，拒绝；
   // - 其余形似的流水（没有年会表的旧备份、对应中奖记录不存在、或中奖记录引用的是另一条流水）按普通流水处理，
   //   不会因为引用号碰巧相同而让旧备份无法恢复。
-  const ledgerRows = asList(backupData?.ledger);
-  const ledgerById = new Map(ledgerRows.map((r) => [Number(r?.id), r]));
   if (!hasGala) return errors;
-  for (const row of ledgerRows) {
+  const ledgerRows = asList(backupData?.ledger);
+  // 只索引中奖记录 ledger_id 实际引用到的流水；没有中奖记录时整段流水核对都不需要。
+  const referencedLedgerIds = new Set();
+  for (const w of winnersList) if (w?.ledger_id != null) referencedLedgerIds.add(Number(w.ledger_id));
+  const ledgerById = new Map();
+  if (winnersList.length > 0) {
+    for (const r of ledgerRows) {
+      if (referencedLedgerIds.has(Number(r?.id))) ledgerById.set(Number(r.id), r);
+    }
+  }
+  for (const row of (winnersList.length > 0 ? ledgerRows : [])) {
     const wid = galaPayoutWinnerId(row);
     if (wid == null) continue;
     const w = winners.get(wid);
@@ -1314,16 +1322,12 @@ export function registerAdminBackupRoutes(router) {
     }
 
     // 覆盖导入前自动生成恢复点，防止中途失败后无回滚文件。
+    // 全量恢复的恢复点在导入事务内、锁住所有表之后生成：与覆盖写入处在同一个禁止并发写入的区间，
+    // 快照之后不会再有发币等写入提交而既被覆盖、又不在恢复点里（锁重试也不会拉大这个窗口）。
+    // 设置类导入不锁表，仍在事务前生成。
     let recoveryPoint = null;
-    try {
-      const tablesToSnapshot = backupMode === 'full'
-        ? FULL_TABLES
-        : SETTINGS_RECOVERY_TABLES;
-      const snapshotData = await dumpTablesConsistently(
-        db,
-        tablesToSnapshot,
-        { keepSecrets: true },
-      );
+    let recoveryHistory = null;
+    const saveRecoveryPoint = (tablesToSnapshot, snapshotData) => {
       const stampDate = new Date();
       const recoveryFilename = buildBackupFilename(backupMode);
       const recoveryPayload = {
@@ -1347,7 +1351,7 @@ export function registerAdminBackupRoutes(router) {
         mode: backupMode,
         tables: recoveryPayload._meta.tables,
       };
-      await appendBackupHistory(db, req, {
+      recoveryHistory = {
         action: '导出',
         mode: backupMode,
         filename: recoveryFilename,
@@ -1360,8 +1364,15 @@ export function registerAdminBackupRoutes(router) {
           secretsRedacted: false,
           sensitive: true,
         },
-      });
-    } catch (err) {
+      };
+    };
+    const flushRecoveryHistory = async () => {
+      if (!recoveryHistory) return;
+      const entry = recoveryHistory;
+      recoveryHistory = null;
+      await appendBackupHistory(db, req, entry);
+    };
+    const recoveryPointFailed = async (err) => {
       await failHistory('失败', {
         reason: 'recovery_point_failed',
         message: String(err?.message || err),
@@ -1371,6 +1382,15 @@ export function registerAdminBackupRoutes(router) {
       return res.status(500).json({
         error: `导入前自动快照失败，已中止导入: ${String(err?.message || err)}`,
       });
+    };
+    if (backupMode !== 'full') {
+      try {
+        const snapshotData = await dumpTablesConsistently(db, SETTINGS_RECOVERY_TABLES, { keepSecrets: true });
+        saveRecoveryPoint(SETTINGS_RECOVERY_TABLES, snapshotData);
+        await flushRecoveryHistory();
+      } catch (err) {
+        return await recoveryPointFailed(err);
+      }
     }
 
     const importedRoleIdMap = new Map();
@@ -1396,6 +1416,17 @@ export function registerAdminBackupRoutes(router) {
             throw err;
           }
           await tx.exec('SET LOCAL lock_timeout = DEFAULT');
+          // 表已全部锁住：此刻的数据就是覆盖前最后的已提交状态，在这里生成恢复点。
+          try {
+            const snapshotData = {};
+            for (const tableName of FULL_TABLES) {
+              // eslint-disable-next-line no-await-in-loop
+              snapshotData[tableName] = redactBackupSecrets(tableName, await dumpTable(tx, tableName), { keepSecrets: true });
+            }
+            saveRecoveryPoint(FULL_TABLES, snapshotData);
+          } catch (err) {
+            throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
+          }
         }
         const report = {};
         let failedTable = null;
@@ -2859,6 +2890,7 @@ export function registerAdminBackupRoutes(router) {
         return report;
       });
 
+      await flushRecoveryHistory();
       // 清理内部字段
       delete report._failedTable;
       delete report._failedIndex;
@@ -2883,6 +2915,9 @@ export function registerAdminBackupRoutes(router) {
         recoveryPoint,
       });
     } catch (err) {
+      if (err?.recoveryPointFailed) return await recoveryPointFailed(err.cause || err);
+      // 恢复点已在事务内写好（之后的导入步骤失败）：照常登记，便于下载还原。
+      await flushRecoveryHistory();
       const message = String(err?.message || err);
       // 从错误消息解析失败表/行
       let failedTable = null;
