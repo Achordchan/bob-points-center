@@ -1166,6 +1166,11 @@ export function registerAdminBackupRoutes(router) {
     if (isSettingsRecoveryPoint && mode !== 'overwrite') {
       return res.status(400).json({ error: '设置自动恢复点仅允许覆盖导入' });
     }
+    // 含年会数据的全量恢复点同样只能覆盖导入：合并会跳过年会表，“成功”之后被覆盖掉的活动和待发奖励仍然缺失。
+    if (backupMode === 'full' && backup._meta?.purpose === 'pre_import_recovery_point' && mode !== 'overwrite'
+      && GALA_BACKUP_TABLES.some((t) => Array.isArray(backup.data?.[t.name]) && backup.data[t.name].length > 0)) {
+      return res.status(400).json({ error: '含年会数据的全量自动恢复点仅允许覆盖导入' });
+    }
     const backupData = backup.data;
     const v1ExcludedTables = new Set([
       'content_announcement_revisions',

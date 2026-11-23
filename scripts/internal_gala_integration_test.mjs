@@ -1710,6 +1710,13 @@ async function realRestoreChecks(cfg) {
     const rpWinners = rp.data.gala_round_winners.filter((w) => Number(w.round_id) === Number(r1.round.id));
     assert.ok(rpWinners.every((w) => w.awarded_at != null && w.ledger_id != null), '恢复点包含覆盖前最后一笔已到账的奖励');
     assert.ok(paidIds.every((w) => rp.data.ledger.some((l) => Number(l.id) === Number(w.ledger_id))), '恢复点包含对应流水');
+    {
+      // 含年会数据的全量恢复点只能覆盖导入：合并会跳过年会表，“成功”后被覆盖掉的活动和奖励仍然缺失
+      const genBefore = await generation();
+      const rm = await call('POST', '/backup/import', { backup: rp, mode: 'merge' });
+      assert.deepEqual([rm.status, rm.body?.error], [400, '含年会数据的全量自动恢复点仅允许覆盖导入']);
+      assert.equal(await generation(), genBefore);
+    }
     r = await call('POST', '/gala/rounds/grant', { round_id: Number(r1.round.id), grant_token: oldToken });
     assert.deepEqual([r.status, r.body?.error], [409, 'round_changed'], '恢复前的发放凭据在恢复后作废');
     r = await call('POST', '/gala/pools/create', { gala_version: oldVersion, event_id: ev.id, name: '旧页面', budget: 1 });
@@ -1758,6 +1765,21 @@ async function realRestoreChecks(cfg) {
     assert.deepEqual([r.status, r.body?.error], [400, 'invalid_userid']);
     console.log('✓ 真实全量恢复：恢复点含最后一笔已到账奖励，旧凭据/旧版本作废，后置核对失败时一切不变；锁竞争重试只生效一次');
 
+    // 2a) 流水已写入、流水序列已推进（ALTER SEQUENCE … RESTART）之后，后面的表写入失败：整个导入回滚，
+    //     下一笔流水 ID、恢复代数、数据版本都不变
+    {
+      const late = structuredClone(bad);
+      late.data.accounts = [];
+      late.data.ledger = [{ id: 7900000000000009, userid: users[2], delta: 1, reason: '普通入账', ref_id: 'RT_SEQ', created_at: now }];
+      late.data.redeems = [{ exchange_id: 'RT_LATE_FAIL', userid: 'rt_no_such_user', product_id: 'p', bob_amount: 1, created_at: now }];
+      recount(late);
+      const beforeL = await snapshot();
+      r = await call('POST', '/backup/import', { backup: late, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.equal(r.body?.failedTable, 'redeems', JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), beforeL, '序列推进随事务回滚');
+      assert.equal(await tdb.get('SELECT 1 AS x FROM ledger WHERE id = 7900000000000009'), undefined);
+    }
     // 2b) 合并导入跳过年会表：备份里的年会数据一行都不写入，目标库的年会数据保持原样，回执列出跳过的表
     {
       const skip = structuredClone(bad);

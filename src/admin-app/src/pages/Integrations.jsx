@@ -124,8 +124,11 @@ function Backup({ canExport, canImport }) {
     try {
       const data = JSON.parse(await file.text());
       if (!data?._meta || !data?.data) throw new Error('无效的备份文件');
-      const isRecoveryPoint = data._meta?.mode === 'settings'
-        && data._meta?.purpose === 'pre_import_recovery_point';
+      // 设置恢复点、以及含年会数据的全量恢复点只能覆盖导入（合并会跳过年会表，恢复不回被覆盖掉的活动和奖励）。
+      const GALA_TABLES = ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'];
+      const isRecoveryPoint = data._meta?.purpose === 'pre_import_recovery_point'
+        && (data._meta?.mode === 'settings'
+          || (data._meta?.mode === 'full' && GALA_TABLES.some((t) => Array.isArray(data.data?.[t]) && data.data[t].length > 0)));
       if (isRecoveryPoint) setImportMode('overwrite');
       setImportDetail({ filename: file.name, meta: data._meta, backup: data, isRecoveryPoint });
       message.success('备份文件已读取');
