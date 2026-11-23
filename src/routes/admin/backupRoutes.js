@@ -3134,6 +3134,21 @@ export function registerAdminBackupRoutes(router) {
                 }
               }
             }
+            // 合并时，备份里中奖记录的付款凭据若指向备份里没有的流水（用户重置后流水已删、只留凭据），
+            // 它在目标库里必须同样不存在：否则会挂到目标库里一条无关、或同名的旧流水上，恢复后显示已付款，
+            // 旧流水留着而余额早已清零。备份流水此时已写入，再查到的只能是目标库原有的流水。
+            if (hasGala && mode !== 'overwrite') {
+              const backupLedgerIds = new Set((requireArray('ledger') || []).map((r) => Number(r?.id)));
+              const dangling = [...new Set((requireArray('gala_round_winners') || [])
+                .map((w) => (w?.ledger_id == null ? NaN : Number(w.ledger_id)))
+                .filter((n) => Number.isSafeInteger(n) && n > 0 && !backupLedgerIds.has(n)))];
+              if (dangling.length) {
+                const hit = await tx.all('SELECT id FROM ledger WHERE id = ANY(?::bigint[]) ORDER BY id LIMIT 20', [dangling]);
+                if (hit.length) {
+                  throw new Error(`合并导入的中奖记录引用了备份里没有、目标库里却已存在的流水（ledger#${hit.map((r) => r.id).join(', ledger#')}），无法确认是它的付款，已拒绝导入`);
+                }
+              }
+            }
             if (hasGala && mode === 'overwrite') {
               for (const table of [...GALA_BACKUP_TABLES].reverse()) {
                 // eslint-disable-next-line no-await-in-loop

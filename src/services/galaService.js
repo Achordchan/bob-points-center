@@ -120,17 +120,21 @@ function cleanText(value, max = MAX_TITLE_LENGTH) {
   return Array.from(text).slice(0, max).join('');
 }
 
-// userid 原样比较（只去掉首尾空白），不截断：截断后可能匹配到前缀相同的另一个人。超长的直接拒绝。
+// userid 原样比较，不改写：不去首尾空白、不截断、不替换字符。改写后的值可能正是另一个人的 ID
+// （例如存量库里同时有 "u1" 和 " u1"），操作会落到别人身上。不能原样使用的一律拒绝。
+// 长度按 Unicode 字符（码点）计，与数据库 char_length 一致：全员导入在库里按同一规则筛选。
 const MAX_USERID_LENGTH = 512;
 function cleanUserid(value) {
   if (value === null || value === undefined || (typeof value !== 'string' && typeof value !== 'number')) return '';
   // 数字形式的 userid 只接受安全整数：超出范围的 JSON 数字在解析时已被舍入，可能恰好等于别人的 ID。
   if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new GalaError('invalid_userid');
-  const uid = String(value).trim();
-  if (uid.length > MAX_USERID_LENGTH) throw new GalaError('invalid_userid');
-  // 标识不能像展示文本那样替换字符：孤立的 UTF-16 代理码元写库时会变成 U+FFFD，可能等于另一个人的 ID；
-  // NUL 无法作为 PostgreSQL 参数传入（会变成 500）。两者都在查询前拒绝。
+  const uid = String(value);
+  if (uid === '') return '';
+  // 首尾带空白（JS trim 去掉的任何空白）：不去掉后继续，而是拒绝。
+  if (uid !== uid.trim()) throw new GalaError('invalid_userid');
+  // 孤立的 UTF-16 代理码元写库时会变成 U+FFFD，可能等于另一个人的 ID；NUL 无法作为 PostgreSQL 参数传入（会变成 500）。
   if (!uid.isWellFormed() || uid.includes('\u0000')) throw new GalaError('invalid_userid');
+  if (uid.length > MAX_USERID_LENGTH * 2 || Array.from(uid).length > MAX_USERID_LENGTH) throw new GalaError('invalid_userid');
   return uid;
 }
 
@@ -584,7 +588,7 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
 // JS String.prototype.trim 去掉的全部空白（WhiteSpace + LineTerminator），用于在数据库里套用与 cleanUserid 相同的规则。
 const JS_TRIM_CHARS = '\t\n\u000b\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
 const UNTRIMMED_USERID_RE = `^[${JS_TRIM_CHARS}]|[${JS_TRIM_CHARS}]$`;
-// 在册档案里能原样按 cleanUserid 规则操作的 userid：非空、不超长、首尾无空白（数据库里的文本不会含 NUL 或孤立代理）。
+// 在册档案里能原样按 cleanUserid 规则操作的 userid：非空、不超长（同按字符计）、首尾无空白（数据库里的文本不会含 NUL 或孤立代理）。
 const OPERABLE_USERID_SQL = `char_length(u.userid) BETWEEN 1 AND ${MAX_USERID_LENGTH} AND u.userid !~ ?`;
 
 async function addAllActive(db, id, table) {
@@ -635,9 +639,11 @@ export async function removeGalaParticipant(db, { eventId, userid, expectedVersi
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
   // 与抽签串行：抽签持有活动行锁期间，名单不会在“公开人数检查”和“候选人查询”之间变化。
+  // 缺少或无效的标识直接拒绝：不能和“指定的人已不在名单中”（removed: 0）混为一谈。
+  const uid = cleanUserid(userid);
+  if (!uid) throw new GalaError('invalid_userid');
   return await inTx(db, async (tx) => {
     await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
-    const uid = cleanUserid(userid);
     const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, uid]);
     // 移出即作废：同一事务里取消此人在本活动的待用名额。否则之后重新导入（如“导入全部在册员工”）
     // 让此人回到名单，旧名额又会在预定轮次兑现。返回值不提名额（非超管也能移出名单），不暴露预留信息。

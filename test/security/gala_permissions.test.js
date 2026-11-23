@@ -1034,6 +1034,12 @@ test('名单导入：第一项无效值的位置，包括清洗时抛错的超�
     [['ok', 'ab\uD83D'], 1],
     [['ok', 'ok2', 'a\u0000b'], 2],
     [['\uDE00x', 'ok'], 0],
+    // 首尾空白不去掉后继续，而是拒绝：" u1" 去掉空白后可能正是另一个人
+    [[' u1', 'ok'], 0],
+    [['ok', 'u2\u3000'], 1],
+    [['ok', 'ok2', '\tu3'], 2],
+    // 长度按字符（码点）计：513 个补充平面字符超长
+    [['ok', '😀'.repeat(513)], 1],
   ];
   for (const [list, index] of cases) {
     // eslint-disable-next-line no-await-in-loop
@@ -1059,4 +1065,12 @@ test('导入：已发放且付款流水在备份里的奖励，备份必须带�
   // 付款流水不在备份里（用户重置后流水已删）时不要求账户
   const purged = { ...structuredClone(base), ledger: [] };
   assert.ok(!findGalaFundingErrors(purged).some((e) => e.includes('账户')));
+});
+
+test('移出名单：缺少或无效的 userid 返回 invalid_userid，不当成“已不在名单”', async () => {
+  const { removeGalaParticipant } = await import('../../src/services/galaService.js');
+  for (const userid of [undefined, null, '', {}, [], ' u1', 'u1 ']) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(removeGalaParticipant(null, { eventId: 1, userid }), (e) => e.code === 'invalid_userid', JSON.stringify(userid));
+  }
 });

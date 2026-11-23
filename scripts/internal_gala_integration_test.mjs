@@ -794,6 +794,31 @@ async function main() {
       console.log('✓ 全员导入跳过并报告无法原样操作的存量 ID');
     }
 
+    // 同一个非 BMP 标识（300 个补充平面字符 = 600 个 UTF-16 码元）在全员导入、显式导入、移出时长度规则一致
+    {
+      const wide = '😀'.repeat(300);
+      await db.run("INSERT INTO users(userid, name, source) VALUES(?, ?, 'dingtalk')", [wide, 'wide']);
+      await db.exec('INSERT INTO user_dingtalk_profiles(userid, name, active) VALUES(?, ?, 1)', [wide, 'wide']);
+      try {
+        const evN = await createGalaEvent(db, { title: `${PREFIX} 宽字符`, totalBudget: 0 });
+        const all = await addGalaParticipants(db, { eventId: evN.id, allActiveDingtalk: true });
+        assert.ok(!all.skipped_invalid.includes(wide));
+        assert.ok(await db.get('SELECT 1 FROM gala_participants WHERE event_id = ? AND userid = ?', [evN.id, wide]));
+        assert.equal((await removeGalaParticipant(db, { eventId: evN.id, userid: wide })).removed, 1);
+        assert.equal((await addGalaParticipants(db, { eventId: evN.id, userids: [wide] })).added, 1);
+        assert.equal((await removeGalaParticipant(db, { eventId: evN.id, userid: wide })).removed, 1);
+        // 首尾空白的标识直接拒绝，不会去掉空白后落到另一个人身上
+        await addGalaParticipants(db, { eventId: evN.id, userids: [uid(1)] });
+        await assert.rejects(removeGalaParticipant(db, { eventId: evN.id, userid: ` ${uid(1)}` }), (e) => e.code === 'invalid_userid');
+        await assert.rejects(addGalaParticipants(db, { eventId: evN.id, userids: [`${uid(2)} `] }), (e) => e.code === 'invalid_userid' && e.index === 0);
+        await assert.rejects(removeGalaParticipant(db, { eventId: evN.id }), (e) => e.code === 'invalid_userid');
+        assert.ok(await db.get('SELECT 1 FROM gala_participants WHERE event_id = ? AND userid = ?', [evN.id, uid(1)]), '名单里的人没被误删');
+      } finally {
+        await db.run('DELETE FROM users WHERE userid = ?', [wide]);
+      }
+      console.log('✓ 标识长度按字符计、首尾空白拒绝，全员导入、显式导入、移出规则一致');
+    }
+
     // 预留对象是真实参与者：名单增删、计数与普通人一致；被移出名单后名额自动作废；重置后不再出现在名单
     {
       const evR = await createGalaEvent(db, { title: `${PREFIX} 名单`, totalBudget: 0 });
@@ -1566,9 +1591,31 @@ async function realRestoreChecks(cfg) {
       const before2 = await snapshot();
       r = await call('POST', '/backup/import', { backup: early, mode: 'merge' });
       assert.notEqual(r.status, 200);
-      assert.ok(JSON.stringify(r.body).includes('不属于它的流水'), JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('目标库里却已存在'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before2);
       await tdb.run('DELETE FROM ledger WHERE id = ?', [old.id]);
+    }
+    // 2b-) 备份来自用户重置之后（中奖记录保留凭据、流水已删），目标库恰有一条字段完全匹配的旧流水：同样拒绝，
+    //      不能把悬空的凭据挂到目标库的流水上（恢复后显示已付款、余额却已清零）
+    {
+      const match = await tdb.get(
+        `INSERT INTO ledger(userid, delta, reason, ref_id, created_at) VALUES(?, 7, '年会奖励·抽奖·第1轮', 'GALA_W990004', ?) RETURNING id`,
+        [users[1], now + 100],
+      );
+      const dangling = structuredClone(bad);
+      dangling.data.ledger = [];
+      dangling.data.accounts = [];
+      dangling.data.gala_events = [{ ...bad.data.gala_events[0], id: 990004, title: 'RT 悬空' }];
+      dangling.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990004, event_id: 990004, budget: 7, spent: 7 }];
+      dangling.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990004, event_id: 990004, pool_id: 990004, amount_each: 7 }];
+      dangling.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990004, round_id: 990004, event_id: 990004, userid: users[1], pool_id: 990004, amount: 7, ledger_id: Number(match.id), created_at: now }];
+      recount(dangling);
+      const before8 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: dangling, mode: 'merge' });
+      assert.notEqual(r.status, 200);
+      assert.ok(JSON.stringify(r.body).includes('目标库里却已存在'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before8);
+      await tdb.run('DELETE FROM ledger WHERE id = ?', [match.id]);
     }
     // 2b') 合并带入已发放奖励和它的付款流水、却没带收款人账户：余额不会增加而补发已被挡住，拒绝导入
     {
