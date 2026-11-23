@@ -125,6 +125,8 @@ CREATE INDEX IF NOT EXISTS idx_gala_winners_user_unawarded ON gala_round_winners
 CREATE INDEX IF NOT EXISTS idx_gala_winners_pool_unawarded ON gala_round_winners(pool_id) WHERE awarded_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_gala_participants_user ON gala_participants(userid);
 CREATE INDEX IF NOT EXISTS idx_gala_reserved_user_pending ON gala_reserved_slots(userid) WHERE status = 'pending';
+-- 预留名额列表按活动、id 倒序分页
+CREATE INDEX IF NOT EXISTS idx_gala_reserved_event ON gala_reserved_slots(event_id, id);
 -- 按人查未取消名额（抽签候选排除、超管名单的预留标记、名额唯一性）。
 CREATE INDEX IF NOT EXISTS idx_gala_reserved_live_user
   ON gala_reserved_slots(event_id, userid)

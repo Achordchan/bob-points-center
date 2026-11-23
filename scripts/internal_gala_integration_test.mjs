@@ -26,6 +26,7 @@ import {
   updateGalaEvent,
   updateGalaPool,
   cancelGalaReservedSlot,
+  listGalaReservedSlots,
   listGalaParticipants,
   removeGalaParticipant,
   serializeGrantResult,
@@ -741,6 +742,57 @@ async function main() {
       assert.deepEqual(ids, [uid(1), uid(2), uid(3), uid(4)].sort(), '被预留的人不应在并发取消时两头落空');
     }
     console.log('✓ 取消预留名额与抽签串行，不会漏掉被预留的人');
+
+    // 预留名额列表按 id 倒序分页：反复创建、取消产生的历史记录逐页拼起来完整、无重复
+    {
+      const evQ = await createGalaEvent(db, { title: `${PREFIX} 名额分页`, totalBudget: 0 });
+      await addGalaParticipants(db, { eventId: evQ.id, userids: [uid(1), uid(2)] });
+      for (let i = 0; i < 5; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const slot = await addSlot(db, { eventId: evQ.id, segment: 'lottery', roundNo: 1, userid: uid(1) });
+        // eslint-disable-next-line no-await-in-loop
+        await cancelGalaReservedSlot(db, { slotId: slot.id });
+      }
+      const all = [];
+      let before = null;
+      for (;;) {
+        // eslint-disable-next-line no-await-in-loop
+        const page = await listGalaReservedSlots(db, { eventId: evQ.id, beforeId: before, limit: 2 });
+        assert.ok(page.length <= 2);
+        all.push(...page);
+        if (page.length < 2) break;
+        before = page[page.length - 1].id;
+      }
+      const baseline = await db.all('SELECT id FROM gala_reserved_slots WHERE event_id = ? ORDER BY id DESC', [evQ.id]);
+      assert.equal(baseline.length, 5);
+      assert.deepEqual(all.map((x) => x.id), baseline.map((x) => Number(x.id)));
+      assert.ok(all.every((x) => x.gala_version === evQ.gala_version));
+      await assert.rejects(listGalaReservedSlots(db, { eventId: evQ.id, beforeId: 'x' }), (e) => e.code === 'invalid_before_id');
+      await assert.rejects(listGalaReservedSlots(db, { eventId: evQ.id, limit: 0 }), (e) => e.code === 'invalid_limit');
+      console.log('✓ 预留名额历史按 id 倒序分页');
+    }
+
+    // 全员导入与移出名单用同一套标识规则：首尾空白、超长的存量 ID 不导入，回执里报告
+    {
+      const padded = ` ${PREFIX}_pad`;
+      const longId = `${PREFIX}_${'L'.repeat(600)}`;
+      for (const u of [padded, longId]) {
+        // eslint-disable-next-line no-await-in-loop
+        await db.run("INSERT INTO users(userid, name, source) VALUES(?, ?, 'dingtalk')", [u, 'x']);
+        // eslint-disable-next-line no-await-in-loop
+        await db.exec('INSERT INTO user_dingtalk_profiles(userid, name, active) VALUES(?, ?, 1)', [u, 'x']);
+      }
+      try {
+        const evW = await createGalaEvent(db, { title: `${PREFIX} 全员规则`, totalBudget: 0 });
+        const res = await addGalaParticipants(db, { eventId: evW.id, allActiveDingtalk: true });
+        assert.ok(res.skipped_invalid.includes(padded) && res.skipped_invalid.includes(longId), JSON.stringify(res.skipped_invalid).slice(0, 200));
+        const inList = await db.all('SELECT userid FROM gala_participants WHERE event_id = ? AND userid IN (?, ?)', [evW.id, padded, longId]);
+        assert.equal(inList.length, 0, '不能原样操作的 ID 不进名单');
+      } finally {
+        await db.run('DELETE FROM users WHERE userid IN (?, ?)', [padded, longId]);
+      }
+      console.log('✓ 全员导入跳过并报告无法原样操作的存量 ID');
+    }
 
     // 预留对象是真实参与者：名单增删、计数与普通人一致；被移出名单后名额自动作废；重置后不再出现在名单
     {
@@ -1536,7 +1588,7 @@ async function realRestoreChecks(cfg) {
     }
     // 2b'') 合并会覆盖目标库里已有年会奖励到账的账户余额（备份不含那次活动，余额也不含那笔奖励）：拒绝
     {
-      const paidUser = await tdb.get('SELECT userid FROM gala_round_winners WHERE awarded_at IS NOT NULL AND amount > 0 ORDER BY id LIMIT 1');
+      const paidUser = await tdb.get('SELECT w.userid FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id WHERE w.awarded_at IS NOT NULL AND w.amount > 0 ORDER BY w.id LIMIT 1');
       assert.ok(paidUser, '目标库应已有到账的年会奖励');
       const balBefore = await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidUser.userid]);
       const stale = structuredClone(bad);
@@ -1549,6 +1601,32 @@ async function realRestoreChecks(cfg) {
       assert.ok(JSON.stringify(r.body).includes('已有年会奖励到账'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before6);
       assert.deepEqual(await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidUser.userid]), balBefore, '余额不变');
+    }
+    // 2b''') 用户重置后：合并该用户重置后的账户可以通过；但带回原付款流水（重新挂回中奖记录的凭据）要拒绝
+    {
+      const paidW = await tdb.get(
+        `SELECT w.id, w.userid, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+          WHERE w.awarded_at IS NOT NULL AND w.amount > 0 ORDER BY w.id DESC LIMIT 1`,
+      );
+      assert.ok(paidW);
+      const origLedger = await tdb.get('SELECT * FROM ledger WHERE id = ?', [paidW.ledger_id]);
+      await tdb.transaction((tx) => purgeUserBusinessData(tx, [paidW.userid]));
+      assert.equal(await tdb.get('SELECT id FROM ledger WHERE id = ?', [paidW.ledger_id]), undefined);
+      const resetAcc = structuredClone(bad);
+      for (const name of ['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) resetAcc.data[name] = [];
+      resetAcc.data.accounts = [{ userid: paidW.userid, balance: 0, updated_at: now }];
+      recount(resetAcc);
+      r = await call('POST', '/backup/import', { backup: resetAcc, mode: 'merge' });
+      assert.equal(r.status, 200, `重置后合并账户应通过：${JSON.stringify(r.body).slice(0, 300)}`);
+      const relink = structuredClone(resetAcc);
+      relink.data.accounts = [];
+      relink.data.ledger = [{ ...origLedger, id: Number(origLedger.id), delta: Number(origLedger.delta), created_at: Number(origLedger.created_at) }];
+      recount(relink);
+      const before7 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: relink, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('重新挂回'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before7);
     }
     // 2c) 当前格式的覆盖导入：年会表被截短（名单变成空数组）时拒绝，不恢复出残缺的活动
     {

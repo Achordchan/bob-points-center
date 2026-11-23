@@ -194,7 +194,7 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.get('/gala/reserved', requireAdminSession(), handle(async (req, res, db) => {
-    res.json({ ok: true, data: await listGalaReservedSlots(db, { eventId: req.query?.event_id }) });
+    res.json({ ok: true, data: await listGalaReservedSlots(db, { eventId: req.query?.event_id, beforeId: req.query?.before_id, limit: req.query?.limit }) });
   }));
 
   router.post('/gala/reserved/pools/create', requireAdminSession(), handle(async (req, res, db) => {

@@ -903,8 +903,15 @@ test('当前格式覆盖导入：年会表行数必须与导出记录一致', as
   assert.ok(findGalaRowCountErrors(data, { galaFormat: 1, tables: noAccTables }).some((e) => e.startsWith('accounts')));
   // 流水被截短同样拒绝
   assert.ok(findGalaRowCountErrors({ ...data, ledger: [] }, { galaFormat: 1, tables }).some((e) => e.startsWith('ledger')));
-  // 旧格式不检查
-  assert.deepEqual(findGalaRowCountErrors(cut, { tables }), []);
+  // 旧格式（没有 galaFormat）同样核对它实际记下的行数：被截短的中奖记录、名单不能通过
+  assert.ok(findGalaRowCountErrors(cut, { tables }).some((e) => e.startsWith('gala_participants')));
+  const cutWinners = { ...data, gala_round_winners: [] };
+  const legacyTables = { ...tables, gala_round_winners: 3 };
+  assert.ok(findGalaRowCountErrors(cutWinners, { tables: legacyTables }).some((e) => e.startsWith('gala_round_winners')));
+  assert.deepEqual(findGalaRowCountErrors(data, { tables }), []);
+  // 旧格式不要求新字段：没记行数的表不报错，更早没有 tables 的旧备份不检查
+  assert.deepEqual(findGalaRowCountErrors(data, { tables: { gala_events: 1 } }), []);
+  assert.deepEqual(findGalaRowCountErrors(cut, {}), []);
 });
 
 test('年会备份：中奖记录引用的付款流水不能早于中奖记录产生', () => {

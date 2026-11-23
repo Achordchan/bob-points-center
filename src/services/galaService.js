@@ -581,17 +581,31 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   }, expectedVersion);
 }
 
+// JS String.prototype.trim 去掉的全部空白（WhiteSpace + LineTerminator），用于在数据库里套用与 cleanUserid 相同的规则。
+const JS_TRIM_CHARS = '\t\n\u000b\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+const UNTRIMMED_USERID_RE = `^[${JS_TRIM_CHARS}]|[${JS_TRIM_CHARS}]$`;
+// 在册档案里能原样按 cleanUserid 规则操作的 userid：非空、不超长、首尾无空白（数据库里的文本不会含 NUL 或孤立代理）。
+const OPERABLE_USERID_SQL = `char_length(u.userid) BETWEEN 1 AND ${MAX_USERID_LENGTH} AND u.userid !~ ?`;
+
 async function addAllActive(db, id, table) {
+  // 全员导入与按名单导入、移出名单用同一套标识规则：不能原样操作的存量 ID（首尾空白、超长）不导入，
+  // 否则导入后无法按名单返回的 ID 移出，带首尾空白的还可能匹配到另一个人。跳过的人在回执里报告。
   const result = await db.run(
     `INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
      SELECT ?, u.userid, COALESCE(NULLIF(p.name, ''), u.name), CAST(? AS INTEGER), 'admin'
        FROM users u
        JOIN user_dingtalk_profiles p ON p.userid = u.userid
-      WHERE p.active = 1 AND u.source = 'dingtalk'
+      WHERE p.active = 1 AND u.source = 'dingtalk' AND ${OPERABLE_USERID_SQL}
      ON CONFLICT (event_id, userid) DO NOTHING`,
-    [id, table],
+    [id, table, UNTRIMMED_USERID_RE],
   );
-  return { added: result.changes, missing: [] };
+  const skipped = await db.all(
+    `SELECT u.userid FROM users u JOIN user_dingtalk_profiles p ON p.userid = u.userid
+      WHERE p.active = 1 AND u.source = 'dingtalk' AND NOT (${OPERABLE_USERID_SQL})
+      ORDER BY u.userid LIMIT 100`,
+    [UNTRIMMED_USERID_RE],
+  );
+  return { added: result.changes, missing: [], skipped_invalid: skipped.map((r) => r.userid) };
 }
 
 async function addListed(db, id, list, table) {
@@ -1212,15 +1226,23 @@ function serializeSlot(row) {
   };
 }
 
-export async function listGalaReservedSlots(db, { eventId }) {
+// 按 id 倒序分页（含已取消的历史记录）：传上一页最后一条的 id 作为 before_id 取更早的记录。
+const MAX_RESERVED_PAGE = 100;
+export async function listGalaReservedSlots(db, { eventId, beforeId = null, limit = MAX_RESERVED_PAGE }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
+  const hasBefore = beforeId !== null && beforeId !== undefined && beforeId !== '';
+  const before = hasBefore ? toPositiveId(beforeId) : null;
+  if (hasBefore && !before) throw new GalaError('invalid_before_id');
+  const rawLimit = limit === null || limit === undefined || limit === '' ? MAX_RESERVED_PAGE : toPositiveId(limit);
+  if (!rawLimit) throw new GalaError('invalid_limit');
+  const pageSize = Math.min(rawLimit, MAX_RESERVED_PAGE);
   // 名额与数据版本在同一个快照里读：取消名额要带回这个版本，恢复前的名额 ID 不会配上恢复后的版本。
   return await inSnapshot(db, async (snap) => {
     const rows = await snap.all(
       `SELECT s.*, u.name AS user_name FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
-        WHERE s.event_id = ? ORDER BY s.id DESC`,
-      [id],
+        WHERE s.event_id = ?${before ? ' AND s.id < ?' : ''} ORDER BY s.id DESC LIMIT ?`,
+      before ? [id, before, pageSize] : [id, pageSize],
     );
     const version = await readGalaVersion(snap);
     return rows.map((r) => ({ ...serializeSlot(r), gala_version: version }));

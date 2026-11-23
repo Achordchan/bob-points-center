@@ -49,18 +49,21 @@ export function requiresGalaTables(meta) {
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
 }
 
-// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数，返回错误描述列表：
-// - _meta.tables 列出的每张表，数组长度都必须与记录一致（被截短的账户、流水、名单等都会被发现）；
-// - required 里的表必须有行数记录（默认六张年会表、流水和账户；覆盖导入传入全部全量表）。
+// 全量导出在 _meta.tables 里记了每张表的行数（早于年会格式号的旧版导出也有），返回错误描述列表：
+// - _meta.tables 列出的每张表，数组长度都必须与记录一致（被截短的账户、流水、名单等都会被发现）。
+//   旧格式同样核对它实际记下的行数：不强制它提供新字段，但被截短的中奖记录不能让待发的轮次被补成已完成；
+// - 当前格式（_meta.galaFormat）还要求 required 里的表必须有行数记录（默认六张年会表、流水和账户；覆盖导入传入全部全量表）。
 // 流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态；账户被截短时，覆盖会清掉已到账的余额，
 // 而中奖记录仍是已发放，重试发币也不会补回。导出前已重置的用户不受影响：那时记录的行数本来就不含已删数据。
-// 旧格式备份不检查。
+// 更早、没有行数记录的旧备份不检查。
 export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'] } = {}) {
-  if (meta?.galaFormat == null) return [];
-  const listed = meta?.tables && typeof meta.tables === 'object' ? meta.tables : {};
+  const current = meta?.galaFormat != null;
+  const listed = meta?.tables && typeof meta.tables === 'object' && !Array.isArray(meta.tables) ? meta.tables : {};
   const errors = [];
-  for (const name of required) {
-    if (!Object.hasOwn(listed, name)) errors.push(`${name} 缺少导出时的行数记录`);
+  if (current) {
+    for (const name of required) {
+      if (!Object.hasOwn(listed, name)) errors.push(`${name} 缺少导出时的行数记录`);
+    }
   }
   for (const [name, expected] of Object.entries(listed)) {
     const actual = Array.isArray(backupData?.[name]) ? backupData[name].length : 0;
@@ -2403,9 +2406,12 @@ export function registerAdminBackupRoutes(router) {
             // 查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
               const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
+              // 只看付款流水仍在的奖励：用户重置删了流水、清零了余额，只剩幂等凭据的奖励已不在余额里，
+              // 合并该用户重置后的账户不受影响（流水此时还没导入，查到的都是目标库原有的）。没有凭据的已发放记录无法判断，按仍在处理。
               const paid = uids.length ? await tx.all(
                 `SELECT DISTINCT w.userid FROM gala_round_winners w
                   WHERE w.awarded_at IS NOT NULL AND w.amount > 0 AND w.userid = ANY(?::text[])
+                    AND (w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id))
                   ORDER BY w.userid LIMIT 20`,
                 [uids],
               ) : [];
@@ -2523,6 +2529,22 @@ export function registerAdminBackupRoutes(router) {
           // ledger
           {
             const rows = requireArray('ledger') || [];
+            // 合并不能把目标库已有中奖记录的付款凭据重新挂回流水：用户重置删了流水、清零了余额但保留 ledger_id，
+            // 备份若带回那条原流水（而余额不随之恢复），会出现流水显示入账、余额却没有的账目。
+            // 此时备份里的年会数据还没写入，查到的都是目标库原有的中奖记录；凭据当前指向不存在的流水才算重新挂回。
+            if (mode !== 'overwrite' && rows.length) {
+              const ids = [...new Set(rows.map((r) => Number(r?.id)).filter((n) => Number.isSafeInteger(n) && n > 0))];
+              const relinked = ids.length ? await tx.all(
+                `SELECT w.id, w.ledger_id FROM gala_round_winners w
+                  WHERE w.ledger_id = ANY(?::bigint[])
+                    AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id)
+                  ORDER BY w.id LIMIT 20`,
+                [ids],
+              ) : [];
+              if (relinked.length) {
+                throw new Error(`合并导入会把已重置用户的年会付款流水重新挂回中奖记录（${relinked.map((r) => `#${r.id}→ledger#${r.ledger_id}`).join(', ')}），余额无法随之核对，已拒绝导入`);
+              }
+            }
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
