@@ -397,7 +397,10 @@ async function main() {
       r = await call(operatorId, 'GET', `/gala/rounds?event_id=${hid}`);
       assert.ok(r.body.data[0].winners.every(noPayout), '运营管理员的轮次列表不含逐人发放信息');
       assert.equal(r.body.data[0].draw_count, 3);
+      assert.equal(r.body.data[0].status, 'drawn', '不发币的轮次对非超管固定显示 drawn，不受预留奖励发放影响');
+      assert.equal(r.body.data[0].granted_at, null);
       r = await call(superId, 'GET', `/gala/rounds?event_id=${hid}`);
+      assert.equal(r.body.data[0].status, 'granted');
       assert.equal(r.body.data[0].winners.find((w) => w.is_reserved === 1).awarded, 1);
       assert.ok(!JSON.stringify(r.body).includes('balance'), '轮次接口不返回余额');
       console.log('✓ HTTP：预留接口仅超管可用，非超管返回中不暴露预留信息');

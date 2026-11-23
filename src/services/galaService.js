@@ -147,12 +147,11 @@ function serializeWinner(row, { includeReserved }) {
   return out;
 }
 
-// 非超管看到的轮次状态只由普通中奖记录决定，预留名额发放成功与否不影响它。
+// 非超管看到的轮次状态只由普通中奖记录决定，完全不读整轮状态（整轮状态包含预留名额的发放结果）。
+// 没有普通待发奖励的轮次（不发币、或只有预留名额带奖励）没有“发放”这一步，固定显示 drawn。
 function publicRoundStatus(row, winners) {
   const visible = (winners || []).filter((w) => Number(w.is_reserved) !== 1 && Number(w.amount) > 0);
-  if (visible.length === 0) {
-    return { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null };
-  }
+  if (visible.length === 0) return { status: 'drawn', granted_at: null };
   const pending = visible.filter((w) => !w.awarded_at);
   if (pending.length > 0) return { status: 'drawn', granted_at: null };
   const grantedAt = Math.max(...visible.map((w) => Number(w.awarded_at)));
