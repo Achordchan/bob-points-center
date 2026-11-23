@@ -2363,7 +2363,8 @@ export function registerAdminBackupRoutes(router) {
                 const ids = [...new Set((requireArray(table.name) || []).map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
                 if (!ids.length) continue;
                 // eslint-disable-next-line no-await-in-loop
-                const rows = await tx.all(`SELECT id FROM ${table.name} WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+                // 单个数组参数，避免 ID 很多时超出 PostgreSQL 每条语句 65535 个绑定参数的上限。
+                const rows = await tx.all(`SELECT id FROM ${table.name} WHERE id = ANY(?::bigint[]) ORDER BY id LIMIT 20`, [ids]);
                 if (rows.length) {
                   throw new Error(`合并导入存在年会数据 ID 冲突（${table.name}: ${rows.map((r) => r.id).join(', ')}），已拒绝导入`);
                 }
