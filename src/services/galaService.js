@@ -148,11 +148,27 @@ export async function bumpGalaRestoreGeneration(tx) {
   );
 }
 
+// 发放凭据：轮次 ID + 读到这一轮时的恢复代数（“代数.轮次ID”）。代数不进备份、每次成功的全量恢复都加一，
+// 所以覆盖恢复复用同一个轮次 ID 后，恢复前页面拿到的凭据必然失效：发放只付给操作者看到的那一轮。
+function grantTokenOf(generation, roundId) {
+  return `${generation}.${Number(roundId)}`;
+}
+
+function parseGrantToken(token, roundId) {
+  const m = /^(0|[1-9][0-9]{0,18})\.([1-9][0-9]{0,15})$/.exec(typeof token === 'string' ? token : '');
+  if (!m || Number(m[2]) !== Number(roundId)) throw new GalaError('invalid_grant_token');
+  return m[1];
+}
+
+async function readRestoreGeneration(tx) {
+  const row = await tx.get('SELECT generation FROM gala_restore_state WHERE id = 1');
+  return String(row?.generation ?? 0);
+}
+
 async function enterGalaWrite(tx, generation) {
   await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
   if (generation === undefined) return null;
-  const row = await tx.get('SELECT generation FROM gala_restore_state WHERE id = 1');
-  const current = String(row?.generation ?? 0);
+  const current = await readRestoreGeneration(tx);
   if (generation !== null && current !== String(generation)) throw new GalaError('round_changed', 409);
   return current;
 }
@@ -235,7 +251,7 @@ function serializeWinner(row, { includeReserved }) {
   return out;
 }
 
-function serializeRound(row, winners, { includeReserved }) {
+function serializeRound(row, winners, { includeReserved, generation = null }) {
   const sorted = (winners || []).slice().sort((a, b) => Number(a.display_order) - Number(b.display_order));
   // 预留对象的奖励与本轮普通中奖人相同（同单价、同样的失败原因），整轮状态不再能区分谁是预留对象，
   // 所以超管与非超管看到同一个完成状态：全部正数奖励发完才是 granted，任何一笔待发都保持 drawn。
@@ -256,6 +272,8 @@ function serializeRound(row, winners, { includeReserved }) {
     created_name: row.created_name || '',
     created_at: Number(row.created_at),
     granted_at: state.granted_at,
+    // 发币时原样带回（见 grantTokenOf）；与轮次同一快照读出，恢复后失效。
+    grant_token: generation === null ? null : grantTokenOf(generation, row.id),
     winners: sorted.map((w) => serializeWinner(w, { includeReserved })),
   };
 }
@@ -712,7 +730,9 @@ export async function drawGalaRound(db, {
         [round.id, reservedPoolId, amount, slot.id],
       );
     }
-    return { round, winners: inserted, eligibleCount: eligibleRows.length };
+    // 仍持有恢复互斥的共享锁，读到的代数就是这一轮所在数据的代数。
+    const generation = await readRestoreGeneration(tx);
+    return { round, winners: inserted, eligibleCount: eligibleRows.length, generation };
   });
 }
 
@@ -733,6 +753,8 @@ async function readGalaRounds(db, { id, before, pageSize, includeReserved }) {
     ? await db.all('SELECT * FROM gala_rounds WHERE event_id = ? AND id < ? ORDER BY id DESC LIMIT ?', [id, before, pageSize])
     : await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, pageSize]);
   if (rounds.length === 0) return [];
+  // 与轮次在同一个快照里读：恢复前的轮次只会配上恢复前的代数。
+  const generation = await readRestoreGeneration(db);
   const winners = await db.all(
     'SELECT * FROM gala_round_winners WHERE round_id = ANY(?::bigint[]) ORDER BY id',
     [rounds.map((r) => Number(r.id))],
@@ -743,11 +765,11 @@ async function readGalaRounds(db, { id, before, pageSize, includeReserved }) {
     if (!byRound.has(key)) byRound.set(key, []);
     byRound.get(key).push(w);
   }
-  return rounds.map((r) => serializeRound(r, byRound.get(Number(r.id)), { includeReserved }));
+  return rounds.map((r) => serializeRound(r, byRound.get(Number(r.id)), { includeReserved, generation }));
 }
 
 export function serializeDrawResult(result, { includeReserved = false } = {}) {
-  const out = serializeRound(result.round, result.winners, { includeReserved });
+  const out = serializeRound(result.round, result.winners, { includeReserved, generation: result.generation ?? null });
   // 候选人数已排除被预留的人，和参与名单人数一比就知道有人被预留，只给超管。
   if (includeReserved) out.eligible_count = result.eligibleCount;
   return out;
@@ -805,12 +827,15 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
   });
 }
 
-export async function grantGalaRound(db, { roundId }) {
+export async function grantGalaRound(db, { roundId, grantToken }) {
   const id = toPositiveId(roundId);
   if (!id) throw new GalaError('invalid_round_id');
+  // 发放只认操作者看到的那一轮：凭据里的代数必须等于当前代数。请求若在恢复持锁期间排队，
+  // 恢复提交后代数已变，这里直接 round_changed，不会把恢复后同 ID 的另一轮当成起点。
+  const expected = parseGrantToken(grantToken, id);
   // 代数、轮次和待发名单在同一个持共享锁的事务里读，保证三者来自同一份数据（不会读到恢复一半）。
   const start = await db.transaction(async (tx) => {
-    const generation = await enterGalaWrite(tx, null);
+    const generation = await enterGalaWrite(tx, expected);
     const round = await tx.get('SELECT * FROM gala_rounds WHERE id = ?', [id]);
     if (!round) return { generation, round: null, winners: [] };
     const winners = await tx.all(

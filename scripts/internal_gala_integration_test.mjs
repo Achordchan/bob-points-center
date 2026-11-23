@@ -25,6 +25,7 @@ import {
   listGalaParticipants,
   removeGalaParticipant,
   serializeGrantResult,
+  serializeDrawResult,
   GALA_DRAW_HEADROOM,
   GALA_MAX_RESERVED_SLOTS,
   GALA_PAYOUT_LOCK,
@@ -80,13 +81,20 @@ async function assertDevelopmentMarker(cfg) {
   }
 }
 
+// 按字面前缀清理（starts_with），不用 LIKE：前缀里的下划线在 LIKE 中是单字符通配符，会误删别的数据。
 async function cleanup(db) {
-  await db.run('DELETE FROM gala_events WHERE title LIKE ?', [`${PREFIX}%`]);
-  await db.run('DELETE FROM admin_user_roles WHERE userid LIKE ?', [`${PREFIX}_%`]);
-  await db.run('DELETE FROM ledger WHERE userid LIKE ?', [`${PREFIX}_%`]);
-  await db.run('DELETE FROM audit_logs WHERE actor_id LIKE ?', [`${PREFIX}_%`]).catch(() => null);
-  await db.run('DELETE FROM accounts WHERE userid LIKE ?', [`${PREFIX}_%`]);
-  await db.run('DELETE FROM users WHERE userid LIKE ?', [`${PREFIX}_%`]);
+  await db.run('DELETE FROM gala_events WHERE starts_with(title, ?)', [PREFIX]);
+  await db.run('DELETE FROM admin_user_roles WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
+  await db.run('DELETE FROM ledger WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
+  await db.run('DELETE FROM audit_logs WHERE starts_with(actor_id, ?)', [`${PREFIX}_`]).catch(() => null);
+  await db.run('DELETE FROM accounts WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
+  await db.run('DELETE FROM users WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
+}
+
+// 发币需带上操作者看到的轮次凭据；测试里默认取当前代数（等同于刚刷新过轮次列表）。
+async function grantRound(db, roundId, token) {
+  const t = token ?? `${(await db.get('SELECT generation FROM gala_restore_state WHERE id = 1')).generation}.${Number(roundId)}`;
+  return grantGalaRound(db, { roundId, grantToken: t });
 }
 
 async function balanceOf(db, userid) {
@@ -187,11 +195,11 @@ async function main() {
     assert.ok(!('spent' in pubPool) && !('pools_spent' in publicDetail.budget_summary), '非超管看不到实际支出');
 
     // 并发发币：同一轮点 8 次，只发一次
-    const results = await Promise.all(Array.from({ length: 8 }, () => grantGalaRound(db, { roundId: r2.round.id })));
+    const results = await Promise.all(Array.from({ length: 8 }, () => grantRound(db, r2.round.id)));
     const grantedTotal = results.reduce((s, r) => s + r.granted.length, 0);
     assert.equal(grantedTotal, 5, `应只发 5 笔，实际 ${grantedTotal}`);
     assert.equal(await balanceOf(db, kid), 20);
-    const ledgerRows = await db.get('SELECT COUNT(*) AS n FROM ledger WHERE ref_id LIKE ? AND userid LIKE ?', ['GALA_W%', `${PREFIX}_%`]);
+    const ledgerRows = await db.get('SELECT COUNT(*) AS n FROM ledger WHERE starts_with(ref_id, ?) AND starts_with(userid, ?)', ['GALA_W', `${PREFIX}_`]);
     assert.equal(Number(ledgerRows.n), 5);
     const poolAfter = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pool.id]);
     assert.equal(Number(poolAfter.spent), 80);
@@ -224,7 +232,7 @@ async function main() {
     );
     // 预算校验在发币时兜底：模拟实际支出被别处占用（如残缺数据）只剩 120，超出部分失败且不入账
     await db.exec(`UPDATE gala_pools SET spent = budget - 120 WHERE id = ${Number(pool.id)}`);
-    const gr1 = await grantGalaRound(db, { roundId: g1.round.id });
+    const gr1 = await grantRound(db, g1.round.id);
     assert.equal(gr1.granted.length, 6);
     assert.equal(gr1.failed.length, 14);
     assert.ok(gr1.failed.every((f) => f.error === 'pool_budget_exceeded'));
@@ -281,7 +289,7 @@ async function main() {
       assert.equal(d.winners[0].userid, target);
       const before = await balanceOf(db, target);
       await db.transaction((tx) => purgeUserBusinessData(tx, [target]));
-      const g = await grantGalaRound(db, { roundId: d.round.id });
+      const g = await grantRound(db, d.round.id);
       assert.equal(g.granted.length, 0, '重置后不应再发放旧奖励');
       assert.equal(await balanceOf(db, target), 0);
       assert.ok(before >= 0);
@@ -307,7 +315,7 @@ async function main() {
         assert.equal(dr.status, 'fulfilled', String(dr.reason?.code || dr.reason));
         assert.equal(pr.status, 'fulfilled', String(pr.reason?.code || pr.reason));
         // eslint-disable-next-line no-await-in-loop
-        await grantGalaRound(db, { roundId: dr.value.round.id });
+        await grantRound(db, dr.value.round.id);
         // eslint-disable-next-line no-await-in-loop
         const leftover = await db.get(
           'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND userid = ?',
@@ -334,7 +342,7 @@ async function main() {
       await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pB.id)} WHERE round_id = ${Number(d.round.id)} AND userid = '${w2}'`);
       const b1 = await balanceOf(db, w1);
       const b2 = await balanceOf(db, w2);
-      const g = await grantGalaRound(db, { roundId: d.round.id });
+      const g = await grantRound(db, d.round.id);
       assert.equal(g.granted.length, 0);
       assert.deepEqual(g.failed.map((f) => f.error).sort(), ['winner_pool_missing', 'winner_pool_missing']);
       assert.equal(await balanceOf(db, w1), b1);
@@ -352,7 +360,7 @@ async function main() {
       await addFiller(db, evC.id);
       const dC = await drawGalaRound(db, { eventId: evC.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pC.id, amountEach: 9, randomInt: FIRST });
       await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pC.id)} WHERE round_id = ${Number(dC.round.id)} AND is_reserved = 1`);
-      const gC = await grantGalaRound(db, { roundId: dC.round.id });
+      const gC = await grantRound(db, dC.round.id);
       assert.deepEqual(gC.granted.map((x) => x.userid), [uid(2)]);
       assert.deepEqual(gC.failed, [{ userid: uid(5), error: 'winner_pool_missing', is_reserved: 1 }]);
       const spentC = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pC.id]);
@@ -375,7 +383,7 @@ async function main() {
       await addFiller(db, evD.id);
       const dD = await drawGalaRound(db, { eventId: evD.id, segment: 'lottery', drawCount: 3, prizeType: 'coin', poolId: pD.id, amountEach: 5, randomInt: FIRST });
       await db.exec(`UPDATE gala_pools SET spent = budget WHERE id = ${Number(pD.id)}`);
-      const gD = await grantGalaRound(db, { roundId: dD.round.id });
+      const gD = await grantRound(db, dD.round.id);
       const pubD = serializeGrantResult(gD, { includeReserved: false });
       assert.deepEqual(pubD, { round_id: Number(dD.round.id), failed_count: 2, failed_reasons: { pool_budget_exceeded: 2 }, pending: 2 });
       assert.ok(!JSON.stringify(pubD).includes(PREFIX), '普通回执不含任何 userid');
@@ -472,7 +480,7 @@ async function main() {
       assert.equal(reservedFail.winners[0].userid, uid(15));
       for (const d of [normal, reservedWin]) {
         // eslint-disable-next-line no-await-in-loop
-        const g = await grantGalaRound(db, { roundId: d.round.id });
+        const g = await grantRound(db, d.round.id);
         assert.deepEqual(
           serializeGrantResult(g, { includeReserved: false }),
           { round_id: Number(d.round.id), failed_count: 0, failed_reasons: {}, pending: 0 },
@@ -480,7 +488,7 @@ async function main() {
       }
       await db.exec(`UPDATE gala_pools SET spent = budget WHERE id = ${Number(rS.id)}`);
       // 预留奖励发放失败：公开回执与普通中奖人因奖池不足失败时完全一样（同样计入失败和待发），整轮保持 drawn
-      const gFail = await grantGalaRound(db, { roundId: reservedFail.round.id });
+      const gFail = await grantRound(db, reservedFail.round.id);
       assert.deepEqual(
         serializeGrantResult(gFail, { includeReserved: false }),
         { round_id: Number(reservedFail.round.id), failed_count: 1, failed_reasons: { pool_budget_exceeded: 1 }, pending: 1 },
@@ -571,7 +579,7 @@ async function main() {
       await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 20 }, (_, k) => uid(k + 1)) });
       const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 10, prizeType: 'coin', poolId: p.id, amountEach: 1 });
       const [g, swap] = await Promise.allSettled([
-        grantGalaRound(db, { roundId: d.round.id }),
+        grantRound(db, d.round.id),
         (async () => {
           await new Promise((r) => setTimeout(r, 5));
           await db.run('UPDATE gala_rounds SET created_at = created_at + 1 WHERE id = ?', [d.round.id]);
@@ -581,7 +589,7 @@ async function main() {
       if (g.status === 'rejected') assert.equal(g.reason?.code, 'round_changed');
       const errs = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND award_error IS NOT NULL', [d.round.id]);
       assert.equal(Number(errs.n), 0, '轮次被替换后不应把错误写到中奖记录上');
-      const after = await grantGalaRound(db, { roundId: d.round.id });
+      const after = await grantRound(db, d.round.id);
       const paid = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [d.round.id]);
       assert.equal(Number(paid.n), 10, '对替换后的轮次重新发放，剩余的照常到账');
       assert.ok(after.failed.length === 0);
@@ -595,7 +603,7 @@ async function main() {
       await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 20 }, (_, k) => uid(k + 1)) });
       const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 10, prizeType: 'coin', poolId: p.id, amountEach: 1 });
       const [g, restore] = await Promise.allSettled([
-        grantGalaRound(db, { roundId: d.round.id }),
+        grantRound(db, d.round.id, serializeDrawResult(d).grant_token),
         (async () => {
           await new Promise((r) => setTimeout(r, 5));
           // 与全量恢复相同的加锁顺序：恢复排他锁 → 推进代数 → 锁流水表和中奖记录表
@@ -612,12 +620,46 @@ async function main() {
       assert.equal(Number(errs.n), 0);
       const r1 = await db.get('SELECT status FROM gala_rounds WHERE id = ?', [d.round.id]);
       if (g.status === 'rejected') assert.equal(r1.status, 'drawn', '中途停止的发放不应标记整轮完成');
-      await grantGalaRound(db, { roundId: d.round.id });
+      await grantRound(db, d.round.id);
       const paid = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [d.round.id]);
       assert.equal(Number(paid.n), 10);
       const pool = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [p.id]);
       assert.equal(Number(pool.spent), 10);
       console.log(`✓ 发放绑定恢复代数，与恢复加锁顺序一致不死锁（本次${g.status === 'rejected' ? '中途停止' : '在恢复前完成'}）`);
+    }
+
+    // 发放凭据：恢复前页面拿到的凭据在恢复后作废（即使请求在恢复持锁时排队、恢复后才开始），不会付给恢复后同 ID 的轮次
+    {
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 发放凭据`, totalBudget: 0 });
+      const p = await createGalaPool(db, { eventId: ev.id, name: '池', budget: 100 });
+      await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 12 }, (_, k) => uid(k + 1)) });
+      const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: p.id, amountEach: 3 });
+      const listed = (await listGalaRounds(db, { eventId: ev.id })).find((r) => r.id === Number(d.round.id));
+      assert.equal(listed.grant_token, serializeDrawResult(d).grant_token, '列表与抽签结果给出同一凭据');
+      await assert.rejects(grantGalaRound(db, { roundId: d.round.id }), (e) => e.code === 'invalid_grant_token');
+      await assert.rejects(grantGalaRound(db, { roundId: d.round.id, grantToken: listed.grant_token.replace(/\.\d+$/, '.999999') }), (e) => e.code === 'invalid_grant_token');
+      await assert.rejects(grantGalaRound(db, { roundId: d.round.id, grantToken: 12 }), (e) => e.code === 'invalid_grant_token');
+      // 恢复先拿到排他锁，发放请求排队；恢复提交（代数 +1）后请求才开始
+      let release;
+      const holding = new Promise((r) => { release = r; });
+      const restore = db.transaction(async (tx) => {
+        await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+        await bumpGalaRestoreGeneration(tx);
+        await holding;
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const queued = grantGalaRound(db, { roundId: d.round.id, grantToken: listed.grant_token });
+      await new Promise((r) => setTimeout(r, 30));
+      release();
+      await restore;
+      await assert.rejects(queued, (e) => e.code === 'round_changed');
+      const paid = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [d.round.id]);
+      assert.equal(Number(paid.n), 0, '旧凭据不发任何一笔');
+      const fresh = (await listGalaRounds(db, { eventId: ev.id })).find((r) => r.id === Number(d.round.id));
+      assert.notEqual(fresh.grant_token, listed.grant_token);
+      const ok = await grantGalaRound(db, { roundId: d.round.id, grantToken: fresh.grant_token });
+      assert.equal(ok.granted.length, 2);
+      console.log('✓ 发放凭据绑定操作者看到的轮次，恢复后旧凭据作废');
     }
 
     // 预留名额遵守本环节排除规则、每场活动有上限；单人发币轮的员工预算准入与预留无关
@@ -849,6 +891,9 @@ async function main() {
       r = await call(operatorId, 'POST', '/gala/rounds/grant', { round_id: true });
       assert.deepEqual([r.status, r.body?.error], [400, 'invalid_round_id'], '布尔 round_id 不会被当成 1');
       r = await call(operatorId, 'POST', '/gala/rounds/grant', { round_id: hRound });
+      assert.deepEqual([r.status, r.body?.error], [400, 'invalid_grant_token'], '发币必须带轮次凭据');
+      const hToken = (await call(operatorId, 'GET', `/gala/rounds?event_id=${hid}`)).body.data[0].grant_token;
+      r = await call(operatorId, 'POST', '/gala/rounds/grant', { round_id: hRound, grant_token: hToken });
       assert.equal(r.status, 200);
       assert.deepEqual(
         r.body.data,

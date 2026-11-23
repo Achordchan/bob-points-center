@@ -161,12 +161,11 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.post('/gala/rounds/grant', requireAdminSession(), handle(async (req, res, db) => {
-    const result = await grantGalaRound(db, { roundId: req.body?.round_id });
+    const result = await grantGalaRound(db, { roundId: req.body?.round_id, grantToken: req.body?.grant_token });
     for (const g of result.granted) {
       publishMallRealtimeEvent('balance_changed', { userid: g.userid, reason: 'gala_award' });
     }
-    // 这是广播给所有订阅者（含大屏、商城）的公共事件，只能按普通中奖记录判断是否发完，
-    // 预留名额的发放结果不能从这里体现；完整状态只在超管的 HTTP 回执里。
+    // 广播给所有订阅者（含大屏、商城）的公共事件：只说整轮是否发完，不含逐人结果。
     publishMallRealtimeEvent('gala_changed', {
       round_id: result.round_id,
       reason: result.pending === 0 ? 'round_granted' : 'round_grant_partial',

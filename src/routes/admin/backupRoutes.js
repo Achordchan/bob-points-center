@@ -39,6 +39,15 @@ const GALA_BACKUP_TABLES = [
 // 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
 // 只看备份内部：merge 拒绝任何年会 ID 冲突、overwrite 会先清空年会表，所以每条子记录引用的
 // 活动/轮次/奖池都必须在同一份备份里，不能落到目标库里已有的无关记录上。
+// 一条形似 GALA_W<id> 的流水能否是这条中奖记录的付款：收款人、金额一致，且不早于中奖记录产生。
+// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同、或早于抽签的，不可能是这笔奖励。
+// 缺少时间字段时按“可能是”处理（宁可拒绝也不重复发放）。与导入后合并库上的 paidPending 查询保持同一判定。
+function couldPayWinner(row, w) {
+  if (String(row?.userid) !== String(w?.userid) || Number(row?.delta) !== Number(w?.amount)) return false;
+  if (row?.created_at != null && w?.created_at != null && Number(row.created_at) < Number(w.created_at)) return false;
+  return true;
+}
+
 export function findGalaFundingErrors(backupData) {
   const errors = [];
   const asList = (v) => (Array.isArray(v) ? v : []);
@@ -69,7 +78,7 @@ export function findGalaFundingErrors(backupData) {
       if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
         errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
       }
-    } else if (w.awarded_at == null) {
+    } else if (w.awarded_at == null && couldPayWinner(row, w)) {
       errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
     }
   }
@@ -384,6 +393,28 @@ export function findGalaFundingErrors(backupData) {
   for (const r of rounds.values()) {
     const key = `${Number(r?.event_id)}:${r?.segment}`;
     maxDrawn.set(key, Math.max(maxDrawn.get(key) || 0, Number(r?.round_no || 0)));
+  }
+  // 与在线创建相同：同一活动同一环节，一个人只能有一个未取消的名额，且不能已在该环节中过奖。
+  // 否则关闭“排除已中奖者”时两个名额都会兑现，或名额到时因已中奖而作废。
+  const segmentWinners = new Set();
+  for (const w of winnersList) {
+    const r = rounds.get(Number(w?.round_id));
+    if (r) segmentWinners.add(`${Number(r.event_id)}:${r.segment}:${String(w?.userid)}`);
+  }
+  const liveSlotsByUser = new Map();
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') === 'cancelled') continue;
+    const key = `${Number(slot?.event_id)}:${slot?.segment}:${String(slot?.userid)}`;
+    liveSlotsByUser.set(key, (liveSlotsByUser.get(key) || 0) + 1);
+  }
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') !== 'pending') continue;
+    const key = `${Number(slot?.event_id)}:${slot?.segment}:${String(slot?.userid)}`;
+    if ((liveSlotsByUser.get(key) || 0) > 1) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人在同一活动同一环节还有别的未取消名额`);
+    } else if (segmentWinners.has(key)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人已在同一活动同一环节中过奖`);
+    }
   }
   for (const slot of asList(backupData?.gala_reserved_slots)) {
     const pending = (slot?.status ?? 'pending') === 'pending';
@@ -903,7 +934,21 @@ export function registerAdminBackupRoutes(router) {
       return backupData[tableName];
     };
 
+    // 把序列推进到表内最大 ID 之后。setval 不随事务回滚：全量恢复在推进之后仍可能被后面的核对拒绝，
+    // 那时在线库的序号已被推到备份里的 ID（可能接近安全整数上限）。全量恢复改用 ALTER SEQUENCE … RESTART，
+    // 它随事务回滚；全量恢复已用 EXCLUSIVE 锁住所有表，序列上的锁不会挡到别人。设置类导入不锁表，保持原样。
     const bumpSerial = async (tx, tableName) => {
+      if (backupMode === 'full') {
+        await tx.exec(
+          `DO $$ BEGIN
+             EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s',
+               pg_get_serial_sequence('${tableName}', 'id')::regclass,
+               COALESCE((SELECT MAX(id) FROM ${tableName}), 1) + 1);
+           END $$`,
+          [],
+        );
+        return;
+      }
       await tx.exec(
         `SELECT setval(pg_get_serial_sequence('${tableName}', 'id'), COALESCE((SELECT MAX(id) FROM ${tableName}), 1), true)`,
         [],
@@ -2752,21 +2797,6 @@ export function registerAdminBackupRoutes(router) {
               }
               report[table.name] = count;
             }
-            // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
-            // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
-            // 只有中奖记录确实保留了流水 ID 时才需要额外推进（表已在事务开头锁住，期间不会有并发分配）。
-            const keptLedger = await tx.get('SELECT COALESCE(MAX(ledger_id), 0) AS m FROM gala_round_winners', []);
-            if (Number(keptLedger?.m || 0) > 0) await execOrThrow(
-              tx,
-              `SELECT setval(pg_get_serial_sequence('ledger', 'id'),
-                 GREATEST(
-                   COALESCE(pg_sequence_last_value(pg_get_serial_sequence('ledger', 'id')::regclass), 1),
-                   COALESCE((SELECT MAX(id) FROM ledger), 1),
-                   COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 1)
-                 ), true)`,
-              [],
-              'ledger sequence bump',
-            );
             // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水。
             // 导入后对整张表核对，而不只是本次导入的中奖记录：备份里一条无关流水也可能恰好占用目标库
             // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录。
@@ -2789,12 +2819,37 @@ export function registerAdminBackupRoutes(router) {
                  JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
                 WHERE w.awarded_at IS NULL AND l.delta > 0
                   AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                  -- 与备份预检 couldPayWinner 同一判定：收款人、金额不同或早于抽签的历史同名流水不算付款
+                  AND l.userid = w.userid AND l.delta = w.amount AND l.created_at >= w.created_at
                 ORDER BY w.id LIMIT 20`,
               [],
             );
             if (paidPending.length) {
               throw new Error(`年会中奖记录尚未发放，库里却已有它的发放流水（${paidPending.map((r) => `#${r.id}←ledger#${r.ledger_row}`).join(', ')}），已拒绝导入`);
             }
+            // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
+            // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
+            // 放在所有可能拒绝导入的核对之后，并用 ALTER SEQUENCE … RESTART（随事务回滚；setval 不回滚）：
+            // 导入被拒绝时在线库的流水序号保持不变。表已在事务开头锁住，期间不会有并发分配。
+            const keptLedger = await tx.get('SELECT COALESCE(MAX(ledger_id), 0) AS m FROM gala_round_winners', []);
+            if (Number(keptLedger?.m || 0) > 0) await execOrThrow(
+              tx,
+              `DO $$
+               DECLARE
+                 seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
+                 target BIGINT;
+               BEGIN
+                 SELECT GREATEST(
+                          COALESCE(pg_sequence_last_value(seq), 0),
+                          COALESCE((SELECT MAX(id) FROM ledger), 0),
+                          COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 0)
+                        ) + 1
+                   INTO target;
+                 EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
+               END $$`,
+              [],
+              'ledger sequence bump',
+            );
           }
         }
 

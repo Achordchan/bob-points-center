@@ -77,7 +77,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
       { id: 7, round_id: 5, event_id: 10, userid: 'k7', amount: 50, pool_id: 2, is_reserved: 1, awarded_at: null },
     ],
     gala_reserved_slots: [
-      { id: 1, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 2, status: 'pending' },
+      { id: 1, event_id: 10, segment: 'lottery', round_no: 9, userid: 'k1', amount: 20, pool_id: 2, status: 'pending' },
       { id: 2, event_id: 10, segment: 'lottery', round_no: 1, userid: 'k7', amount: 50, pool_id: 2, status: 'used', used_round_id: 5 },
     ],
     ledger: [{ id: 900, userid: 'u3', delta: 50, ref_id: 'GALA_W3', reason: '年会奖励·测试' }, { id: 901, userid: 'u9', delta: 5, ref_id: 'ADMIN_X' }],
@@ -89,7 +89,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_round_winners.push({ id: 6, round_id: 99, event_id: 10, amount: 0, pool_id: null, awarded_at: null });
   bad.gala_round_winners.push({ id: 8, round_id: 5, event_id: 10, amount: 30, pool_id: 1, is_reserved: 1, awarded_at: null });
   bad.gala_round_winners.push({ id: 9, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 0, awarded_at: null });
-  bad.gala_reserved_slots.push({ id: 3, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 1, status: 'pending' });
+  bad.gala_reserved_slots.push({ id: 3, event_id: 10, segment: 'lottery', round_no: 9, userid: 'k3', amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
   // #5 挂到别的活动的奖池上，那个奖池也因此“欠账”超过已分配额
   const tags = ['gala_rounds#5', 'gala_pools#3', 'gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
@@ -144,6 +144,18 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
   // 只有 GALA_W11 指向备份里一条未发放的中奖记录（恢复后会重复发放）；GALA_W12 没有对应中奖记录，按普通流水处理
   assert.equal(errors.length, 1, errors.join('\n'));
   assert.ok(errors[0].startsWith('ledger#1'));
+  // 升级前外部发币写入的历史同名流水：收款人不同、金额不同或早于抽签，都不可能是这笔奖励，不算重复发放
+  const hist = (patch) => {
+    const h = structuredClone(snap);
+    h.ledger = [{ id: 1, ref_id: 'GALA_W11', userid: 'a', delta: 10, reason: '年会奖励·历史', created_at: 500 }];
+    Object.assign(h.gala_round_winners[0], { userid: 'a', created_at: 100 });
+    Object.assign(h.ledger[0], patch);
+    return findGalaFundingErrors(h);
+  };
+  assert.equal(hist({}).length, 1, '收款人、金额一致且晚于抽签：仍按重复发放拒绝');
+  assert.deepEqual(hist({ userid: 'b' }), []);
+  assert.deepEqual(hist({ delta: 11 }), []);
+  assert.deepEqual(hist({ created_at: 99 }), []);
   // 没有年会表的旧备份里，形似年会发放的入账（早期第三方接口可写入）按普通流水处理，备份照常可恢复
   const legacy = { ledger: [{ id: 1, ref_id: 'GALA_W11', delta: 10, reason: '年会奖励·测试' }] };
   assert.deepEqual(findGalaFundingErrors(legacy), []);
@@ -533,4 +545,33 @@ test('年会发放回执：非超管回执把预留奖励失败与普通失败�
   });
   const sup = serializeGrantResult(result, { includeReserved: true });
   assert.equal(sup.failed[0].is_reserved, 1);
+});
+
+test('年会备份：待用名额与在线创建一样，同一活动同一环节一人只能有一个未取消名额、且未在该环节中过奖', () => {
+  const base = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'none', amount_each: 0, status: 'drawn' }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 0 }],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, status: 'pending' }],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(base()), []);
+  const twice = base();
+  twice.gala_reserved_slots.push({ id: 2, event_id: 1, segment: 'lottery', round_no: 3, userid: 'k', pool_id: 2, status: 'pending' });
+  const e1 = findGalaFundingErrors(twice);
+  assert.ok(e1.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('别的未取消名额')), e1.join('\n'));
+  assert.ok(e1.some((e) => e.startsWith('gala_reserved_slots#2') && e.includes('别的未取消名额')), e1.join('\n'));
+  // 另一个环节、或已取消的名额不冲突
+  const otherSeg = base();
+  otherSeg.gala_reserved_slots.push({ id: 2, event_id: 1, segment: 'giveaway', round_no: 1, userid: 'k', pool_id: 2, status: 'pending' });
+  assert.deepEqual(findGalaFundingErrors(otherSeg), []);
+  const cancelled = base();
+  cancelled.gala_reserved_slots.push({ id: 2, event_id: 1, segment: 'lottery', round_no: 3, userid: 'k', status: 'cancelled' });
+  assert.deepEqual(findGalaFundingErrors(cancelled), []);
+  // 已在该环节中过奖
+  const won = base();
+  won.gala_reserved_slots[0].userid = 'a';
+  assert.ok(findGalaFundingErrors(won).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('中过奖')));
 });
