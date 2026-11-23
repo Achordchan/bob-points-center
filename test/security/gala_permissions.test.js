@@ -1117,3 +1117,51 @@ test('年会备份：恢复的名单、待发中奖记录、待用名额的 user
   Object.assign(done.gala_reserved_slots[0], { userid: ' k1', status: 'cancelled' });
   assert.ok(!findGalaFundingErrors(done).some((e) => e.includes('userid')));
 });
+
+test('发放：意外异常的原文不进回执和 award_error，对外统一为 award_failed', async () => {
+  const { grantGalaRound, serializeGrantResult } = await import('../../src/services/galaService.js');
+  const V = '11111111-2222-4333-8444-555555555555';
+  const round = { id: 7, event_id: 1, segment: 'lottery', round_no: 1, created_at: 100, prize_type: 'coin', title: null };
+  const winner = { id: 70, round_id: 7, userid: 'u1', amount: 5, is_reserved: 0 };
+  const writes = [];
+  const tx = {
+    get: async (sql) => {
+      if (sql.includes('version_token')) return { version_token: V };
+      if (sql.includes('COUNT(*)')) return { n: 1 };
+      if (sql.includes('FROM gala_rounds')) return round;
+      return {};
+    },
+    all: async () => [winner],
+    run: async (sql, params) => { writes.push(params); return { changes: 1 }; },
+  };
+  let n = 0;
+  const db = {
+    transaction: async (fn) => {
+      n += 1;
+      if (n === 2) throw new Error('connection to server at 10.0.0.5 failed: secret detail');
+      return fn(tx);
+    },
+  };
+  const origError = console.error;
+  console.error = () => {};
+  let result;
+  try {
+    result = await grantGalaRound(db, { roundId: 7, grantToken: `${V}.7` });
+  } finally {
+    console.error = origError;
+  }
+  assert.deepEqual(result.failed.map((f) => f.error), ['award_failed']);
+  assert.ok(writes.some((p) => Array.isArray(p) && p[0] === 'award_failed'), '写入 award_error 的也是固定代码');
+  const pub = JSON.stringify(serializeGrantResult(result));
+  assert.ok(!pub.includes('secret') && !pub.includes('10.0.0.5'), pub);
+  assert.ok(pub.includes('award_failed'));
+});
+
+test('移出名单：按名单记录 id 或 userid 二选一', async () => {
+  const { removeGalaParticipant } = await import('../../src/services/galaService.js');
+  await assert.rejects(removeGalaParticipant(null, { eventId: 1, userid: 'u1', participantId: 3 }), (e) => e.code === 'ambiguous_participant_target');
+  for (const participantId of ['x', 0, -1, 1.5, {}]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(removeGalaParticipant(null, { eventId: 1, participantId }), (e) => e.code === 'invalid_participant_id', JSON.stringify(participantId));
+  }
+});

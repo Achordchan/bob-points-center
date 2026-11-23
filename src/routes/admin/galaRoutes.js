@@ -143,7 +143,7 @@ export function registerAdminGalaRoutes(router) {
 
   router.post('/gala/participants/remove', requireAdminSession(), handle(async (req, res, db) => {
     const b = req.body || {};
-    res.json({ ok: true, data: await removeGalaParticipant(db, { eventId: b.event_id, userid: b.userid, expectedVersion: versionOf(b) }) });
+    res.json({ ok: true, data: await removeGalaParticipant(db, { eventId: b.event_id, userid: b.userid, participantId: b.participant_id, expectedVersion: versionOf(b) }) });
   }));
 
   router.get('/gala/rounds', requireAdminSession(), handle(async (req, res, db) => {

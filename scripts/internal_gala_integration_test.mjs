@@ -831,6 +831,57 @@ async function main() {
       console.log('✓ 标识长度按字符计、首尾空白拒绝，全员导入、显式导入、移出规则一致');
     }
 
+    // 存量异常标识的清理路径：早期全员导入带进名单的首尾空白 ID 不能按 userid 操作，按名单记录 id 精确移出，
+    // 不会落到去掉空白后同名的另一个人身上；此人的待用名额随之作废
+    {
+      const legacy = ` ${uid(3)}`;
+      await db.run("INSERT INTO users(userid, name, source) VALUES(?, ?, 'dingtalk')", [legacy, 'legacy']);
+      try {
+        const evL2 = await createGalaEvent(db, { title: `${PREFIX} 存量标识`, totalBudget: 0 });
+        await addGalaParticipants(db, { eventId: evL2.id, userids: [uid(3)] });
+        const row = await db.get(
+          "INSERT INTO gala_participants(event_id, userid, name_snapshot, source) VALUES(?, ?, 'legacy', 'admin') RETURNING id",
+          [evL2.id, legacy],
+        );
+        const pid = (await createGalaPool(db, { eventId: evL2.id, name: '存量预留池', budget: 100, reserved: true })).id;
+        const slot = await db.get(
+          "INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, status) VALUES(?, 'lottery', 1, ?, ?, 'pending') RETURNING id",
+          [evL2.id, legacy, pid],
+        );
+        await assert.rejects(removeGalaParticipant(db, { eventId: evL2.id, userid: legacy }), (e) => e.code === 'invalid_userid');
+        const listed = await listGalaParticipants(db, { eventId: evL2.id });
+        assert.ok(listed.some((x) => x.id === Number(row.id) && x.userid === legacy), '名单返回记录 id，可用来清理');
+        assert.equal((await removeGalaParticipant(db, { eventId: evL2.id, participantId: row.id })).removed, 1);
+        const left = await db.all('SELECT userid FROM gala_participants WHERE event_id = ?', [evL2.id]);
+        assert.deepEqual(left.map((x) => x.userid), [uid(3)], '只删掉那一行，不碰去掉空白后同名的人');
+        assert.equal((await db.get('SELECT status FROM gala_reserved_slots WHERE id = ?', [slot.id])).status, 'cancelled');
+        assert.equal((await removeGalaParticipant(db, { eventId: evL2.id, participantId: row.id })).removed, 0);
+      } finally {
+        await db.run('DELETE FROM users WHERE userid = ?', [legacy]);
+      }
+      console.log('✓ 存量异常标识可按名单记录 id 精确移出');
+    }
+
+    // 调用方自己的事务（默认 READ COMMITTED）里读年会列表：先等恢复的排他锁释放，多条读取不会跨过一次恢复
+    {
+      const holder = new Client({ host: itDb.host, port: itDb.port, database: itDb.database, user: itDb.user, password: itDb.password });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [GALA_PAYOUT_LOCK]);
+      let read = false;
+      const reading = db.transaction(async (tx) => {
+        const rows = await listGalaRounds(tx, { eventId: event.id });
+        read = true;
+        return rows;
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(read, false, '恢复持有排他锁时，外层事务里的读取在等待');
+      await holder.query('ROLLBACK');
+      await holder.end();
+      assert.ok(Array.isArray(await reading));
+      console.log('✓ 外层事务里的年会读取与全量恢复互斥');
+    }
+
     // 预留对象是真实参与者：名单增删、计数与普通人一致；被移出名单后名额自动作废；重置后不再出现在名单
     {
       const evR = await createGalaEvent(db, { title: `${PREFIX} 名单`, totalBudget: 0 });
@@ -1675,6 +1726,15 @@ async function realRestoreChecks(cfg) {
       for (const name of ['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) resetAcc.data[name] = [];
       resetAcc.data.accounts = [{ userid: paidW.userid, balance: 0, updated_at: now }];
       recount(resetAcc);
+      // 重置前的余额快照（把奖励加回来、库里却没有入账）：会改变当前余额，拒绝
+      const stalePre = structuredClone(resetAcc);
+      stalePre.data.accounts = [{ userid: paidW.userid, balance: 5, updated_at: now }];
+      recount(stalePre);
+      r = await call('POST', '/backup/import', { backup: stalePre, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('已有年会奖励到账'), JSON.stringify(r.body).slice(0, 300));
+      assert.equal(Number((await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidW.userid])).balance), 0);
+      // 与当前余额相同（重置后的零余额）：不改变余额，照常合并
       r = await call('POST', '/backup/import', { backup: resetAcc, mode: 'merge' });
       assert.equal(r.status, 200, `重置后合并账户应通过：${JSON.stringify(r.body).slice(0, 300)}`);
       const relink = structuredClone(resetAcc);
@@ -1833,7 +1893,16 @@ async function realRestoreChecks(cfg) {
       assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
       assert.ok(JSON.stringify(r.body).includes('userid'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before9);
-      console.log('✓ 在线分配出的最后一个 ID 可以导出再恢复；恢复的名单 userid 按在线规则校验');
+      // 流水 id 超出序列上限（显式 INSERT 不受序列约束）：写库前拒绝，不会让恢复后所有新流水都失败
+      const bigLedger = structuredClone(again);
+      bigLedger.data.ledger.push({ id: '9007199254740993', userid: bigLedger.data.ledger[0].userid, delta: 1, reason: 'x', ref_id: null, created_at: 1 });
+      bigLedger._meta.tables.ledger = bigLedger.data.ledger.length;
+      const before10 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: bigLedger, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('ledger'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before10);
+      console.log('✓ 在线分配出的最后一个 ID 可以导出再恢复；恢复的名单 userid 按在线规则校验；越界流水 id 拒绝');
     }
     // 6) 覆盖导入的备份里某张年会表为空：表被清空，序列也要重置；接近上限的旧序列不能留到恢复后
     {

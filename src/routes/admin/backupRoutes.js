@@ -1547,7 +1547,13 @@ export function registerAdminBackupRoutes(router) {
 
         const ledger = requireArray('ledger') || [];
         ledger.forEach((row, index) => {
-          if (!row?.id || !row?.userid) pushPreflight('ledger', index, '缺少 id/userid');
+          if (!row?.id || !row?.userid) {
+            pushPreflight('ledger', index, '缺少 id/userid');
+          } else if (!/^[1-9][0-9]{0,15}$/.test(String(row.id)) || !Number.isSafeInteger(Number(row.id))) {
+            // 流水序列的上限是最大安全整数（在线分配不出更大的 id）。显式 INSERT 不受序列上限约束，
+            // 越界的 id 一旦写入，恢复后序列只能停在“已用尽”，之后所有新流水都会失败；写库前拒绝。
+            pushPreflight('ledger', index, `id=${row.id} 不是 1 到最大安全整数之间的整数`);
+          }
         });
 
         const redeems = requireArray('redeems') || [];
@@ -2419,17 +2425,27 @@ export function registerAdminBackupRoutes(router) {
             // 查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
               const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
-              // 只看付款流水仍在的奖励：用户重置删了流水、清零了余额，只剩幂等凭据的奖励已不在余额里，
-              // 合并该用户重置后的账户不受影响（流水此时还没导入，查到的都是目标库原有的）。没有凭据的已发放记录无法判断，按仍在处理。
-              const paid = uids.length ? await tx.all(
-                `SELECT DISTINCT w.userid FROM gala_round_winners w
+              // 付款流水仍在（或没有凭据、无法判断）的奖励：备份余额无法确认含这笔奖励，一律拒绝。
+              // 付款流水已被重置删除的奖励：这只能证明目标库发生过重置，不能证明备份余额来自重置之后
+              // （重置前的余额快照会把奖励加回来，库里却没有这笔入账）。无法核对，只放行不改变当前余额的合并。
+              // 流水此时还没导入，查到的都是目标库原有的。
+              const paidRows = uids.length ? await tx.all(
+                `SELECT w.userid,
+                        BOOL_OR(w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id)) AS live,
+                        MAX(a.balance) AS balance
+                   FROM gala_round_winners w LEFT JOIN accounts a ON a.userid = w.userid
                   WHERE w.awarded_at IS NOT NULL AND w.amount > 0 AND w.userid = ANY(?::text[])
-                    AND (w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id))
-                  ORDER BY w.userid LIMIT 20`,
+                  GROUP BY w.userid ORDER BY w.userid`,
                 [uids],
               ) : [];
-              if (paid.length) {
-                throw new Error(`合并导入会覆盖已有年会奖励到账的账户余额（${paid.map((r) => r.userid).join(', ')}），无法确认备份余额包含这些奖励，已拒绝导入`);
+              const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
+              const blocked = paidRows.filter((p) => {
+                if (p.live === true || p.live === 't') return true;
+                const next = incoming.get(String(p.userid));
+                return Number(next?.balance ?? 0) !== Number(p.balance ?? 0);
+              }).slice(0, 20);
+              if (blocked.length) {
+                throw new Error(`合并导入会覆盖已有年会奖励到账的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额包含这些奖励，已拒绝导入`);
               }
             }
             let count = 0;

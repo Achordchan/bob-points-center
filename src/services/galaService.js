@@ -169,8 +169,13 @@ async function inTx(db, fn, expectedVersion) {
 
 // 多条语句拼成一个结果的读取放进同一个可重复读快照：中途提交的覆盖恢复可能复用同一批 ID，
 // 分开读会把恢复后的中奖记录挂到恢复前的轮次（或奖池、计数）上。
+// 调用方已在自己的事务里（隔离级别未知，可能是默认的 READ COMMITTED，每条语句各看一个快照）：
+// 先拿恢复互斥的共享锁再读。全量恢复要拿它的排他锁才动表，持锁期间恢复无法提交，多条读取看到的是同一份数据。
 async function inSnapshot(db, fn) {
-  if (db?.__txScoped === true) return await fn(db);
+  if (db?.__txScoped === true) {
+    await db.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+    return await fn(db);
+  }
   return await db.transaction(async (tx) => {
     await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
     return await fn(tx);
@@ -644,26 +649,42 @@ async function addListed(db, id, list, table) {
   return { added: Number(row?.added || 0), missing: list.filter((u) => !foundSet.has(u)) };
 }
 
-export async function removeGalaParticipant(db, { eventId, userid, expectedVersion }) {
+export async function removeGalaParticipant(db, { eventId, userid, participantId, expectedVersion }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
+  // 两种定位方式二选一：按 userid，或按名单记录 id（participant_id，名单列表每条都带）。
+  // 按记录 id 移出是给存量异常标识（早期全员导入带进来的首尾空白、超长 ID）的清理路径：
+  // 这些 ID 不能按 userid 原样操作，又不能裁剪后去匹配（会落到另一个人身上），只能精确删掉那一行。
+  const hasRow = participantId !== undefined && participantId !== null && participantId !== '';
+  const hasUser = userid !== undefined && userid !== null && userid !== '';
+  if (hasRow && hasUser) throw new GalaError('ambiguous_participant_target');
+  let rowId = null;
+  let uid = '';
+  if (hasRow) {
+    rowId = toPositiveId(participantId);
+    if (!rowId) throw new GalaError('invalid_participant_id');
+  } else {
+    // 缺少或无效的标识直接拒绝：不能和“指定的人已不在名单中”（removed: 0）混为一谈。
+    uid = cleanUserid(userid);
+    if (!uid) throw new GalaError('invalid_userid');
+  }
   // 与抽签串行：抽签持有活动行锁期间，名单不会在“公开人数检查”和“候选人查询”之间变化。
-  // 缺少或无效的标识直接拒绝：不能和“指定的人已不在名单中”（removed: 0）混为一谈。
-  const uid = cleanUserid(userid);
-  if (!uid) throw new GalaError('invalid_userid');
   return await inTx(db, async (tx) => {
     await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
-    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, uid]);
+    const deleted = rowId
+      ? await tx.all('DELETE FROM gala_participants WHERE event_id = ? AND id = ? RETURNING userid', [id, rowId])
+      : await tx.all('DELETE FROM gala_participants WHERE event_id = ? AND userid = ? RETURNING userid', [id, uid]);
     // 移出即作废：同一事务里取消此人在本活动的待用名额。否则之后重新导入（如“导入全部在册员工”）
     // 让此人回到名单，旧名额又会在预定轮次兑现。返回值不提名额（非超管也能移出名单），不暴露预留信息。
-    if (r.changes > 0) {
+    // 名额按删掉那一行的原值匹配，不经过任何清洗。
+    if (deleted.length > 0) {
       await tx.run(
         `UPDATE gala_reserved_slots SET status = 'cancelled', note = COALESCE(note, '') || '（对象已移出名单，自动作废）', updated_at = unixepoch()
           WHERE event_id = ? AND userid = ? AND status = 'pending'`,
-        [id, uid],
+        [id, deleted[0].userid],
       );
     }
-    return { removed: r.changes };
+    return { removed: deleted.length };
   }, expectedVersion);
 }
 
@@ -1092,7 +1113,14 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
     } catch (err) {
       // 本轮已被恢复替换：整次发放作废，不把错误写到新数据的中奖记录上。
       if (err?.code === 'round_changed') throw err;
-      const code = String(err?.code || err?.message || err);
+      // 回执和 award_error 只放业务错误码；意外异常（数据库连接等）的原文只记在服务端，对外统一为 award_failed。
+      let code = 'award_failed';
+      if (err instanceof GalaError) {
+        code = err.code;
+      } else {
+        // eslint-disable-next-line no-console
+        console.error('[gala] unexpected award error', { round_id: id, winner_id: w.id }, err);
+      }
       failed.push({ userid: w.userid, error: code, is_reserved: reserved });
       // 记录失败原因同样在共享锁内核对恢复代数和轮次身份，恢复后的记录不会被写上旧数据的失败原因。
       await db.transaction(async (tx) => {
