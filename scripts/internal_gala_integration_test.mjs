@@ -1370,8 +1370,8 @@ async function main() {
       assert.ok(r.body.data.length === 1 && r.body.data[0].id < hid);
       r = await call(operatorId, 'GET', '/gala/events?limit=abc');
       assert.deepEqual([r.status, r.body?.error], [400, 'invalid_limit']);
-      // 显式传了无效的奖品类型（空串、false、0）不会被当成无币轮
-      for (const bad of ['', false, 0]) {
+      // 显式传了无效的奖品类型（null、空串、false、0）不会被当成无币轮
+      for (const bad of [null, '', false, 0]) {
         // eslint-disable-next-line no-await-in-loop
         r = await call(operatorId, 'POST', '/gala/rounds/draw', { gala_version: gv, event_id: hid, segment: 'lottery', draw_count: 1, prize_type: bad });
         assert.deepEqual([r.status, r.body?.error], [400, 'invalid_prize_type'], JSON.stringify(bad));
@@ -1760,19 +1760,17 @@ async function realRestoreChecks(cfg) {
       const before6 = await snapshot();
       r = await call('POST', '/backup/import', { backup: stale, mode: 'merge' });
       assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
-      assert.ok(JSON.stringify(r.body).includes('已有年会奖励'), JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('有年会奖励（'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before6);
       assert.deepEqual(await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidUser.userid]), balBefore, '余额不变');
     }
     // 2b'''') 目标库的待发奖励：合并来的余额可能来自发币之后（已含这笔奖励），之后再发会加两遍。
     //         改变余额的合并拒绝；余额不变的照常通过
     {
-      // 找一个还没中过奖的人，给他一条待发奖励（已到账且流水仍在的账户另有规则：一律拒绝）
-      const fresh = await tdb.get(
-        `SELECT u.userid FROM users u WHERE u.userid LIKE 'rt\\_u%'
-            AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.userid = u.userid) ORDER BY u.userid LIMIT 1`,
-      );
-      assert.ok(fresh, '应有未中奖的用户');
+      // 单独建一个从未参加抽签的用户，给他一条待发奖励（不依赖前面随机抽签的结果）
+      const fresh = { userid: 'rt_pending_only' };
+      await tdb.run('INSERT INTO users(userid, name) VALUES(?, ?)', [fresh.userid, fresh.userid]);
+      await tdb.run('INSERT INTO accounts(userid, balance) VALUES(?, 0)', [fresh.userid]);
       const tpl = await tdb.get('SELECT * FROM gala_round_winners WHERE id = ?', [pend.id]);
       const extra = await tdb.get(
         `INSERT INTO gala_round_winners(round_id, event_id, userid, name_snapshot, pool_id, amount, is_reserved)
@@ -1788,7 +1786,7 @@ async function realRestoreChecks(cfg) {
       const beforeP = await snapshot();
       r = await call('POST', '/backup/import', { backup: afterGrant, mode: 'merge' });
       assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
-      assert.ok(JSON.stringify(r.body).includes('已有年会奖励'), JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('有年会奖励（'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), beforeP);
       const same = structuredClone(afterGrant);
       same.data.accounts = [{ userid: pendRow.userid, balance: Number(cur?.balance ?? 0), updated_at: now }];
@@ -1796,6 +1794,20 @@ async function realRestoreChecks(cfg) {
       r = await call('POST', '/backup/import', { backup: same, mode: 'merge' });
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
       await tdb.run('DELETE FROM gala_round_winners WHERE id = ?', [extra.id]);
+      // 来源备份里的收款人：目标库没有他的中奖记录，但备份余额可能含一笔年会奖励（年会表不随合并导入），
+      // 改变余额的合并同样拒绝；余额不变的照常通过
+      const src = structuredClone(afterGrant);
+      src.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990006, userid: fresh.userid, amount: 10, ledger_id: null }];
+      src.data.accounts = [{ userid: fresh.userid, balance: 10, updated_at: now }];
+      recount(src);
+      const beforeS = await snapshot();
+      r = await call('POST', '/backup/import', { backup: src, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('有年会奖励（'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), beforeS);
+      src.data.accounts = [{ userid: fresh.userid, balance: 0, updated_at: now }];
+      r = await call('POST', '/backup/import', { backup: src, mode: 'merge' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
     }
     // 2b''''') 备份里中奖记录引用的付款流水：年会表不随合并导入，流水会失去关联、对非超管公开，拒绝；
     //          目标库已有同 ID 流水（会被跳过）时不受影响
@@ -1859,7 +1871,7 @@ async function realRestoreChecks(cfg) {
       recount(stalePre);
       r = await call('POST', '/backup/import', { backup: stalePre, mode: 'merge' });
       assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
-      assert.ok(JSON.stringify(r.body).includes('已有年会奖励'), JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('有年会奖励（'), JSON.stringify(r.body).slice(0, 300));
       assert.equal(Number((await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidW.userid])).balance), 0);
       // 与当前余额相同（重置后的零余额）：不改变余额，照常合并
       r = await call('POST', '/backup/import', { backup: resetAcc, mode: 'merge' });

@@ -2476,12 +2476,29 @@ export function registerAdminBackupRoutes(router) {
                 [uids],
               ) : [];
               const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
+              // 来源备份里的年会收款人同样保护：他们的备份余额可能含一笔年会奖励，而年会表不随合并导入，
+              // 目标库不会有对应的中奖记录（付款流水另有检查，只放行目标库已有完全相同的一行）。
+              // 来源收款人按备份里的正数中奖记录、以及形似年会付款的流水识别。
+              const sourcePayees = new Set([
+                ...(requireArray('gala_round_winners') || []).filter((w) => Number(w?.amount) > 0 && w?.userid != null).map((w) => String(w.userid)),
+                ...(requireArray('ledger') || []).filter((r) => r?.userid != null && galaPayoutWinnerId(r) != null).map((r) => String(r.userid)),
+              ]);
+              const guarded = new Map(paidRows.map((p) => [String(p.userid), p.balance]));
+              const sourceOnly = uids.filter((u) => sourcePayees.has(u) && !guarded.has(u));
+              if (sourceOnly.length) {
+                const cur = new Map((await tx.all('SELECT userid, balance FROM accounts WHERE userid = ANY(?::text[])', [sourceOnly]))
+                  .map((a) => [String(a.userid), a.balance]));
+                for (const u of sourceOnly) guarded.set(u, cur.get(u) ?? null);
+              }
               // 按原值精确比较（余额是整数，数据库可能以字符串返回 BIGINT）：余额相同就不改变任何东西，照常合并，
               // 例如把刚导出的全量备份原样合并回原库。
               const sameBalance = (a, b) => String(a ?? 0) === String(b ?? 0);
-              const blocked = paidRows.filter((p) => !sameBalance(incoming.get(String(p.userid))?.balance, p.balance)).slice(0, 20);
+              const blocked = [...guarded]
+                .filter(([u, balance]) => !sameBalance(incoming.get(u)?.balance, balance))
+                .map(([userid]) => ({ userid }))
+                .slice(0, 20);
               if (blocked.length) {
-                throw new Error(`合并导入会改变已有年会奖励（已到账或待发）的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额与这些奖励一致，已拒绝导入`);
+                throw new Error(`合并导入会改变有年会奖励（目标库已到账或待发、或来源备份里的奖励）的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额与这些奖励一致，已拒绝导入`);
               }
             }
             let count = 0;

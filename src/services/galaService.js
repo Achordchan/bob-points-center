@@ -784,7 +784,9 @@ export async function drawGalaRound(db, {
     // 先识别重试，再检查能不能新抽：抽签提交后活动被结束、环节被停用，重试仍应拿回已落库的那一轮。
     if (wantRoundNo !== null && wantRoundNo !== roundNo) {
       const done = wantRoundNo < roundNo
-        ? await tx.get('SELECT * FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?', [id, seg, wantRoundNo])
+        // FOR SHARE：发币对轮次行加排他锁，重放读轮次与读中奖记录因此和发币串行，
+        // 不会读到“中奖人都已到账、轮次却仍是 drawn”的中间状态。
+        ? await tx.get('SELECT * FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ? FOR SHARE', [id, seg, wantRoundNo])
         : null;
       // 同一轮次号已用完全相同的参数（含是否排除已中奖者）抽过：视为重试，原样返回那一轮（不重新抽、不再占预算）。
       if (done
