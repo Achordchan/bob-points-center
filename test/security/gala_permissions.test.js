@@ -990,6 +990,12 @@ test('发币轮奖励已全部到账却仍是 drawn：校验拒绝，导入前�
   const partial = snap();
   partial.gala_round_winners[0].awarded_at = null;
   assert.equal(completeFinishedCoinRounds(partial), 0);
+  // 无币轮从不发放：标记成已发放完成（或只填了完成时间）的都拒绝
+  for (const patch of [{ status: 'granted', granted_at: 200 }, { granted_at: 200 }]) {
+    const noneGranted = structuredClone(fixed);
+    Object.assign(noneGranted.gala_rounds[1], patch);
+    assert.ok(findGalaFundingErrors(noneGranted).some((e) => e.startsWith('gala_rounds#2') && e.includes('是无币轮，却标记了发放完成')), JSON.stringify(patch));
+  }
 });
 
 test('抽签位置抽样：与对整份名单洗牌逐位相同，且不重复、不越界', async () => {

@@ -1039,6 +1039,15 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
     // 或把预留奖励记到员工奖池上。
     if (!claimed.pool_id) throw new GalaError('winner_pool_missing', 409);
     const reservedFlag = Number(claimed.is_reserved) === 1 ? 1 : 0;
+    // 中奖记录必须与已锁定的轮次配置一致：同一活动、金额等于本轮单价，普通奖励扣的正是本轮的员工奖池
+    // （预留奖励扣预留奖池，金额同样等于本轮单价）。抽签只会产生这样的记录；旧数据里挂错奖池、写错金额的
+    // 记录不按记录自身的字段扣款入账，报错回滚，记录保持待发、错误可见。
+    if (Number(claimed.event_id) !== Number(current.event_id)
+      || current.prize_type !== 'coin'
+      || Number(claimed.amount) !== Number(current.amount_each)
+      || (reservedFlag === 0 && Number(claimed.pool_id) !== Number(current.pool_id))) {
+      throw new GalaError('winner_round_mismatch', 409);
+    }
     const pool = await tx.get(
       `UPDATE gala_pools SET spent = spent + ?, updated_at = unixepoch()
         WHERE id = ? AND event_id = ? AND is_reserved = ? AND spent + ? <= budget

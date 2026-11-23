@@ -183,9 +183,12 @@ function couldPayWinner(row, w) {
 
 // 覆盖前生成的恢复点能否通过导入时的年会校验：在年会表、流水、账户的副本上跑同一套整理与校验
 // （prepareGalaRoundFlags → completeFinishedCoinRounds → findGalaFundingErrors），不改动快照本身。
+// 整理步骤只改写轮次行（排除开关推断、补齐完成状态），所以只复制 gala_rounds 的行；其余表（含可能很大的流水、账户）
+// 按只读引用传入，不在全库锁内整份复制。
 export function findRecoveryPointGalaErrors(snapshotData) {
   const names = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'];
-  const copy = structuredClone(Object.fromEntries(names.map((n) => [n, Array.isArray(snapshotData?.[n]) ? snapshotData[n] : []])));
+  const copy = Object.fromEntries(names.map((n) => [n, Array.isArray(snapshotData?.[n]) ? snapshotData[n] : []]));
+  copy.gala_rounds = copy.gala_rounds.map((r) => (r && typeof r === 'object' ? { ...r } : r));
   const flagErrors = prepareGalaRoundFlags(copy, { galaFormat: GALA_BACKUP_FORMAT });
   if (flagErrors.length) return flagErrors;
   completeFinishedCoinRounds(copy);
@@ -503,6 +506,11 @@ export function findGalaFundingErrors(backupData) {
       continue;
     }
     const hasGrantedAt = r?.granted_at != null;
+    // 无币轮从不发放（在线发放接口拒绝无币轮）：只能是 drawn 且没有发放完成时间，否则恢复后会显示一轮无法发生的“已发币”。
+    if (r?.prize_type !== 'coin' && (status !== 'drawn' || hasGrantedAt)) {
+      errors.push(`gala_rounds#${r?.id} 是无币轮，却标记了发放完成（状态必须为 drawn、发放完成时间为空）`);
+      continue;
+    }
     if ((status === 'granted') !== hasGrantedAt) {
       errors.push(`gala_rounds#${r?.id} 的状态 ${status} 与发放完成时间${hasGrantedAt ? '（已填写）' : '（为空）'}不一致`);
       continue;
@@ -2458,26 +2466,20 @@ export function registerAdminBackupRoutes(router) {
             // 此时备份里的年会数据不会写入，查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
               const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
-              // 已到账且付款流水仍在（或没有凭据、无法判断）的奖励：备份余额无法确认含这笔奖励，一律拒绝。
-              // 付款流水已被重置删除的奖励、以及待发的奖励：只放行不改变当前余额的合并
-              // （重置前的余额快照会把奖励加回来，发币后的余额快照会让待发奖励再付一次）。
-              // 流水此时还没导入，查到的都是目标库原有的。
+              // 重置前的余额快照会把已删的奖励加回来，发币后的余额快照会让待发奖励再付一次，更早的快照会少掉已到账的奖励：
+              // 只要余额会变就无法核对，拒绝。
               const paidRows = uids.length ? await tx.all(
-                `SELECT w.userid,
-                        BOOL_OR(w.awarded_at IS NOT NULL
-                                AND (w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id))) AS live,
-                        MAX(a.balance) AS balance
+                `SELECT w.userid, MAX(a.balance) AS balance
                    FROM gala_round_winners w LEFT JOIN accounts a ON a.userid = w.userid
                   WHERE w.amount > 0 AND w.userid = ANY(?::text[])
                   GROUP BY w.userid ORDER BY w.userid`,
                 [uids],
               ) : [];
               const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
-              const blocked = paidRows.filter((p) => {
-                if (p.live === true || p.live === 't') return true;
-                const next = incoming.get(String(p.userid));
-                return Number(next?.balance ?? 0) !== Number(p.balance ?? 0);
-              }).slice(0, 20);
+              // 按原值精确比较（余额是整数，数据库可能以字符串返回 BIGINT）：余额相同就不改变任何东西，照常合并，
+              // 例如把刚导出的全量备份原样合并回原库。
+              const sameBalance = (a, b) => String(a ?? 0) === String(b ?? 0);
+              const blocked = paidRows.filter((p) => !sameBalance(incoming.get(String(p.userid))?.balance, p.balance)).slice(0, 20);
               if (blocked.length) {
                 throw new Error(`合并导入会改变已有年会奖励（已到账或待发）的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额与这些奖励一致，已拒绝导入`);
               }

@@ -681,12 +681,29 @@ async function main() {
       const b2 = await balanceOf(db, w2);
       const g = await grantRound(db, d.round.id);
       assert.equal(g.granted.length, 0);
-      assert.deepEqual(g.failed.map((f) => f.error).sort(), ['winner_pool_missing', 'winner_pool_missing']);
+      // 跨活动奖池与本轮奖池不一致，按轮次配置核对先拦下
+      assert.deepEqual(g.failed.map((f) => f.error).sort(), ['winner_pool_missing', 'winner_round_mismatch']);
       assert.equal(await balanceOf(db, w1), b1);
       assert.equal(await balanceOf(db, w2), b2);
       const spentB = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pB.id]);
       assert.equal(Number(spentB.spent), 0);
-      console.log('✓ 发币兜底：无奖池或跨活动奖池的奖励不会发放');
+      // 同一活动的另一个员工奖池、或金额与本轮单价不同：不按记录自身字段扣款入账，记录保持待发
+      const pA2 = await createGalaPool(db, { eventId: evA.id, name: '本活动另一池', budget: 1000 });
+      const d2 = await drawGalaRound(db, { eventId: evA.id, segment: 'game', drawCount: 2, prizeType: 'coin', poolId: pA.id, amountEach: 9, randomInt: FIRST });
+      const [v1, v2] = d2.winners.map((w) => w.userid);
+      await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pA2.id)} WHERE round_id = ${Number(d2.round.id)} AND userid = '${v1}'`);
+      await db.exec(`UPDATE gala_round_winners SET amount = 10 WHERE round_id = ${Number(d2.round.id)} AND userid = '${v2}'`);
+      const bv1 = await balanceOf(db, v1);
+      const bv2 = await balanceOf(db, v2);
+      const g2 = await grantRound(db, d2.round.id);
+      assert.equal(g2.granted.length, 0);
+      assert.deepEqual(g2.failed.map((f) => f.error), ['winner_round_mismatch', 'winner_round_mismatch']);
+      assert.deepEqual([await balanceOf(db, v1), await balanceOf(db, v2)], [bv1, bv2]);
+      const spent2 = await db.all('SELECT spent FROM gala_pools WHERE id IN (?, ?)', [pA.id, pA2.id]);
+      assert.ok(spent2.every((x) => Number(x.spent) === 0));
+      const left2 = await db.all('SELECT awarded_at FROM gala_round_winners WHERE round_id = ?', [d2.round.id]);
+      assert.ok(left2.every((x) => x.awarded_at == null));
+      console.log('✓ 发币兜底：无奖池、跨活动奖池、挂错本活动奖池或金额不符的奖励不会发放');
 
       // 预留奖励只能扣预留奖池，不能记到员工奖池上
       const evC = await createGalaEvent(db, { title: `${PREFIX} 预留错池`, totalBudget: 0 });
