@@ -49,7 +49,8 @@ export function requiresGalaTables(meta) {
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
 }
 
-// 准备轮次的 exclude_previous_winners（该列晚于年会表引入），返回错误描述列表：
+// 写库前整理年会行，返回错误描述列表。当前格式的备份必须带全部列（见下方）；
+// 轮次的 exclude_previous_winners 晚于年会表引入，按格式分别处理：
 // - 当前格式（_meta.galaFormat）导出时一定带这一列：缺失或取值不是 0/1 都是损坏的备份，拒绝，不推断。
 //   否则缺失的值会被推断成 0，跨轮重复中奖校验反而放过本该拒绝的数据。
 // - 旧格式备份：缺失时与升级迁移同一口径推断。某轮有人在同一活动同一环节更早的轮次里已中过奖，
@@ -57,6 +58,18 @@ export function requiresGalaTables(meta) {
 //   轮次号无效的行不参与推断（随后的引用校验会拒绝）；按轮次号分组，同号的异常数据互不视为“更早”。
 export function prepareGalaRoundFlags(backupData, meta) {
   const errors = [];
+  // 当前格式的导出（SELECT *）每行都带全部列。缺列说明备份被改过：导入会给缺的列套默认值，
+  // 例如有限额、关闭了部分环节的活动恢复成不限预算、全部环节开启，所以写库前拒绝，只对旧格式补默认值。
+  if (meta?.galaFormat != null) {
+    for (const t of GALA_BACKUP_TABLES) {
+      const rows = Array.isArray(backupData?.[t.name]) ? backupData[t.name] : [];
+      for (const row of rows) {
+        const missing = row && typeof row === 'object' ? t.columns.filter((c) => !Object.hasOwn(row, c)) : t.columns;
+        if (missing.length) errors.push(`${t.name}#${row?.id} 缺少列 ${missing.join(', ')}（当前格式的备份必须带全部列）`);
+        if (errors.length >= 20) return errors;
+      }
+    }
+  }
   const rounds = (Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [])
     .filter((r) => r && typeof r === 'object');
   for (const r of rounds) {
@@ -1590,24 +1603,30 @@ export function registerAdminBackupRoutes(router) {
 
     try {
       const report = await runWithRestoreLockRetry(db, async (tx) => {
-        await lockAdminAccountProtection(tx);
-        // 全量恢复与所有写入互斥，且恢复自己永远不会在持有表锁时等待别人，因而不可能参与死锁：
-        // 1. 先拿年会写入锁的排他模式（年会事务在碰任何表之前拿它的共享模式），此时恢复还没持有任何表锁；
-        // 2. 推进恢复代数（事务内计数，恢复失败或重试回滚时不变），进行中的年会发放据此发现期间发生过恢复而整次作废；
-        // 3. 一次性以 EXCLUSIVE 模式锁住全量恢复要写的所有表（只放行普通读），等锁不超过 500ms
-        //    （短于数据库的死锁检测间隔）。拿不到说明有入账、清理等事务正持有行锁：整个恢复事务回滚、稍后重试，
-        //    让对方先完成，而不是持着一部分表去等它。拿到之后再没有别的事务能在这些表上持有或申请行锁，
-        //    恢复后续的删除、写入都不会等待；恢复期间也不会有新流水分配 ID，推进流水序列时不会回拨。
-        if (backupMode === 'full') {
-          await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
-          await bumpGalaRestoreGeneration(tx);
-          await tx.exec("SET LOCAL lock_timeout = '500ms'");
+        // 全量恢复的每一把前置锁（账号保护锁、年会写入锁、全部表锁）都设等待上限，超时整体回滚后重试：
+        // 例如抽签持有年会共享锁、正等在活动行上时，恢复不会无限等待，也就不会一直占着账号保护锁，
+        // 让外部账号注册等无关操作跟着卡住。
+        const busy = async (step) => {
           try {
-            await tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`);
+            return await step();
           } catch (err) {
             if (err?.code === '55P03') throw Object.assign(new Error('restore_tables_busy'), { restoreLockBusy: true, cause: err });
             throw err;
           }
+        };
+        if (backupMode === 'full') await tx.exec("SET LOCAL lock_timeout = '500ms'");
+        await busy(() => lockAdminAccountProtection(tx));
+        // 全量恢复与所有写入互斥，且恢复自己永远不会在持有表锁时等待别人，因而不可能参与死锁：
+        // 1. 先拿年会写入锁的排他模式（年会事务在碰任何表之前拿它的共享模式），此时恢复还没持有任何表锁；
+        // 2. 推进恢复代数（事务内计数，恢复失败或重试回滚时不变），进行中的年会发放据此发现期间发生过恢复而整次作废；
+        // 3. 一次性以 EXCLUSIVE 模式锁住全量恢复要写的所有表（只放行普通读），每一步等锁都不超过 500ms
+        //    （短于数据库的死锁检测间隔）。拿不到说明有入账、清理等事务正持有行锁：整个恢复事务回滚、稍后重试，
+        //    让对方先完成，而不是持着一部分表去等它。拿到之后再没有别的事务能在这些表上持有或申请行锁，
+        //    恢复后续的删除、写入都不会等待；恢复期间也不会有新流水分配 ID，推进流水序列时不会回拨。
+        if (backupMode === 'full') {
+          await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]));
+          await busy(() => bumpGalaRestoreGeneration(tx));
+          await busy(() => tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`));
           await tx.exec('SET LOCAL lock_timeout = DEFAULT');
           // 表已全部锁住：此刻的数据就是覆盖前最后的已提交状态，在这里生成恢复点。
           try {

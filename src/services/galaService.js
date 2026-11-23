@@ -516,6 +516,8 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   if (!id) throw new GalaError('invalid_event_id');
   const table = tableNo === null || tableNo === undefined || tableNo === '' ? null : toPositiveId(tableNo, PG_INT_MAX);
   if (tableNo !== null && tableNo !== undefined && tableNo !== '' && table === null) throw new GalaError('invalid_table_no');
+  // 两种导入方式二选一：同时给了名单和“全部在册员工”时不猜意图（静默按全员导入会改变整场候选名单），直接拒绝。
+  if (allActiveDingtalk && Array.isArray(userids) && userids.length > 0) throw new GalaError('ambiguous_participant_source');
   const list = allActiveDingtalk
     ? []
     : [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanUserid(x)).filter(Boolean))];
@@ -887,7 +889,8 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
     // 整次发放作废。之后先共享锁住本轮并核对轮次身份（兜底），再领取中奖记录。
     // 加锁顺序统一为「轮次 → 中奖记录」：失败回写、发放收尾、用户重置都按这个顺序，互相只会排队、不会死锁。
     await enterGalaWrite(tx, generation);
-    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [round.id]);
+    // 排他锁住本轮：最后一笔到账时要在同一事务里把整轮标记完成（见下方），同一轮的到账因此逐笔串行。
+    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR UPDATE', [round.id]);
     if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
@@ -923,9 +926,20 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
       refId: `GALA_W${claimed.id}`,
     });
     await tx.run('UPDATE gala_round_winners SET ledger_id = ? WHERE id = ?', [granted.ledgerId, claimed.id]);
+    // 这是本轮最后一笔待发的正数奖励时，与到账同一事务标记整轮完成（与发放收尾、用户重置同一口径）。
+    // 否则进程在到账提交后、收尾之前退出，余额和流水都已更新，轮次却一直显示未发完，导出的备份也带着这个状态。
+    await tx.run(
+      `UPDATE gala_rounds r SET status = 'granted', granted_at = unixepoch()
+        WHERE r.id = ? AND r.status = 'drawn'
+          AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.amount > 0)`,
+      [round.id],
+    );
     return { skipped: false, userid: claimed.userid, amount, balance: granted.balance };
   });
 }
+
+// 仅供集成测试模拟“到账提交后、收尾之前进程退出”的中断点。
+export const awardGalaWinnerForTest = awardWinner;
 
 // onAwarded：每笔发放事务提交后立即回调（用于余额变更通知）。整次发放中途因恢复停止时，
 // 已经到账的人也已经收到通知；重试会跳过已发记录，不会再补发通知。回调出错不影响发放。

@@ -833,7 +833,16 @@ test('批次清理在事务锁后选目标，授权先提交的管理员不进�
     const block = adminSource.slice(adminSource.indexOf(`router.post('${route}'`)).split('\n  router.')[0];
     assert.match(block, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
   }
-  assert.match(backupRoutesSource, /const report = await (?:runInTransaction|runWithRestoreLockRetry)\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
+  // 恢复事务：第一把锁仍是账号保护锁；在它之前只允许设置等锁上限（SET LOCAL lock_timeout），不读写任何数据。
+  {
+    const start = backupRoutesSource.indexOf('const report = await runWithRestoreLockRetry(db, async (tx) => {');
+    assert.ok(start > 0);
+    const lockAt = backupRoutesSource.indexOf('lockAdminAccountProtection(tx)', start);
+    assert.ok(lockAt > start);
+    const before = backupRoutesSource.slice(start, lockAt);
+    assert.doesNotMatch(before, /tx\.(?:get|all|run)\(/);
+    assert.deepEqual(before.match(/tx\.exec\([^)]*\)/g), ["tx.exec(\"SET LOCAL lock_timeout = '500ms'\")"]);
+  }
   const settingsSource = readFileSync(fileURLToPath(new URL('../../src/routes/admin/settingsRoutes.js', import.meta.url)), 'utf8');
   const saveSettings = settingsSource.slice(settingsSource.indexOf("router.post('/settings/external-login',")).split('\n  router.')[0];
   assert.match(saveSettings, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);

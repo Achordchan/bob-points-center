@@ -121,6 +121,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   WHERE status = 'pending';
 -- 用户重置按 userid 跨活动清理：待发中奖记录、名单、待用名额。
 CREATE INDEX IF NOT EXISTS idx_gala_winners_user_unawarded ON gala_round_winners(userid) WHERE awarded_at IS NULL;
+-- 按奖池汇总待发奖励（预留发币轮的预算准入、预留奖池调额的下限）：只扫目标奖池的待发记录。
+CREATE INDEX IF NOT EXISTS idx_gala_winners_pool_unawarded ON gala_round_winners(pool_id) WHERE awarded_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_gala_participants_user ON gala_participants(userid);
 CREATE INDEX IF NOT EXISTS idx_gala_reserved_user_pending ON gala_reserved_slots(userid) WHERE status = 'pending';
 -- 按人查未取消名额（抽签候选排除、超管名单的预留标记、名额唯一性）。

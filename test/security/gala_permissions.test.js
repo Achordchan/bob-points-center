@@ -758,7 +758,7 @@ test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁�
   // 当前格式：缺失不推断，直接拒绝（损坏的备份不能借推断放过重复中奖）
   const current = snap();
   const errs = prepareGalaRoundFlags(current, { version: 2, galaFormat: 1 });
-  assert.equal(errs.length, 4);
+  assert.equal(errs.filter((e) => e.includes('缺少 exclude_previous_winners')).length, 4);
   assert.ok(current.gala_rounds.every((r) => r.exclude_previous_winners === undefined));
   // 取值非法
   const badVal = snap();
@@ -836,4 +836,23 @@ test('抽签：单价 × 人数超出安全整数时直接拒绝，不返回被�
     drawGalaRound(null, { eventId: 1, segment: 'lottery', drawCount: 3, prizeType: 'coin', poolId: 1, amountEach: Number.MAX_SAFE_INTEGER, expectedRoundNo: 1 }),
     (e) => e.code === 'draw_total_too_large' && e.status === 400,
   );
+});
+
+test('当前格式备份：年会行缺任何一列都拒绝（不套默认值），旧格式照常补默认值', async () => {
+  const { prepareGalaRoundFlags } = await import('../../src/routes/admin/backupRoutes.js');
+  const full = {
+    gala_events: [{
+      id: 1, title: 'x', event_date: null, status: 'draft', total_budget: 100, enabled_segments: '["lottery"]',
+      created_by: null, created_name: null, created_at: 1, updated_at: 1,
+    }],
+    gala_pools: [], gala_participants: [], gala_rounds: [], gala_round_winners: [], gala_reserved_slots: [],
+  };
+  assert.deepEqual(prepareGalaRoundFlags(structuredClone(full), { version: 2, galaFormat: 1 }), []);
+  for (const col of ['total_budget', 'enabled_segments']) {
+    const b = structuredClone(full);
+    delete b.gala_events[0][col];
+    const errs = prepareGalaRoundFlags(b, { version: 2, galaFormat: 1 });
+    assert.ok(errs.some((e) => e.startsWith('gala_events#1') && e.includes(col)), errs.join('\n'));
+    assert.deepEqual(prepareGalaRoundFlags(b, { version: 2 }), []);
+  }
 });

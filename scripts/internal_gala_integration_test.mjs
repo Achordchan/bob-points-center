@@ -36,6 +36,7 @@ import {
   GALA_RESET_LOCK,
   bumpGalaRestoreGeneration,
   GALA_SEGMENTS,
+  awardGalaWinnerForTest,
 } from '../src/services/galaService.js';
 import { purgeUserBusinessData } from '../src/services/userDataPurgeService.js';
 
@@ -86,16 +87,6 @@ async function assertDevelopmentMarker(cfg) {
   }
 }
 
-// 按字面前缀清理（starts_with），不用 LIKE：前缀里的下划线在 LIKE 中是单字符通配符，会误删别的数据。
-async function cleanup(db) {
-  await db.run('DELETE FROM gala_events WHERE starts_with(title, ?)', [PREFIX]);
-  await db.run('DELETE FROM admin_user_roles WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
-  await db.run('DELETE FROM ledger WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
-  await db.run('DELETE FROM audit_logs WHERE starts_with(actor_id, ?)', [`${PREFIX}_`]).catch(() => null);
-  await db.run('DELETE FROM accounts WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
-  await db.run('DELETE FROM users WHERE starts_with(userid, ?)', [`${PREFIX}_`]);
-}
-
 // 发币需带上操作者看到的轮次凭据；测试里默认取当前代数（等同于刚刷新过轮次列表）。
 async function grantRound(db, roundId, token, onAwarded) {
   const t = token ?? `${(await db.get('SELECT version_token FROM gala_restore_state WHERE id = 1')).version_token}.${Number(roundId)}`;
@@ -130,10 +121,27 @@ async function main() {
   const cfg = loadConfig();
   assertSafeTarget(cfg);
   await assertDevelopmentMarker(cfg);
-  // 只有确认是本机开发库之后才初始化（会执行 DDL），清理也只在这之后才可能运行。
-  const db = await initDb();
+  // 全部用例在一次性数据库里跑：其中不少会故意制造不一致的账目（把奖池支出改满、伪造流水等）。
+  // 放在共享开发库里，测试进程被中途终止时清理不会执行，留下的数据会让之后导出的全量备份无法恢复。
+  // 一次性库在结束时整库删除；进程被杀时最多留下一个以 _gala_it_ 结尾的空闲库，不影响开发库本身。
+  const itName = `${cfg.db.database}_gala_it_${process.pid}`;
+  const admin = new Client({ host: cfg.db.host, port: cfg.db.port, database: cfg.db.database, user: cfg.db.user, password: cfg.db.password });
+  await admin.connect();
   try {
-    await initDb(); // DDL 幂等重跑
+    await admin.query(`CREATE DATABASE "${itName}"`);
+  } catch (err) {
+    await admin.end();
+    if (err?.code === '42501') {
+      throw new Error('拒绝执行：年会集成测试需要建库权限，在一次性数据库里运行（不会写入共享开发库）');
+    }
+    throw err;
+  }
+  const itDb = { ...cfg.db, kind: 'postgres', database: itName };
+  let db = null;
+  try {
+    db = await initDb({ db: itDb });
+    const again = await initDb({ db: itDb }); // DDL 幂等重跑
+    await again.close();
     console.log('✓ DDL 幂等');
 
     for (let i = 1; i <= USERS + 1; i += 1) {
@@ -476,6 +484,38 @@ async function main() {
         assert.equal(Number(again.round.id), Number(first.round.id));
         await assert.rejects(drawGalaRound(db, { ...args, expectedRoundNo: 2 }), (e) => e.code === 'event_ended');
         console.log('✓ 抽签重试：活动结束后仍能拿回已抽结果；排除规则不同则拒绝');
+      }
+
+      // 最后一笔到账与整轮完成在同一事务：模拟到账提交后、发放收尾之前进程退出（不调用收尾）
+      {
+        const evK = await createGalaEvent(db, { title: `${PREFIX} 中断`, totalBudget: 0 });
+        const pK = await createGalaPool(db, { eventId: evK.id, name: '中断池', budget: 100 });
+        await addGalaParticipants(db, { eventId: evK.id, userids: [uid(1), uid(2)] });
+        await addFiller(db, evK.id);
+        const dK = await drawGalaRound(db, { eventId: evK.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pK.id, amountEach: 4, randomInt: FIRST });
+        const version = (await db.get('SELECT version_token FROM gala_restore_state WHERE id = 1')).version_token;
+        const roundRow = await db.get('SELECT * FROM gala_rounds WHERE id = ?', [dK.round.id]);
+        const reason = '年会奖励·测试';
+        const [w1, w2] = dK.winners;
+        await awardGalaWinnerForTest(db, { winnerId: w1.id, round: roundRow, reason, generation: version });
+        assert.equal((await db.get('SELECT status FROM gala_rounds WHERE id = ?', [dK.round.id])).status, 'drawn', '还有待发时不标记完成');
+        await awardGalaWinnerForTest(db, { winnerId: w2.id, round: roundRow, reason, generation: version });
+        const done = await db.get('SELECT status, granted_at FROM gala_rounds WHERE id = ?', [dK.round.id]);
+        assert.equal(done.status, 'granted', '最后一笔到账的事务里已标记整轮完成');
+        assert.ok(done.granted_at != null);
+        console.log('✓ 最后一笔到账提交即标记整轮完成，不依赖发放收尾');
+      }
+
+      // 名单导入两种方式同时给出：拒绝，不静默按全员导入
+      {
+        const evA = await createGalaEvent(db, { title: `${PREFIX} 二选一`, totalBudget: 0 });
+        await assert.rejects(
+          addGalaParticipants(db, { eventId: evA.id, userids: [uid(1)], allActiveDingtalk: true }),
+          (e) => e.code === 'ambiguous_participant_source' && e.status === 400,
+        );
+        const n = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ?', [evA.id]);
+        assert.equal(Number(n.n), 0);
+        console.log('✓ 名单导入同时给名单和全员开关时拒绝');
       }
 
       // 轮次号用到 INTEGER 上限：不再给出下一轮号，返回业务错误而不是数据库溢出
@@ -1083,13 +1123,16 @@ async function main() {
     await realRestoreChecks(cfg);
     console.log('ALL GALA INTEGRATION CHECKS PASSED');
   } finally {
-    await cleanup(db);
-    await db.close();
+    // 连接池关闭后，服务端连接可能还没断开；整库删除（FORCE）会终止它们，终止通知若落在已关闭池的空闲连接上
+    // 会以未处理的 error 事件让进程崩溃。测试池在关闭前挂上空处理器。
+    db?.pool?.on('error', () => {});
+    if (db) await db.close();
+    await admin.query(`DROP DATABASE IF EXISTS "${itName}" WITH (FORCE)`).catch(() => null);
+    await admin.end();
   }
 }
 
-// 会推进恢复代数（换掉数据版本）的检查：只在一次性数据库里跑，不动共享开发库的数据版本，
-// 免得开着的年会页面失效、进行中的发放中途停止。
+// 会推进恢复代数（换掉数据版本）的检查：在 realRestoreChecks 的一次性数据库里、启动 HTTP 之前运行。
 async function generationChecks(db, users) {
   // 发放绑定恢复代数：发放途中发生全量恢复（推进代数，持恢复排他锁），即使轮次数据看起来没变也整次停止
   {
@@ -1341,8 +1384,37 @@ async function realRestoreChecks(cfg) {
       assert.deepEqual(flags.map((x) => Number(x.f)), [1, 0, 1], '旧备份恢复后关闭过排除的轮次仍记为不排除');
     }
     console.log('✓ 旧格式备份推断排除开关；当前格式缺列、不认识的年会格式号拒绝');
+
+    // 5) 前置锁也有等待上限：抽签等事务持有年会写入锁的共享模式时，恢复不会一直占着账号保护锁等下去
+    {
+      const holder = new Client({ host: cfg.db.host, port: cfg.db.port, database: tmpName, user: cfg.db.user, password: cfg.db.password });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT pg_advisory_xact_lock_shared(hashtext($1))', [GALA_PAYOUT_LOCK]);
+      const genHeld = await generation();
+      let done = false;
+      const importing = call('POST', '/backup/import', { backup: b0, mode: 'overwrite' }).then((x) => { done = true; return x; });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      assert.equal(done, false, '年会写入锁被占用期间恢复不应完成');
+      // 恢复在两次重试之间会放开账号保护锁：其他需要它的操作能在有限时间内拿到
+      const other = new Client({ host: cfg.db.host, port: cfg.db.port, database: tmpName, user: cfg.db.user, password: cfg.db.password });
+      await other.connect();
+      await other.query('BEGIN');
+      await other.query("SET LOCAL lock_timeout = '3s'");
+      await other.query('SELECT pg_advisory_xact_lock(71010, 1)');
+      await other.query('ROLLBACK');
+      await other.end();
+      assert.equal(await generation(), genHeld);
+      await holder.query('ROLLBACK');
+      await holder.end();
+      r = await importing;
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.equal(await generation(), String(Number(genHeld) + 1));
+      console.log('✓ 恢复等年会写入锁有上限，等待期间不长期占用账号保护锁');
+    }
   } finally {
     if (server) server.close();
+    tdb?.pool?.on('error', () => {});
     if (tdb) await tdb.close();
     if (prevBackupDir === undefined) delete process.env.BOB_BACKUP_DIR;
     else process.env.BOB_BACKUP_DIR = prevBackupDir;
