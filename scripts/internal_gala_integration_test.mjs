@@ -9,6 +9,7 @@ import path from 'node:path';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { loadConfig } from '../src/config.js';
 import { initDb } from '../src/db/index.js';
+import { galaSchemaSql } from '../src/db/galaSchema.js';
 import { createApp } from '../src/app.js';
 import { createSessionToken } from '../src/services/adminSession.js';
 import { adminSessionSigningSecret } from '../src/utils/sessionCrypto.js';
@@ -108,14 +109,21 @@ async function balanceOf(db, userid) {
 
 // 预留名额必须指定预留奖池：测试里没写奖池的名额自动挂到该活动的一个测试预留奖池上。
 const testReservedPools = new Map();
+// 预留对象须先在名单里（创建名额不改动公开名单）：测试里先按普通流程把人加进名单，再创建名额。
+async function enrolledSlot(db, args) {
+  if (typeof args.userid === 'string' && args.userid) {
+    await addGalaParticipants(db, { eventId: args.eventId, userids: [args.userid] }).catch(() => null);
+  }
+  return createGalaReservedSlot(db, args);
+}
 async function addSlot(db, args) {
-  if (args.poolId != null) return createGalaReservedSlot(db, args);
+  if (args.poolId != null) return enrolledSlot(db, args);
   let pid = testReservedPools.get(args.eventId);
   if (!pid) {
     pid = (await createGalaPool(db, { eventId: args.eventId, name: '测试预留池', budget: 100000, reserved: true })).id;
     testReservedPools.set(args.eventId, pid);
   }
-  return createGalaReservedSlot(db, { ...args, poolId: pid });
+  return enrolledSlot(db, { ...args, poolId: pid });
 }
 
 async function main() {
@@ -160,7 +168,7 @@ async function main() {
     // 把孩子也误加进名单：预留对象不应进入正常抽签池
     await addGalaParticipants(db, { eventId: event.id, userids: [kid] });
 
-    await createGalaReservedSlot(db, {
+    await enrolledSlot(db, {
       eventId: event.id, segment: 'lottery', roundNo: 2, userid: kid, poolId: reservedPool.id, note: 'test',
     });
     await assert.rejects(
@@ -356,24 +364,26 @@ async function main() {
         console.log('✓ 重置开始前刚建的活动：抽签等重置提交后再读名单');
       }
 
-      // 创建预留名额（会把人加进名单）与用户重置串行：结果等同于先重置、后创建
+      // 创建预留名额与用户重置串行：结果等同于先重置、后创建（此时对象已不在名单，创建被拒绝）
       {
         const evS = await createGalaEvent(db, { title: `${PREFIX} 重置与名额`, totalBudget: 0 });
         const rpS = await createGalaPool(db, { eventId: evS.id, name: '预留S', budget: 100, reserved: true });
+        await addGalaParticipants(db, { eventId: evS.id, userids: [target] });
         let slotSettled = false;
         let slotPromise = null;
         await db.transaction(async (tx) => {
           await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
           slotPromise = createGalaReservedSlot(db, { eventId: evS.id, segment: 'lottery', roundNo: 1, userid: target, poolId: rpS.id })
+            .then(() => null, (e) => e)
             .finally(() => { slotSettled = true; });
           await new Promise((r) => { setTimeout(r, 300); });
           assert.equal(slotSettled, false, '用户重置进行中时，创建预留名额应等待');
           await purgeUserBusinessData(tx, [target]);
         });
-        await slotPromise;
-        const st = await db.get('SELECT status FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evS.id, target]);
-        const inList = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [evS.id, target]);
-        assert.deepEqual([st?.status, Number(inList.n)], ['pending', 1], '名额与名单一致：重置之后创建的名额有效');
+        const slotErr = await slotPromise;
+        assert.equal(slotErr?.code, 'participant_required', '重置提交后对象已不在名单，名额不能再创建');
+        const st = await db.get('SELECT COUNT(*) AS n FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evS.id, target]);
+        assert.equal(Number(st.n), 0);
         console.log('✓ 创建预留名额与用户重置串行');
       }
 
@@ -419,6 +429,35 @@ async function main() {
         assert.equal(String(seqmax.seqmax), '9007199254740991', '流水序列上限为安全整数');
         console.log('✓ 用户重置清掉最后一笔待发后整轮标记完成；流水序列有安全上限');
       }
+
+      // 发放失败回写与用户重置并发：两边都按「轮次 → 中奖记录」加锁，不会死锁
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const evF = await createGalaEvent(db, { title: `${PREFIX} 失败回写${i}`, totalBudget: 0 });
+        // eslint-disable-next-line no-await-in-loop
+        const pF = await createGalaPool(db, { eventId: evF.id, name: '失败池', budget: 100 });
+        // eslint-disable-next-line no-await-in-loop
+        await addGalaParticipants(db, { eventId: evF.id, userids: [target, uid(1)] });
+        // eslint-disable-next-line no-await-in-loop
+        await addFiller(db, evF.id);
+        // eslint-disable-next-line no-await-in-loop
+        const dF = await drawGalaRound(db, { eventId: evF.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pF.id, amountEach: 3, randomInt: FIRST });
+        // 奖池实际支出被占满：每一笔到账都失败并回写失败原因
+        // eslint-disable-next-line no-await-in-loop
+        await db.run('UPDATE gala_pools SET spent = budget WHERE id = ?', [pF.id]);
+        // eslint-disable-next-line no-await-in-loop
+        const [gr, pr] = await Promise.allSettled([
+          grantRound(db, dF.round.id),
+          db.transaction((tx) => purgeUserBusinessData(tx, [target])),
+        ]);
+        assert.equal(gr.status, 'fulfilled', String(gr.reason?.code || gr.reason));
+        assert.equal(pr.status, 'fulfilled', String(pr.reason?.code || pr.reason));
+        // eslint-disable-next-line no-await-in-loop
+        const left = await db.all('SELECT userid, award_error FROM gala_round_winners WHERE round_id = ?', [dF.round.id]);
+        assert.deepEqual(left.map((w) => w.userid), [uid(1)]);
+        assert.equal(left[0].award_error, 'pool_budget_exceeded');
+      }
+      console.log('✓ 发放失败回写与用户重置并发不死锁');
 
       // 抽签重试：先识别重放再检查活动状态；排除规则不同不算同一个请求
       {
@@ -468,7 +507,7 @@ async function main() {
       const pC = await createGalaPool(db, { eventId: evC.id, name: '员工池', budget: 1000 });
       const rC = await createGalaPool(db, { eventId: evC.id, name: '预留池', budget: 1000, reserved: true });
       await addGalaParticipants(db, { eventId: evC.id, userids: [uid(2)] });
-      await createGalaReservedSlot(db, { eventId: evC.id, segment: 'lottery', roundNo: 1, userid: uid(5), poolId: rC.id });
+      await enrolledSlot(db, { eventId: evC.id, segment: 'lottery', roundNo: 1, userid: uid(5), poolId: rC.id });
       await addFiller(db, evC.id);
       const dC = await drawGalaRound(db, { eventId: evC.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pC.id, amountEach: 9, randomInt: FIRST });
       await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pC.id)} WHERE round_id = ${Number(dC.round.id)} AND is_reserved = 1`);
@@ -491,7 +530,7 @@ async function main() {
       const pD = await createGalaPool(db, { eventId: evD.id, name: '小池', budget: 15 });
       const rD = await createGalaPool(db, { eventId: evD.id, name: '预留池', budget: 100, reserved: true });
       await addGalaParticipants(db, { eventId: evD.id, userids: [uid(6), uid(7), uid(8)] });
-      await createGalaReservedSlot(db, { eventId: evD.id, segment: 'lottery', roundNo: 1, userid: uid(9), poolId: rD.id });
+      await enrolledSlot(db, { eventId: evD.id, segment: 'lottery', roundNo: 1, userid: uid(9), poolId: rD.id });
       await addFiller(db, evD.id);
       const dD = await drawGalaRound(db, { eventId: evD.id, segment: 'lottery', drawCount: 3, prizeType: 'coin', poolId: pD.id, amountEach: 5, randomInt: FIRST });
       await db.exec(`UPDATE gala_pools SET spent = budget WHERE id = ${Number(pD.id)}`);
@@ -578,8 +617,8 @@ async function main() {
       const rS = await createGalaPool(db, { eventId: evS.id, name: '预留池', budget: 10, reserved: true });
       await addGalaParticipants(db, { eventId: evS.id, userids: [uid(12), uid(13)] });
       await db.exec(`UPDATE users SET name = '改名后' WHERE userid = '${uid(14)}'`);
-      await createGalaReservedSlot(db, { eventId: evS.id, segment: 'lottery', roundNo: 2, userid: uid(14), poolId: rS.id });
-      await createGalaReservedSlot(db, { eventId: evS.id, segment: 'giveaway', roundNo: 1, userid: uid(15), poolId: rS.id });
+      await enrolledSlot(db, { eventId: evS.id, segment: 'lottery', roundNo: 2, userid: uid(14), poolId: rS.id });
+      await enrolledSlot(db, { eventId: evS.id, segment: 'giveaway', roundNo: 1, userid: uid(15), poolId: rS.id });
       await addFiller(db, evS.id);
       const snap14 = (await listGalaParticipants(db, { eventId: evS.id })).find((x) => x.userid === uid(14));
       await db.exec(`UPDATE users SET name = '又改名' WHERE userid = '${uid(14)}'`);
@@ -786,7 +825,7 @@ async function main() {
       await addGalaParticipants(db, { eventId: ev.id, userids: [uid(1)] });
       await addGalaParticipants(db, { eventId: ev.id, userids: [uid(2)] });
       await addFiller(db, ev.id);
-      await createGalaReservedSlot(db, { eventId: ev.id, segment: 'giveaway', roundNo: 1, userid: uid(3), poolId: rp.id });
+      await enrolledSlot(db, { eventId: ev.id, segment: 'giveaway', roundNo: 1, userid: uid(3), poolId: rp.id });
       // 员工奖池为 0：本轮唯一名额是预留，但准入仍按 1 × 5 检查员工奖池，和没有预留时一样被拒
       await assert.rejects(
         drawGalaRound(db, { eventId: ev.id, segment: 'giveaway', drawCount: 1, prizeType: 'coin', poolId: empty.id, amountEach: 5 }),
@@ -836,11 +875,11 @@ async function main() {
       await addGalaParticipants(db, { eventId: ev.id, userids: [uid(1), uid(2), uid(3)] });
       await addFiller(db, ev.id);
       await assert.rejects(
-        createGalaReservedSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: 1, userid: uid(1) }),
+        enrolledSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: 1, userid: uid(1) }),
         (e) => e.code === 'reserved_pool_required',
       );
-      await createGalaReservedSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: 1, userid: uid(1), poolId: rp.id });
-      await createGalaReservedSlot(db, { eventId: ev.id, segment: 'giveaway', roundNo: 1, userid: uid(2), poolId: rp.id });
+      await enrolledSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: 1, userid: uid(1), poolId: rp.id });
+      await enrolledSlot(db, { eventId: ev.id, segment: 'giveaway', roundNo: 1, userid: uid(2), poolId: rp.id });
       const none = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 2 });
       const kidNone = none.winners.find((w) => w.userid === uid(1));
       assert.ok(kidNone && Number(kidNone.amount) === 0 && kidNone.pool_id == null, '无币轮预留对象同样没有奖励');
@@ -856,7 +895,7 @@ async function main() {
       assert.ok(String(slot2.note).includes('预留奖池余额不足'));
       // 预留奖池不能把预算压到已支出 + 待发预留奖励以下
       const rp2 = await createGalaPool(db, { eventId: ev.id, name: '预留池2', budget: 50, reserved: true });
-      await createGalaReservedSlot(db, { eventId: ev.id, segment: 'game', roundNo: 1, userid: uid(3), poolId: rp2.id });
+      await enrolledSlot(db, { eventId: ev.id, segment: 'game', roundNo: 1, userid: uid(3), poolId: rp2.id });
       await drawGalaRound(db, { eventId: ev.id, segment: 'game', drawCount: 1, prizeType: 'coin', poolId: ep.id, amountEach: 30 });
       await assert.rejects(
         updateGalaPool(db, { poolId: rp2.id, budget: 29, allowReserved: true }),
@@ -932,7 +971,7 @@ async function main() {
       "INSERT INTO admin_user_roles(userid, role_id, assigned_at) SELECT ?, id, unixepoch() FROM admin_roles WHERE code = 'operator'",
       [operatorId],
     );
-    const app = createApp({ db, cfg });
+    const app = createApp({ db, cfg, backgroundJobs: false });
     const server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -964,12 +1003,17 @@ async function main() {
       r = await call(superId, 'POST', '/gala/reserved/pools/create', { gala_version: gv, event_id: hid, name: '预留', budget: 50 });
       assert.equal(r.status, 200);
       const rp = r.body.data.id;
-      r = await call(superId, 'POST', '/gala/reserved/create', { gala_version: gv,
-        event_id: hid, segment: 'lottery', round_no: 1, userid: kid, pool_id: rp,
-      });
-      assert.equal(r.status, 200, JSON.stringify(r.body));
-      r = await call(operatorId, 'POST', '/gala/participants/add', { gala_version: gv, event_id: hid, userids: [uid(3), uid(4), uid(5)] });
+      const slotBody = { gala_version: gv, event_id: hid, segment: 'lottery', round_no: 1, userid: kid, pool_id: rp };
+      r = await call(superId, 'POST', '/gala/reserved/create', slotBody);
+      assert.deepEqual([r.status, r.body?.error], [409, 'participant_required'], '预留对象须先在名单里，创建名额不改动公开名单');
+      // 预留对象随整批名单一起导入，之后再创建名额：名单里看不出谁是预留对象
+      r = await call(operatorId, 'POST', '/gala/participants/add', { gala_version: gv, event_id: hid, userids: [uid(3), kid, uid(4), uid(5)] });
       assert.equal(r.status, 200);
+      const before = (await call(operatorId, 'GET', `/gala/participants?event_id=${hid}`)).body.data;
+      r = await call(superId, 'POST', '/gala/reserved/create', slotBody);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const after = (await call(operatorId, 'GET', `/gala/participants?event_id=${hid}`)).body.data;
+      assert.deepEqual(after, before, '创建预留名额前后，普通管理员看到的名单完全相同');
       await addFiller(db, hid);
       // 活动列表经 HTTP 路由（含分页参数）
       r = await call(operatorId, 'GET', '/gala/events');
@@ -1124,7 +1168,23 @@ async function realRestoreChecks(cfg) {
     await addGalaParticipants(tdb, { eventId: ev.id, userids: users });
     const r1 = await drawGalaRound(tdb, { eventId: ev.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pool.id, amountEach: 5 });
 
-    const app = createApp({ db: tdb, cfg: tcfg });
+    // 升级补列：旧库没有 exclude_previous_winners 时，关闭排除后产生重复中奖的旧轮次回填为 0，
+    // 其余为 1；随后的导出 → 覆盖恢复（下面的 b0）不会被跨轮重复中奖校验拒绝。
+    {
+      const evU = await createGalaEvent(tdb, { title: 'RT 升级', totalBudget: 0 });
+      await addGalaParticipants(tdb, { eventId: evU.id, userids: users });
+      const ra = await drawGalaRound(tdb, { eventId: evU.id, segment: 'game', drawCount: 2, randomInt: FIRST });
+      const rb = await drawGalaRound(tdb, { eventId: evU.id, segment: 'game', drawCount: 2, randomInt: FIRST, excludePreviousWinners: false });
+      const rc = await drawGalaRound(tdb, { eventId: evU.id, segment: 'game', drawCount: 2, randomInt: FIRST });
+      assert.deepEqual(rb.winners.map((w) => w.userid).sort(), ra.winners.map((w) => w.userid).sort(), '关闭排除时同一批人再次中奖');
+      await tdb.exec('ALTER TABLE gala_rounds DROP COLUMN exclude_previous_winners');
+      await tdb.exec(galaSchemaSql);
+      const flags = await tdb.all('SELECT id, exclude_previous_winners AS f FROM gala_rounds WHERE event_id = ? ORDER BY round_no', [evU.id]);
+      assert.deepEqual(flags.map((x) => Number(x.f)), [1, 0, 1], '只有出现重复中奖的旧轮次回填为不排除');
+      assert.deepEqual(flags.map((x) => Number(x.id)), [ra.round.id, rb.round.id, rc.round.id].map(Number));
+    }
+
+    const app = createApp({ db: tdb, cfg: tcfg, backgroundJobs: false });
     server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;

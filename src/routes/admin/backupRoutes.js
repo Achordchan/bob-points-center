@@ -22,7 +22,7 @@ import {
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 import {
-  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_ROW_ID, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_ROW_ID, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
 } from '../../services/galaService.js';
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
@@ -35,6 +35,15 @@ const GALA_BACKUP_TABLES = [
   { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
+
+// 含年会数据的全量备份格式号，写在 _meta.galaFormat。
+export const GALA_BACKUP_FORMAT = 1;
+// 备份元数据表明它是含年会数据的格式：带 galaFormat，或导出时的表清单里列了年会表。
+export function requiresGalaTables(meta) {
+  if (meta?.galaFormat != null) return true;
+  const listed = meta?.tables && typeof meta.tables === 'object' ? Object.keys(meta.tables) : [];
+  return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
+}
 
 // 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
 // 只看备份内部：merge 拒绝任何年会 ID 冲突、overwrite 会先清空年会表，所以每条子记录引用的
@@ -213,6 +222,21 @@ export function findGalaFundingErrors(backupData) {
   for (const [eventId, total] of employeeBudget) {
     const cap = Number(events.get(eventId)?.total_budget || 0);
     if (cap > 0 && total > cap) errors.push(`gala_events#${eventId} 员工奖池预算合计 ${total} 超过活动总预算 ${cap}`);
+  }
+  // 与在线创建/修改奖池相同（GALA_MAX_POOLS_TOTAL）：同一活动员工奖池、预留奖池的预算合计各不超过安全整数的一半。
+  // 活动详情按 Number 汇总两类奖池的预算、已分配额和支出（支出不超过预算、已分配额不超过员工奖池预算），
+  // 这样所有汇总都仍是安全整数。用 BigInt 精确求和。
+  const budgetSum = new Map();
+  for (const p of pools.values()) {
+    if (!safeInt(p?.budget)) continue;
+    const key = `${Number(p?.event_id)}:${Number(p?.is_reserved) === 1 ? 1 : 0}`;
+    budgetSum.set(key, (budgetSum.get(key) || 0n) + BigInt(String(p.budget)));
+  }
+  for (const [key, total] of budgetSum) {
+    if (total > BigInt(GALA_MAX_POOLS_TOTAL)) {
+      const [eventId, reserved] = key.split(':');
+      errors.push(`gala_events#${eventId} 的${reserved === '1' ? '预留' : '员工'}奖池预算合计 ${total} 超过上限 ${GALA_MAX_POOLS_TOTAL}`);
+    }
   }
   // 员工奖池的已分配额（各轮 单价 × 抽签人数）不能超过预算：在线抽签按这个口径准入，
   // 也是非超管看到的账面，恢复出超额的数据会让公开账面为负。
@@ -419,9 +443,13 @@ export function findGalaFundingErrors(backupData) {
   // 与在线创建相同：同一活动同一环节，一个人只能有一个未取消的名额，且不能已在该环节中过奖。
   // 否则关闭“排除已中奖者”时两个名额都会兑现，或名额到时因已中奖而作废。
   const segmentWinners = new Set();
+  const segmentNormalWinners = new Set();
   for (const w of winnersList) {
     const r = rounds.get(Number(w?.round_id));
-    if (r) segmentWinners.add(`${Number(r.event_id)}:${r.segment}:${String(w?.userid)}`);
+    if (!r) continue;
+    const key = `${Number(r.event_id)}:${r.segment}:${String(w?.userid)}`;
+    segmentWinners.add(key);
+    if (Number(w?.is_reserved) !== 1) segmentNormalWinners.add(key);
   }
   // 轮次自身的排除规则：开启“排除本环节已中奖者”的一轮，中奖人不能在同一活动同一环节更早的轮次里中过奖。
   // 否则同一人会在恢复后两轮都拿到奖励，而在线抽签不可能产生这样的数据。
@@ -465,6 +493,10 @@ export function findGalaFundingErrors(backupData) {
     // 唯一性覆盖所有未取消的名额（含已使用）：两个已使用名额意味着同一人在同一环节拿了两次预留奖励。
     if ((liveSlotsByUser.get(key) || 0) > 1) {
       errors.push(`gala_reserved_slots#${slot?.id} 的持有人在同一活动同一环节还有别的未取消名额`);
+    } else if (status === 'used' && segmentNormalWinners.has(key)) {
+      // 在线抽签始终把持有未取消名额的人排除在普通候选之外（与排除开关无关），创建名额时也要求本环节没中过奖：
+      // 已用名额的持有人在本环节只能有那一条预留中奖记录。
+      errors.push(`gala_reserved_slots#${slot?.id} 已使用名额的持有人在同一活动同一环节还有普通中奖记录`);
     } else if (status === 'pending' && segmentWinners.has(key)) {
       errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人已在同一活动同一环节中过奖`);
     }
@@ -779,6 +811,8 @@ export function registerAdminBackupRoutes(router) {
           mode,
           filename,
           exportedAt: now.toISOString(),
+          // 含年会数据的全量格式：导入时要求六张年会表齐全（见 requiresGalaTables）。
+          ...(mode === 'full' ? { galaFormat: GALA_BACKUP_FORMAT } : {}),
           tables: Object.fromEntries(tables.map((t) => [t, data[t]?.length ?? 0])),
           secretsRedacted: true,
         },
@@ -932,11 +966,13 @@ export function registerAdminBackupRoutes(router) {
       }
     }
 
-    // 年会表晚于拍卖引入：旧备份可以一张都没有；只要含其中任意一张，就必须六张齐全，
+    // 年会表晚于拍卖引入：早于年会功能的旧备份可以一张都没有；只要含其中任意一张，就必须六张齐全，
     // 否则会恢复出有中奖记录却无奖池/活动、或有发放流水却无幂等记录的残缺账目。
+    // 新版全量格式（_meta.galaFormat，或 _meta.tables 里列了年会表）确知包含年会数据：整组缺失同样拒绝，
+    // 不能当成旧备份去覆盖清空在线的中奖记录和付款凭据。
     if (backupMode === 'full') {
       const present = GALA_BACKUP_TABLES.filter((t) => backupData[t.name] != null).map((t) => t.name);
-      if (present.length > 0 && present.length < GALA_BACKUP_TABLES.length) {
+      if ((present.length > 0 || requiresGalaTables(backup?._meta)) && present.length < GALA_BACKUP_TABLES.length) {
         const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
@@ -1387,6 +1423,7 @@ export function registerAdminBackupRoutes(router) {
           filename: recoveryFilename,
           exportedAt: stampDate.toISOString(),
           purpose: 'pre_import_recovery_point',
+          ...(backupMode === 'full' ? { galaFormat: GALA_BACKUP_FORMAT } : {}),
           importMode: mode,
           sourceFilename: requestedFilename || null,
           secretsRedacted: false,

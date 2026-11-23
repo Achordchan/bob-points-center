@@ -62,6 +62,18 @@ export const GALA_MAX_RESERVED_SLOTS = 3;
 // 年会表 ID 的上限：接口按 JS 安全整数解析 ID，序列的 MAXVALUE 也设为它（见 galaSchema），
 // 到上限时插入直接失败，而不是生成一个接口无法引用的记录。
 export const GALA_MAX_ROW_ID = Number.MAX_SAFE_INTEGER;
+// 同一活动员工奖池、预留奖池各自的预算合计上限（各占安全整数的一半）：活动详情把两类奖池的预算、已分配额、
+// 支出加在一起汇总，两类各不超过一半，合计就仍是安全整数。分开限制，员工奖池的报错不会透露预留奖池的存在。
+export const GALA_MAX_POOLS_TOTAL = Math.floor(Number.MAX_SAFE_INTEGER / 2);
+
+async function assertPoolsTotalSafe(tx, { eventId, reserved, excludePoolId = 0, nextBudget }) {
+  const row = await tx.get(
+    `SELECT (COALESCE(SUM(budget), 0)::numeric + ?::numeric) > ?::numeric AS over
+       FROM gala_pools WHERE event_id = ? AND is_reserved = ? AND id <> ?`,
+    [nextBudget, GALA_MAX_POOLS_TOTAL, eventId, reserved ? 1 : 0, excludePoolId],
+  );
+  if (row?.over === true || row?.over === 't') throw new GalaError('pools_total_too_large', 409);
+}
 // 公开的抽签人数上限：本轮可抽人数（名单 − 本环节已中奖者）至少要比抽签人数多出这么多人。
 // 取预留上限的两倍：被排除的预留对象最多 GALA_MAX_RESERVED_SLOTS 人，普通抽签一定能填满，
 // 且落选者里至少还有同样多的普通参与者，落选名单不会恰好等于预留对象。
@@ -428,6 +440,7 @@ export async function createGalaPool(db, { eventId, name, sponsor, budget, reser
   return await inTx(db, async (tx) => {
     const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
+    await assertPoolsTotalSafe(tx, { eventId: id, reserved, nextBudget: amount });
     if (!reserved && Number(event.total_budget) > 0) {
       const sum = await tx.get(
         'SELECT COALESCE(SUM(budget), 0) AS total FROM gala_pools WHERE event_id = ? AND is_reserved = 0',
@@ -476,6 +489,7 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
       const floor = Math.max(allocated, Number(pool.spent));
       if (nextBudget < floor) throw new GalaError('budget_below_allocated', 409, { allocated: floor });
     }
+    await assertPoolsTotalSafe(tx, { eventId: pool.event_id, reserved: reservedPool, excludePoolId: id, nextBudget });
     if (Number(pool.is_reserved) === 0 && Number(event?.total_budget) > 0) {
       const sum = await tx.get(
         'SELECT COALESCE(SUM(budget), 0) AS total FROM gala_pools WHERE event_id = ? AND is_reserved = 0 AND id <> ?',
@@ -864,16 +878,17 @@ function sameRound(a, b) {
 async function awardWinner(db, { winnerId, round, reason, generation }) {
   return await db.transaction(async (tx) => {
     // 先拿恢复互斥的共享锁并核对恢复代数：发放开始后若有过全量恢复，中奖记录 ID 可能已指向恢复后的另一条记录，
-    // 整次发放作废。之后再领取中奖记录、共享锁住本轮并核对轮次身份（兜底）。
+    // 整次发放作废。之后先共享锁住本轮并核对轮次身份（兜底），再领取中奖记录。
+    // 加锁顺序统一为「轮次 → 中奖记录」：失败回写、发放收尾、用户重置都按这个顺序，互相只会排队、不会死锁。
     await enterGalaWrite(tx, generation);
+    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [round.id]);
+    if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
         WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND amount > 0
         RETURNING id, event_id, userid, name_snapshot, pool_id, amount, is_reserved`,
       [winnerId, round.id],
     );
-    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [round.id]);
-    if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     if (!claimed) return { skipped: true };
     const amount = Number(claimed.amount);
     // 每一笔正数奖励都必须从同一活动、且类型一致的奖池扣减：普通中奖扣员工奖池，预留名额扣预留奖池。
@@ -1025,8 +1040,8 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   if (!pid) throw new GalaError('reserved_pool_required');
   // 锁活动行与抽签串行：避免抽签进行中插入的预留名额在该轮结束后才提交，变成永远用不到的悬挂名额。
   return await inTx(db, async (tx) => {
-    // 与用户重置串行（见 GALA_RESET_LOCK）：创建名额会同时把人加进名单，若夹在重置“删名单”和“取消名额”之间提交，
-    // 结果会是人还在名单、名额却被取消，与任何先后顺序都不符。
+    // 与用户重置串行（见 GALA_RESET_LOCK）：名额若夹在重置“删名单”和“取消名额”之间提交，
+    // 结果会与任何先后顺序都不符。
     await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
@@ -1034,6 +1049,11 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
     // 事务外读到的用户可能随后被删除或被全量恢复移除，那样插入会撞外键返回 500。
     const user = await tx.get('SELECT userid FROM users WHERE userid = ? FOR KEY SHARE', [uid]);
     if (!user) throw new GalaError('user_not_found', 404);
+    // 预留对象必须先按普通流程进入名单（例如随整批导入一起加入）：创建名额本身不改动公开名单，
+    // 否则名单里单独多出一个人、带着入场时间，普通管理员一眼就能对上预留对象。
+    // 活动行已锁，移出名单（同样先锁活动行）不会在核对之后、名额写入之前插进来。
+    const enrolled = await tx.get('SELECT 1 AS x FROM gala_participants WHERE event_id = ? AND userid = ?', [id, uid]);
+    if (!enrolled) throw new GalaError('participant_required', 409);
     // 奖池在同一事务里、锁住活动之后再核对（并共享锁住，直到名额写入）：事务外读到的奖池可能已被恢复替换成
     // 别的活动或员工奖池，名额写进去要到发放时才失败。
     const pool = await tx.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1 FOR SHARE', [pid, id]);
@@ -1070,14 +1090,6 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
       `INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, amount, note, created_by)
        VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       [id, seg, no, uid, pid, 0, cleanText(note, 200) || null, actor.userid || null],
-    );
-    // 预留对象作为普通参与者真实写入名单：中奖时一定在名单上，名单的增删、计数对所有人都一致，
-    // 看不出谁是预留对象。普通抽签照样排除有未取消名额的人。
-    await tx.run(
-      `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
-       SELECT ?, u.userid, COALESCE(NULLIF(u.name, ''), u.userid), 'admin' FROM users u WHERE u.userid = ?
-       ON CONFLICT (event_id, userid) DO NOTHING`,
-      [id, uid],
     );
     return serializeSlot(row);
   }, expectedVersion);

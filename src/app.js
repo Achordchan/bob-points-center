@@ -33,7 +33,9 @@ export function shouldStartDingtalkStream(cfg) {
   );
 }
 
-export function createApp({ db, cfg } = {}) {
+// backgroundJobs=false：只挂路由，不启动商城/竞拍调度和钉钉 Stream、签到对账、通讯录同步。
+// 供本地集成测试用开发配置起一个应用，而不处理真实事件、不结算共享开发库里的活动。
+export function createApp({ db, cfg, backgroundJobs = true } = {}) {
   const app = express();
   if (cfg?.trustProxy) {
     // 仅在配置信任反代时启用；配合 clientIp 工具只读 XFF。
@@ -170,6 +172,8 @@ export function createApp({ db, cfg } = {}) {
   app.use('/users', usersRouter());
   app.use('/qr', qrImageRouter());
   app.use(docsRouter());
+
+  if (!backgroundJobs) return app;
 
   startMallOpeningScheduler({ db, cfg });
   startAuctionSettleScheduler({ db, cfg });

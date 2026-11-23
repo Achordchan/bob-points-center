@@ -52,9 +52,17 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   // 这里拿排他锁。抽签先拿到，清理等它提交后再删除新写入的未发放中奖记录；清理先拿到，抽签等清理提交后
   // 才读参与者，此时目标用户已不在名单里。用全局锁而不是锁活动行：清理开始后才创建的活动也被覆盖。
   await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
-  // 年会发币顺序是「中奖记录 → 奖池 → 账户」，这里同样先锁未发放的中奖记录再锁账户：
+  // 年会发币的加锁顺序是「轮次 → 中奖记录 → 奖池 → 账户」，这里同样先锁涉及的轮次（排他：等进行中的到账、
+  // 失败回写、收尾都提交，之后它们排在清理后面），再锁未发放的中奖记录、再锁账户：
   // 并发发币要么在清理前完成（随后流水被删、余额清零），要么等清理提交后发现记录已删除而跳过，
-  // 不会给已重置的账户补发旧奖励。
+  // 不会给已重置的账户补发旧奖励。抽签已被上面的排他锁挡住，期间不会出现新的待发记录。
+  await tx.all(
+    `SELECT id FROM gala_rounds
+      WHERE id IN (SELECT round_id FROM gala_round_winners WHERE userid IN (${placeholders}) AND awarded_at IS NULL)
+      ORDER BY id
+      FOR UPDATE`,
+    targets,
+  );
   await tx.all(
     `SELECT id FROM gala_round_winners
       WHERE userid IN (${placeholders}) AND awarded_at IS NULL
@@ -104,8 +112,8 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   );
   counts.gala_round_winners_unawarded = purgedWinners.length;
   // 删掉的可能正是某轮最后一笔待发奖励：与发放收尾同一口径（没有待发的正数奖励即整轮完成），在同一事务里补标完成。
-  // 与发放收尾互不遗漏：收尾先锁住轮次时它还能看到这里未提交删除的记录、不标完成，由这里补标；
-  // 这里先锁住时收尾等这里提交后再数，状态已是 granted，条件更新不再生效。
+  // 这些轮次在开头已被这里排他锁住，进行中的到账都已提交、新的到账在等这里，所以下面这条语句的快照
+  // 就是最终的待发状态；之后的发放收尾等这里提交后再数，状态已是 granted，条件更新不再生效。
   const touchedRounds = [...new Set(purgedWinners.filter((w) => Number(w.amount) > 0).map((w) => Number(w.round_id)))]
     .sort((a, b) => a - b);
   counts.gala_rounds_completed = 0;

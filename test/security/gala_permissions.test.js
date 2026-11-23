@@ -676,3 +676,50 @@ test('年会备份：开启排除已中奖者的一轮，中奖人不能在同�
   otherSeg.gala_rounds[1].round_no = 1;
   assert.deepEqual(findGalaFundingErrors(otherSeg), []);
 });
+
+test('年会备份：已用名额的持有人在同一环节不能再有普通中奖记录（与排除开关无关）', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 2, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', exclude_previous_winners: 0 },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 10, pool_id: 2, is_reserved: 1, awarded_at: null },
+      { id: 2, round_id: 2, event_id: 1, userid: 'k', amount: 10, pool_id: 1, is_reserved: 0, awarded_at: null },
+    ],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 1 }],
+    ledger: [],
+  });
+  const errors = findGalaFundingErrors(snap());
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('普通中奖记录')), errors.join('\n'));
+  const ok = snap();
+  ok.gala_round_winners[1].userid = 'u';
+  assert.deepEqual(findGalaFundingErrors(ok), []);
+});
+
+test('年会备份：同一活动员工、预留奖池的预算合计各不超过安全整数的一半', () => {
+  const snap = (budgets) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: budgets.map((b, i) => ({ id: i + 1, event_id: 1, is_reserved: 0, budget: b, spent: 0 })),
+    gala_participants: [],
+    gala_rounds: [],
+    gala_round_winners: [],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  const half = Math.floor(Number.MAX_SAFE_INTEGER / 2);
+  assert.deepEqual(findGalaFundingErrors(snap([half - 2, 2])), []);
+  assert.ok(findGalaFundingErrors(snap([half, 1])).some((e) => e.includes('奖池预算合计')));
+  assert.ok(findGalaFundingErrors(snap([Number.MAX_SAFE_INTEGER, 2])).some((e) => e.includes('奖池预算合计')));
+});
+
+test('含年会数据的全量备份格式：缺整组年会表不能当成旧备份', async () => {
+  const { requiresGalaTables, GALA_BACKUP_FORMAT } = await import('../../src/routes/admin/backupRoutes.js');
+  assert.equal(requiresGalaTables({ version: 2, galaFormat: GALA_BACKUP_FORMAT }), true);
+  assert.equal(requiresGalaTables({ version: 2, tables: { users: 1, gala_events: 0 } }), true);
+  assert.equal(requiresGalaTables({ version: 2, tables: { users: 1, ledger: 3 } }), false);
+  assert.equal(requiresGalaTables({ version: 1 }), false);
+});
