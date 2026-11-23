@@ -51,11 +51,11 @@ export function requiresGalaTables(meta) {
 
 // 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数，返回错误描述列表：
 // - _meta.tables 列出的每张表，数组长度都必须与记录一致（被截短的账户、流水、名单等都会被发现）；
-// - required 里的表必须有行数记录（默认六张年会表和流水；覆盖导入传入全部全量表）。
+// - required 里的表必须有行数记录（默认六张年会表、流水和账户；覆盖导入传入全部全量表）。
 // 流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态；账户被截短时，覆盖会清掉已到账的余额，
 // 而中奖记录仍是已发放，重试发币也不会补回。导出前已重置的用户不受影响：那时记录的行数本来就不含已删数据。
 // 旧格式备份不检查。
-export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger'] } = {}) {
+export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'] } = {}) {
   if (meta?.galaFormat == null) return [];
   const listed = meta?.tables && typeof meta.tables === 'object' ? meta.tables : {};
   const errors = [];
@@ -239,6 +239,18 @@ export function findGalaFundingErrors(backupData) {
     const linked = ledgerById.get(Number(w.ledger_id));
     if (linked && galaPayoutWinnerId(linked) !== Number(w.id)) {
       errors.push(`gala_round_winners#${w.id} 的 ledger_id ${w.ledger_id} 指向的不是它自己的发放流水`);
+    }
+  }
+  // 已发放、付款流水也在备份里的奖励，收款人的账户必须同在这份备份里：导入按备份覆盖账户余额，
+  // 同一次导出的余额本就含这笔奖励。缺了账户时（例如只挑了年会表和流水的部分备份做合并），
+  // 目标库的余额不会因为导入这条流水而增加，awarded_at 却已挡住补发，等于流水显示已付、钱没到账。
+  // 无法确认余额是否含这笔奖励，就拒绝导入，而不是盲目补加。
+  const accountUsers = new Set(asList(backupData?.accounts).map((a) => String(a?.userid)));
+  for (const w of winnersList) {
+    if (w?.awarded_at == null || w?.ledger_id == null || !(Number(w.amount) > 0)) continue;
+    if (!ledgerById.has(Number(w.ledger_id))) continue;
+    if (!accountUsers.has(String(w.userid))) {
+      errors.push(`gala_round_winners#${w.id} 已发放且付款流水在备份里，但备份缺少收款人 ${w.userid} 的账户，无法确认余额已含这笔奖励`);
     }
   }
 

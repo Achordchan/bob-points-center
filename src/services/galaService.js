@@ -111,9 +111,11 @@ function toNonNegativeInt(value) {
 
 // 按完整 Unicode 字符截断：按 UTF-16 码元截断可能留下半个代理对，写库时被替换成 U+FFFD，
 // 与内存里的值不再相等（例如抽签重试比较标题时）。
+// 文本先规范成数据库能原样存回的形式，再比较和截断：孤立的 UTF-16 代理码元（例如客户端按码元截断 emoji 留下的半个）
+// 写入 PostgreSQL 会变成 U+FFFD，NUL 字符则无法写入。不先规范，重试抽签时库里的标题与请求对不上，会被当成另一轮。
 function cleanText(value, max = MAX_TITLE_LENGTH) {
   if (value === null || value === undefined) return '';
-  const text = String(value).trim();
+  const text = String(value).toWellFormed().replace(/\u0000/g, '').trim();
   if (text.length <= max) return text;
   return Array.from(text).slice(0, max).join('');
 }
@@ -633,23 +635,33 @@ export async function removeGalaParticipant(db, { eventId, userid, expectedVersi
   }, expectedVersion);
 }
 
-export async function listGalaParticipants(db, { eventId, includeReserved = false }) {
+// 按名单记录 id 升序分页：传上一页最后一条的 id 作为 after_id 取下一页，返回条数少于 limit 即已到末页。
+// 全员导入不受显式名单上限约束，名单可能很大，不一次读出整份。
+const MAX_PARTICIPANT_PAGE = 500;
+export async function listGalaParticipants(db, { eventId, includeReserved = false, afterId = null, limit = MAX_PARTICIPANT_PAGE }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  // 名单与数据版本在同一个快照里读：移出名单要带回这个版本。
+  const hasAfter = afterId !== null && afterId !== undefined && afterId !== '';
+  const after = hasAfter ? toPositiveId(afterId) : 0;
+  if (hasAfter && !after) throw new GalaError('invalid_after_id');
+  const rawLimit = limit === null || limit === undefined || limit === '' ? MAX_PARTICIPANT_PAGE : toPositiveId(limit);
+  if (!rawLimit) throw new GalaError('invalid_limit');
+  const pageSize = Math.min(rawLimit, MAX_PARTICIPANT_PAGE);
+  // 每页的名单与数据版本在同一个快照里读：移出名单要带回这个版本。
   const { rows, version } = await inSnapshot(db, async (snap) => ({
     rows: await snap.all(
-      // 预留状态只给超管，普通视图不做这次逐人子查询。
-      `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at${includeReserved ? `,
+      // 预留状态只给超管，普通视图不做这次逐人子查询。走 (event_id, id) 索引。
+      `SELECT p.id, p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at${includeReserved ? `,
               EXISTS (SELECT 1 FROM gala_reserved_slots s
                        WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved` : ''}
-         FROM gala_participants p WHERE p.event_id = ? ORDER BY p.id`,
-      [id],
+         FROM gala_participants p WHERE p.event_id = ? AND p.id > ? ORDER BY p.id LIMIT ?`,
+      [id, after, pageSize],
     ),
     version: await readGalaVersion(snap),
   }));
   return rows.map((r) => {
     const out = {
+      id: Number(r.id),
       userid: r.userid,
       name: r.name_snapshot || r.userid,
       table_no: r.table_no === null ? null : Number(r.table_no),

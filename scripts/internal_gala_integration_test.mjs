@@ -503,6 +503,45 @@ async function main() {
         console.log('✓ 标题按完整字符截断，含 emoji 的抽签重试仍返回原轮次；创建活动返回数据版本');
       }
 
+      // 标题带孤立代理码元（客户端按 UTF-16 截断 emoji 留下半个）：先规范成库里能原样存回的形式，重试仍是同一轮
+      {
+        const evL = await createGalaEvent(db, { title: `${PREFIX} 半个表情`, totalBudget: 0 });
+        await addGalaParticipants(db, { eventId: evL.id, userids: [uid(1), uid(2)] });
+        await addFiller(db, evL.id);
+        const title = `第一轮\uD83D`;
+        const args = { eventId: evL.id, segment: 'lottery', drawCount: 1, title, expectedRoundNo: 1 };
+        const first = await drawGalaRound(db, args);
+        assert.equal(first.round.title, '第一轮\uFFFD');
+        const stored = await db.get('SELECT title FROM gala_rounds WHERE id = ?', [first.round.id]);
+        assert.equal(stored.title, '第一轮\uFFFD');
+        const again = await drawGalaRound(db, args);
+        assert.equal(again.replayed, true);
+        assert.equal(Number(again.round.id), Number(first.round.id));
+        console.log('✓ 标题含孤立代理码元时先规范化，抽签重试仍返回原轮次');
+      }
+
+      // 参与名单按 id 游标分页：逐页拼起来等于整份名单，每页都带同一快照的数据版本
+      {
+        const evP = await createGalaEvent(db, { title: `${PREFIX} 分页`, totalBudget: 0 });
+        await addGalaParticipants(db, { eventId: evP.id, userids: [uid(1), uid(2), uid(3), uid(4), uid(5)] });
+        const all = [];
+        let after = null;
+        for (;;) {
+          // eslint-disable-next-line no-await-in-loop
+          const page = await listGalaParticipants(db, { eventId: evP.id, afterId: after, limit: 2 });
+          assert.ok(page.length <= 2);
+          all.push(...page);
+          if (page.length < 2) break;
+          after = page[page.length - 1].id;
+        }
+        assert.deepEqual(all.map((x) => x.userid), [uid(1), uid(2), uid(3), uid(4), uid(5)]);
+        assert.ok(all.every((x) => Number.isSafeInteger(x.id) && x.gala_version === evP.gala_version));
+        await assert.rejects(listGalaParticipants(db, { eventId: evP.id, afterId: 'x' }), (e) => e.code === 'invalid_after_id');
+        await assert.rejects(listGalaParticipants(db, { eventId: evP.id, limit: 0 }), (e) => e.code === 'invalid_limit');
+        assert.equal((await listGalaParticipants(db, { eventId: evP.id, limit: 100000 })).length, 5, '超过上限按上限取');
+        console.log('✓ 参与名单按 id 游标分页，逐页拼起来等于整份名单');
+      }
+
       // 最后一笔到账与整轮完成在同一事务：模拟到账提交后、发放收尾之前进程退出（不调用收尾）
       {
         const evK = await createGalaEvent(db, { title: `${PREFIX} 中断`, totalBudget: 0 });
@@ -1392,8 +1431,9 @@ async function realRestoreChecks(cfg) {
     const now = Math.floor(Date.now() / 1000);
     const bad = structuredClone(b0);
     for (const k of Object.keys(bad.data)) {
-      if (!['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'].includes(k)) delete bad.data[k];
+      if (!['ledger', 'accounts', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'].includes(k)) delete bad.data[k];
     }
+    bad.data.accounts = [];
     bad.data.ledger = [{ id: 7900000000000001, userid: pend.userid, delta: Number(pend.amount), reason: '年会奖励·抽奖·第1轮', ref_id: `GALA_W${pend.id}`, created_at: now + 10 }];
     bad.data.gala_events = [{ ...b0.data.gala_events[0], id: 990001, title: 'RT 合并' }];
     bad.data.gala_pools = [{ ...b0.data.gala_pools[0], id: 990001, event_id: 990001, budget: 10, spent: 10 }];
@@ -1445,6 +1485,22 @@ async function realRestoreChecks(cfg) {
       assert.ok(JSON.stringify(r.body).includes('不属于它的流水'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before2);
       await tdb.run('DELETE FROM ledger WHERE id = ?', [old.id]);
+    }
+    // 2b') 合并带入已发放奖励和它的付款流水、却没带收款人账户：余额不会增加而补发已被挡住，拒绝导入
+    {
+      const noAcc = structuredClone(bad);
+      noAcc.data.ledger = [{ id: 7900000000000003, userid: users[0], delta: 10, reason: '年会奖励·抽奖·第1轮', ref_id: 'GALA_W990003', created_at: now + 5 }];
+      noAcc.data.gala_events = [{ ...bad.data.gala_events[0], id: 990003, title: 'RT 无账户' }];
+      noAcc.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990003, event_id: 990003 }];
+      noAcc.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990003, event_id: 990003, pool_id: 990003 }];
+      noAcc.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990003, round_id: 990003, event_id: 990003, pool_id: 990003, ledger_id: 7900000000000003, created_at: now }];
+      noAcc.data.accounts = [];
+      recount(noAcc);
+      const before4 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: noAcc, mode: 'merge' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('缺少收款人'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before4);
     }
     // 2c) 当前格式的覆盖导入：年会表被截短（名单变成空数组）时拒绝，不恢复出残缺的活动
     {
