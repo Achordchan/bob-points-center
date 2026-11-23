@@ -21,7 +21,7 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
-import { GALA_DRAW_SEGMENTS, GALA_SEGMENTS } from '../../services/galaService.js';
+import { GALA_DRAW_SEGMENTS, GALA_MAX_RESERVED_SLOTS, GALA_SEGMENTS } from '../../services/galaService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
 const GALA_BACKUP_TABLES = [
@@ -156,6 +156,42 @@ export function findGalaFundingErrors(backupData) {
     const cap = Number(events.get(eventId)?.total_budget || 0);
     if (cap > 0 && total > cap) errors.push(`gala_events#${eventId} 员工奖池预算合计 ${total} 超过活动总预算 ${cap}`);
   }
+  // 员工奖池的已分配额（各轮 单价 × 抽签人数）不能超过预算：在线抽签按这个口径准入，
+  // 也是非超管看到的账面，恢复出超额的数据会让公开账面为负。
+  const allocated = new Map();
+  for (const r of rounds.values()) {
+    if (r?.pool_id == null) continue;
+    const key = Number(r.pool_id);
+    allocated.set(key, (allocated.get(key) || 0) + Number(r?.amount_each || 0) * Number(r?.draw_count || 0));
+  }
+  for (const [poolId, total] of allocated) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool?.is_reserved) !== 1 && total > Number(pool?.budget || 0)) {
+      errors.push(`gala_pools#${poolId} 的已分配额 ${total} 超过预算 ${Number(pool?.budget || 0)}`);
+    }
+  }
+  // 每轮中奖人数不能超过抽签人数：用户重置会删掉未发放的记录，所以少于可以，多于不行。
+  const winnersPerRound = new Map();
+  for (const w of winnersList) {
+    const key = Number(w?.round_id);
+    winnersPerRound.set(key, (winnersPerRound.get(key) || 0) + 1);
+  }
+  for (const [roundId, n] of winnersPerRound) {
+    const round = rounds.get(roundId);
+    if (round && n > Number(round?.draw_count || 0)) {
+      errors.push(`gala_rounds#${roundId} 有 ${n} 条中奖记录，超过抽签人数 ${Number(round?.draw_count || 0)}`);
+    }
+  }
+  // 与在线创建相同：每场活动未取消的预留名额不超过上限。
+  const slotsPerEvent = new Map();
+  for (const sl of asList(backupData?.gala_reserved_slots)) {
+    if ((sl?.status ?? 'pending') === 'cancelled') continue;
+    const key = Number(sl?.event_id);
+    slotsPerEvent.set(key, (slotsPerEvent.get(key) || 0) + 1);
+  }
+  for (const [eventId, n] of slotsPerEvent) {
+    if (n > GALA_MAX_RESERVED_SLOTS) errors.push(`gala_events#${eventId} 有 ${n} 个未取消的预留名额，超过上限 ${GALA_MAX_RESERVED_SLOTS}`);
+  }
 
   const usedSlots = asList(backupData?.gala_reserved_slots).filter((sl) => sl?.status === 'used');
   // 已发奖励必须已计入奖池支出，否则恢复后奖池还能再发一遍。
@@ -183,6 +219,8 @@ export function findGalaFundingErrors(backupData) {
     // 否则残缺备份可以凭空恢复出一笔预留奖励，发给错误的人或错误的金额。
     if (reserved) {
       const match = usedSlots.some((sl) => Number(sl.used_round_id) === Number(w.round_id)
+        && String(sl.segment) === String(round.segment)
+        && Number(sl.round_no) === Number(round.round_no)
         && String(sl.userid) === String(w.userid)
         && (sl.pool_id == null ? null : Number(sl.pool_id)) === (w.pool_id == null ? null : Number(w.pool_id))
         && Number(sl.amount || 0) === Number(w.amount || 0));
@@ -236,6 +274,8 @@ export function findGalaFundingErrors(backupData) {
       const used = rounds.get(Number(slot.used_round_id));
       if (!used || Number(used.event_id) !== Number(slot.event_id)) {
         errors.push(`gala_reserved_slots#${slot?.id} 引用的轮次 ${slot.used_round_id} 不在备份的同一活动中`);
+      } else if (String(used.segment) !== String(slot?.segment) || Number(used.round_no) !== Number(slot?.round_no)) {
+        errors.push(`gala_reserved_slots#${slot?.id} 预定的是 ${slot?.segment} 第 ${slot?.round_no} 轮，却记在轮次 ${used.id}（${used.segment} 第 ${used.round_no} 轮）上`);
       }
     }
   }
@@ -2546,19 +2586,17 @@ export function registerAdminBackupRoutes(router) {
               [],
               'ledger sequence bump',
             );
-            // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水：
-            // 合并后逐条核对，指向的流水若存在，ref_id 必须正是这条中奖记录。
-            const winnerIds = (requireArray('gala_round_winners') || []).map((r) => Number(r?.id)).filter((n) => n > 0);
-            if (winnerIds.length) {
-              const mismatched = await tx.all(
-                `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
-                  WHERE w.id = ANY(?::bigint[]) AND l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
-                  ORDER BY w.id LIMIT 20`,
-                [winnerIds],
-              );
-              if (mismatched.length) {
-                throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
-              }
+            // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水。
+            // 导入后对整张表核对，而不只是本次导入的中奖记录：备份里一条无关流水也可能恰好占用目标库
+            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录。
+            const mismatched = await tx.all(
+              `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+                WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
+                ORDER BY w.id LIMIT 20`,
+              [],
+            );
+            if (mismatched.length) {
+              throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
             }
           }
         }

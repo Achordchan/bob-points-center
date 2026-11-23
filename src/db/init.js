@@ -764,6 +764,21 @@ export async function initDb(input) {
   await db.exec(schemaSql);
   await db.exec(galaSchemaSql);
   // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
+  // 早期建出的 gala_rounds 没有 public_granted_at：补列（幂等），并为已经发放过的轮次回填，
+  // 否则发币会在更新公开状态时失败，且重试一直卡在同一步。
+  await db.exec(`DO $$ BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'gala_rounds' AND column_name = 'public_granted_at'
+    ) THEN
+      ALTER TABLE gala_rounds ADD COLUMN public_granted_at BIGINT;
+      UPDATE gala_rounds r SET public_granted_at = COALESCE(r.granted_at, EXTRACT(EPOCH FROM now())::BIGINT)
+       WHERE (r.granted_at IS NOT NULL
+              OR EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NOT NULL))
+         AND NOT EXISTS (SELECT 1 FROM gala_round_winners w
+                          WHERE w.round_id = r.id AND w.is_reserved = 0 AND w.awarded_at IS NULL AND w.amount > 0);
+    END IF;
+  END $$`);
   await db.exec(`DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_gala_round_winners_reserved') THEN
       ALTER TABLE gala_round_winners ADD CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1));

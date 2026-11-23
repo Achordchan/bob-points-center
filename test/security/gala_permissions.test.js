@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matchPathPermission } from '../../src/services/adminPermissionService.js';
-import { pickRandom } from '../../src/services/galaService.js';
+import { GALA_MAX_RESERVED_SLOTS, pickRandom } from '../../src/services/galaService.js';
 import { findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
 
 test('年会预留名额与预留奖池只允许超级管理员', () => {
@@ -67,9 +67,9 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
 test('年会备份资金关系校验：未发放奖励必须挂在同一活动、类型一致的奖池上', () => {
   const base = {
     gala_events: [{ id: 10, total_budget: 0 }, { id: 20, total_budget: 0 }],
-    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 100, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
+    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 500, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
     gala_participants: [{ id: 1, event_id: 10 }],
-    gala_rounds: [{ id: 5, event_id: 10, pool_id: 1, prize_type: 'coin', amount_each: 50 }, { id: 6, event_id: 10, pool_id: null, prize_type: 'none', amount_each: 0 }],
+    gala_rounds: [{ id: 5, event_id: 10, segment: 'lottery', round_no: 1, draw_count: 10, pool_id: 1, prize_type: 'coin', amount_each: 50 }, { id: 6, event_id: 10, segment: 'game', round_no: 1, draw_count: 1, pool_id: null, prize_type: 'none', amount_each: 0 }],
     gala_round_winners: [
       { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
       { id: 2, round_id: 6, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
@@ -134,7 +134,7 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
     gala_round_winners: [{ id: 11, round_id: 1, event_id: 1, amount: 10, pool_id: 1, awarded_at: null }],
     gala_reserved_slots: [],
     ledger: [{ id: 1, ref_id: 'GALA_W11' }, { id: 2, ref_id: 'GALA_W12' }],
@@ -152,7 +152,7 @@ test('年会备份逐笔核对：流水收款人/金额/ledger_id、重复流水
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 20 }, { id: 2, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
     gala_round_winners: [
       { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 101 },
       { id: 2, round_id: 1, event_id: 1, userid: 'b', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 102 },
@@ -191,7 +191,7 @@ test('年会备份：金额精度、预留标记取值、已发放凭据与错�
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
     gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 55 }],
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, amount: 5, status: 'pending' }],
     ledger: [],
@@ -248,7 +248,7 @@ test('年会备份：预留中奖记录必须对应已使用的预留名额', ()
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, prize_type: 'none', amount_each: 0 }],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'none', amount_each: 0 }],
     gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 8, pool_id: 1, is_reserved: 1, awarded_at: null }],
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 1, status: 'used', used_round_id: 1 }],
   });
@@ -258,9 +258,47 @@ test('年会备份：预留中奖记录必须对应已使用的预留名额', ()
     (x) => { x.gala_round_winners[0].userid = 'someone'; },
     (x) => { x.gala_round_winners[0].amount = 80; },
     (x) => { x.gala_reserved_slots[0].status = 'cancelled'; },
+    // 名额预定的是第 2 轮，却挂在第 1 轮上
+    (x) => { x.gala_reserved_slots[0].round_no = 2; },
+    (x) => { x.gala_reserved_slots[0].segment = 'game'; },
   ]) {
     const snap = ok();
     mutate(snap);
     assert.ok(findGalaFundingErrors(snap).some((e) => e.includes('找不到对应的已使用预留名额')), JSON.stringify(snap.gala_round_winners));
   }
+});
+
+test('年会备份：每轮中奖人数不超过抽签人数、已分配额不超预算、预留名额不超上限', () => {
+  const ok = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: null },
+      { id: 2, round_id: 1, event_id: 1, userid: 'b', amount: 10, pool_id: 1, awarded_at: null },
+    ],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(ok()), []);
+
+  const extra = ok();
+  extra.gala_round_winners.push({ id: 3, round_id: 1, event_id: 1, userid: 'c', amount: 10, pool_id: 1, awarded_at: null });
+  assert.ok(findGalaFundingErrors(extra).some((e) => e.startsWith('gala_rounds#1') && e.includes('超过抽签人数')));
+
+  // 用户重置后少于抽签人数是正常的
+  const fewer = ok();
+  fewer.gala_round_winners.pop();
+  assert.deepEqual(findGalaFundingErrors(fewer), []);
+
+  const over = ok();
+  over.gala_rounds[0].draw_count = 3;
+  assert.ok(findGalaFundingErrors(over).some((e) => e.startsWith('gala_pools#1') && e.includes('已分配额')));
+
+  const many = ok();
+  for (let i = 1; i <= GALA_MAX_RESERVED_SLOTS + 1; i += 1) {
+    many.gala_reserved_slots.push({ id: i, event_id: 1, segment: 'game', round_no: i, userid: `k${i}`, amount: 0, status: 'pending' });
+  }
+  assert.ok(findGalaFundingErrors(many).some((e) => e.startsWith('gala_events#1') && e.includes('预留名额')));
 });

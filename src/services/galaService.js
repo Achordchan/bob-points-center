@@ -7,8 +7,11 @@
 // - 预留名额占本轮一个名额（抽 N 人时普通抽 N-1 人），奖励只能来自预留奖池，不占员工预算；
 //   被预留的人不参与本活动的正常抽签。预留信息只对超级管理员返回，非超管视图里不出现任何能认出
 //   预留对象的逐人信息（金额、发放状态、失败名单、排除后的候选人数）。
-//   已知边界：员工奖池的支出、发放失败数量等汇总值，在特殊情况下可能让操作者推断出“本轮有预留”，
-//   但推断不出是谁。
+//   员工奖池对非超管只公开“已分配额”（每轮 单价 × 抽签人数，与是否含预留无关），不公开实际支出；
+//   抽签准入只看公开量（名单人数、已中奖人数、已分配额），返回结果不随是否有预留而变化。
+//   已知边界：预留对象在其预留轮次之前不会在普通抽签中中奖，这是“预留”本身的统计特征，无法消除；
+//   每场活动预留名额有上限，抽签后至少留出 GALA_DRAW_HEADROOM 名未中签候选人，
+//   保证任何一次抽签都不会“恰好抽走除预留对象外的所有人”。
 import crypto from 'node:crypto';
 import { grantBob } from './ledgerService.js';
 
@@ -51,6 +54,13 @@ function normalizeEnabledSegments(input) {
 
 const EVENT_STATUSES = new Set(['draft', 'live', 'ended']);
 const MAX_DRAW_COUNT = 100;
+const PG_INT_MAX = 2147483647;
+// 每场活动最多保留的预留名额（待用 + 已用）。
+export const GALA_MAX_RESERVED_SLOTS = 3;
+// 公开的抽签人数上限：本轮可抽人数（名单 − 本环节已中奖者）至少要比抽签人数多出这么多人。
+// 取预留上限的两倍：被排除的预留对象最多 GALA_MAX_RESERVED_SLOTS 人，普通抽签一定能填满，
+// 且落选者里至少还有同样多的普通参与者，落选名单不会恰好等于预留对象。
+export const GALA_DRAW_HEADROOM = GALA_MAX_RESERVED_SLOTS * 2;
 const MAX_TITLE_LENGTH = 80;
 
 export class GalaError extends Error {
@@ -62,14 +72,24 @@ export class GalaError extends Error {
   }
 }
 
-function toPositiveId(value) {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
+// 只接受数字或纯十进制数字串；布尔值、数组、空串、科学计数法等一律视为非法，不做隐式转换。
+function toStrictInt(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+function toPositiveId(value, max = Number.MAX_SAFE_INTEGER) {
+  const n = toStrictInt(value);
+  return n !== null && n > 0 && n <= max ? n : null;
 }
 
 function toNonNegativeInt(value) {
-  const n = Number(value);
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  const n = toStrictInt(value);
+  return n !== null && n >= 0 ? n : null;
 }
 
 function cleanText(value, max = MAX_TITLE_LENGTH) {
@@ -115,19 +135,35 @@ function serializeEvent(row) {
   };
 }
 
-function serializePool(row) {
+// 员工奖池对外的“已分配额”= 各轮 单价 × 抽签人数。预留名额占一个名额但从预留奖池出钱，
+// 实际支出因此会比已分配额少一份；只公开已分配额，账面就与是否有预留无关。实际支出只给超管。
+function serializePool(row, { allocated = 0, includeReserved = false } = {}) {
   const budget = Number(row.budget || 0);
   const spent = Number(row.spent || 0);
-  return {
+  const base = {
     id: Number(row.id),
     event_id: Number(row.event_id),
     name: row.name,
     sponsor: row.sponsor || '',
     budget,
-    spent,
-    remaining: budget - spent,
-    is_reserved: Number(row.is_reserved) === 1 ? 1 : 0,
   };
+  if (Number(row.is_reserved) === 1) return { ...base, spent, remaining: budget - spent, is_reserved: 1 };
+  const out = { ...base, allocated, remaining: budget - allocated, is_reserved: 0 };
+  if (includeReserved) out.spent = spent;
+  return out;
+}
+
+async function allocatedByPool(db, poolIds) {
+  const ids = poolIds.map(Number).filter((n) => n > 0);
+  const map = new Map();
+  if (ids.length === 0) return map;
+  const rows = await db.all(
+    `SELECT pool_id, COALESCE(SUM(amount_each * draw_count), 0) AS n
+       FROM gala_rounds WHERE pool_id = ANY(?::bigint[]) GROUP BY pool_id`,
+    [ids],
+  );
+  for (const r of rows) map.set(Number(r.pool_id), Number(r.n || 0));
+  return map;
 }
 
 // 非超管视图不带任何逐人的发放信息（金额、是否已发、失败原因、奖池）。预留名额的金额、奖池、
@@ -258,16 +294,19 @@ export async function getGalaEventDetail(db, { eventId, includeReserved = false 
        (SELECT COUNT(*) FROM gala_rounds WHERE event_id = ?) AS rounds`,
     [id, id],
   );
-  const visiblePools = pools.map(serializePool);
+  const allocated = await allocatedByPool(db, pools.filter((p) => Number(p.is_reserved) === 0).map((p) => p.id));
+  const visiblePools = pools.map((p) => serializePool(p, { allocated: allocated.get(Number(p.id)) || 0, includeReserved }));
   const publicPools = visiblePools.filter((p) => p.is_reserved === 0);
+  const budgetSummary = {
+    total_budget: Number(event.total_budget || 0),
+    pools_budget: publicPools.reduce((s, p) => s + p.budget, 0),
+    pools_allocated: publicPools.reduce((s, p) => s + p.allocated, 0),
+  };
+  if (includeReserved) budgetSummary.pools_spent = publicPools.reduce((s, p) => s + p.spent, 0);
   return {
     ...serializeEvent(event),
     pools: visiblePools,
-    budget_summary: {
-      total_budget: Number(event.total_budget || 0),
-      pools_budget: publicPools.reduce((s, p) => s + p.budget, 0),
-      pools_spent: publicPools.reduce((s, p) => s + p.spent, 0),
-    },
+    budget_summary: budgetSummary,
     participant_count: Number(counts?.participants || 0),
     round_count: Number(counts?.rounds || 0),
   };
@@ -299,7 +338,7 @@ export async function createGalaPool(db, { eventId, name, sponsor, budget, reser
        VALUES(?, ?, ?, ?, ?) RETURNING *`,
       [id, cleanName, cleanText(sponsor, 40) || null, amount, reserved ? 1 : 0],
     );
-    return serializePool(row);
+    return serializePool(row, { includeReserved: reserved });
   });
 }
 
@@ -316,7 +355,15 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
     if (!pool || (Number(pool.is_reserved) === 1 && !allowReserved)) throw new GalaError('pool_not_found', 404);
     const nextBudget = budget === undefined ? Number(pool.budget) : toNonNegativeInt(budget);
     if (nextBudget === null) throw new GalaError('invalid_budget');
-    if (nextBudget < Number(pool.spent)) throw new GalaError('budget_below_spent', 409, { spent: Number(pool.spent) });
+    const reservedPool = Number(pool.is_reserved) === 1;
+    const allocated = reservedPool ? 0 : ((await allocatedByPool(tx, [id])).get(id) || 0);
+    if (reservedPool) {
+      if (nextBudget < Number(pool.spent)) throw new GalaError('budget_below_spent', 409, { spent: Number(pool.spent) });
+    } else {
+      // 员工奖池按已分配额校验（实际支出不会超过已分配额）；报错也只给公开的已分配额。
+      const floor = Math.max(allocated, Number(pool.spent));
+      if (nextBudget < floor) throw new GalaError('budget_below_allocated', 409, { allocated: floor });
+    }
     if (Number(pool.is_reserved) === 0 && Number(event?.total_budget) > 0) {
       const sum = await tx.get(
         'SELECT COALESCE(SUM(budget), 0) AS total FROM gala_pools WHERE event_id = ? AND is_reserved = 0 AND id <> ?',
@@ -332,7 +379,7 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
       `UPDATE gala_pools SET name = ?, sponsor = ?, budget = ?, updated_at = unixepoch() WHERE id = ? RETURNING *`,
       [nextName, sponsor === undefined ? pool.sponsor : (cleanText(sponsor, 40) || null), nextBudget, id],
     );
-    return serializePool(row);
+    return serializePool(row, { allocated, includeReserved: allowReserved });
   });
 }
 
@@ -343,7 +390,8 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   if (!id) throw new GalaError('invalid_event_id');
   const event = await db.get('SELECT id FROM gala_events WHERE id = ?', [id]);
   if (!event) throw new GalaError('event_not_found', 404);
-  const table = tableNo === null || tableNo === undefined || tableNo === '' ? null : toPositiveId(tableNo);
+  const table = tableNo === null || tableNo === undefined || tableNo === '' ? null : toPositiveId(tableNo, PG_INT_MAX);
+  if (tableNo !== null && tableNo !== undefined && tableNo !== '' && table === null) throw new GalaError('invalid_table_no');
   if (allActiveDingtalk) {
     const result = await db.run(
       `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
@@ -421,8 +469,8 @@ export async function drawGalaRound(db, {
   if (!id) throw new GalaError('invalid_event_id');
   const seg = requireSegment(segment);
   if (!GALA_DRAW_SEGMENTS.has(seg)) throw new GalaError('segment_not_drawable');
-  const count = Number(drawCount);
-  if (!Number.isInteger(count) || count < 1 || count > MAX_DRAW_COUNT) throw new GalaError('invalid_draw_count');
+  const count = toPositiveId(drawCount, MAX_DRAW_COUNT);
+  if (!count) throw new GalaError('invalid_draw_count');
   if (!['none', 'coin'].includes(prizeType)) throw new GalaError('invalid_prize_type');
   const amount = prizeType === 'coin' ? toNonNegativeInt(amountEach) : 0;
   if (prizeType === 'coin' && (!amount || amount <= 0)) throw new GalaError('invalid_amount_each');
@@ -447,6 +495,28 @@ export async function drawGalaRound(db, {
       [id, seg],
     );
     const roundNo = Number(last?.n || 0) + 1;
+
+    // 公开准入：只用名单人数和本环节已中奖人数（所有管理员都看得到）判断，与是否有预留无关。
+    const publicRow = await tx.get(
+      `SELECT COUNT(*) AS n FROM gala_participants p
+        WHERE p.event_id = ?
+          ${excludePreviousWinners ? `AND NOT EXISTS (
+            SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
+             WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}`,
+      excludePreviousWinners ? [id, seg] : [id],
+    );
+    const publicEligible = Number(publicRow?.n || 0);
+    if (count > publicEligible - GALA_DRAW_HEADROOM) {
+      throw new GalaError('not_enough_participants', 409, { max_draw_count: Math.max(0, publicEligible - GALA_DRAW_HEADROOM) });
+    }
+    if (pool) {
+      const allocated = (await allocatedByPool(tx, [pool.id])).get(Number(pool.id)) || 0;
+      const remaining = Number(pool.budget) - allocated;
+      // 按请求的抽签人数整轮计入员工奖池，与本轮是否含预留名额无关。
+      if (remaining < amount * count) {
+        throw new GalaError('pool_budget_insufficient', 409, { remaining, required: amount * count });
+      }
+    }
 
     const eligibleRows = await tx.all(
       `SELECT p.userid, p.name_snapshot
@@ -475,25 +545,30 @@ export async function drawGalaRound(db, {
     // 预留对象已被移出名单（例如被普通管理员删掉）时不再生效：否则会出现一个不在名单上的中奖人，
     // 直接暴露身份。该名额作废，超管在预留列表里能看到。
     let slot = pendingSlot;
-    if (pendingSlot && !pendingSlot.enrolled) {
+    let voidNote = null;
+    if (pendingSlot && !pendingSlot.enrolled) voidNote = '（抽签时已不在参与名单，自动作废）';
+    // 预留对象同样遵守“本环节已中奖者不再参与”：否则同一人会在开启排除时再中一次，
+    // 也会因此和普通参与者区分开。
+    if (pendingSlot && !voidNote && excludePreviousWinners) {
+      const won = await tx.get(
+        `SELECT 1 AS x FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
+          WHERE w.event_id = ? AND w.userid = ? AND gr.segment = ? LIMIT 1`,
+        [id, pendingSlot.userid, seg],
+      );
+      if (won) voidNote = '（本环节已中过奖，按排除规则自动作废）';
+    }
+    if (voidNote) {
       await tx.run(
         `UPDATE gala_reserved_slots SET status = 'cancelled', note = COALESCE(note, '') || ?, updated_at = unixepoch() WHERE id = ?`,
-        ['（抽签时已不在参与名单，自动作废）', pendingSlot.id],
+        [voidNote, pendingSlot.id],
       );
       slot = null;
     }
     const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
 
-    // 必须能把本轮名额全部填满，否则拒绝且不透露可抽人数：既不会留下一个永远补不齐的轮次，
-    // 也不会出现“抽出来的正好是名单里除了某人之外的所有人”而暴露未来的预留对象。
+    // 公开准入已留出 GALA_DRAW_HEADROOM 的余量（不少于预留上限），这里理论上不会触发；
+    // 作为兜底仍拒绝，且不带任何人数信息。
     if (picked.length < (slot ? count - 1 : count)) throw new GalaError('not_enough_participants', 409);
-
-    if (pool) {
-      const remaining = Number(pool.budget) - Number(pool.spent);
-      if (remaining < amount * picked.length) {
-        throw new GalaError('pool_budget_insufficient', 409, { remaining, required: amount * picked.length });
-      }
-    }
 
     const winners = picked.map((p) => ({
       userid: p.userid,
@@ -547,8 +622,8 @@ export async function listGalaRounds(db, { eventId, includeReserved = false, lim
   // 按 id 倒序分页：传上一页最后一轮的 id 作为 before_id 即可取更早的轮次。
   const before = beforeId === null || beforeId === undefined || beforeId === '' ? null : toPositiveId(beforeId);
   if (beforeId !== null && beforeId !== undefined && beforeId !== '' && !before) throw new GalaError('invalid_before_id');
-  const rawLimit = limit === null || limit === undefined || limit === '' ? 200 : Number(limit);
-  if (!Number.isInteger(rawLimit) || rawLimit < 1) throw new GalaError('invalid_limit');
+  const rawLimit = limit === null || limit === undefined || limit === '' ? 200 : toPositiveId(limit);
+  if (!rawLimit) throw new GalaError('invalid_limit');
   const pageSize = Math.min(rawLimit, 200);
   const rounds = before
     ? await db.all('SELECT * FROM gala_rounds WHERE event_id = ? AND id < ? ORDER BY id DESC LIMIT ?', [id, before, pageSize])
@@ -697,7 +772,7 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   if (!id) throw new GalaError('invalid_event_id');
   const seg = requireSegment(segment);
   if (!GALA_DRAW_SEGMENTS.has(seg)) throw new GalaError('segment_not_drawable');
-  const no = toPositiveId(roundNo);
+  const no = toPositiveId(roundNo, PG_INT_MAX);
   if (!no) throw new GalaError('invalid_round_no');
   const uid = cleanText(userid, 128);
   const user = uid ? await db.get('SELECT userid FROM users WHERE userid = ?', [uid]) : null;
@@ -724,6 +799,22 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
       [id, seg, no],
     );
     if (existing) throw new GalaError('slot_already_exists', 409);
+    const total = await tx.get(
+      `SELECT COUNT(*) AS n FROM gala_reserved_slots WHERE event_id = ? AND status <> 'cancelled'`,
+      [id],
+    );
+    if (Number(total?.n || 0) >= GALA_MAX_RESERVED_SLOTS) throw new GalaError('reserved_slot_limit', 409);
+    // 已在本环节中过奖、或在本环节已有未取消的名额：默认排除规则下这个名额到时会作废，直接拒绝。
+    const conflict = await tx.get(
+      `SELECT 1 AS x WHERE EXISTS (
+          SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
+           WHERE w.event_id = ? AND w.userid = ? AND gr.segment = ?)
+        OR EXISTS (
+          SELECT 1 FROM gala_reserved_slots s
+           WHERE s.event_id = ? AND s.userid = ? AND s.segment = ? AND s.status <> 'cancelled')`,
+      [id, uid, seg, id, uid, seg],
+    );
+    if (conflict) throw new GalaError('already_won_in_segment', 409);
     const row = await tx.get(
       `INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, amount, note, created_by)
        VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,

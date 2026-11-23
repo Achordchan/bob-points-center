@@ -36,7 +36,7 @@ function isSuper(req) {
 function sendError(res, err) {
   if (err instanceof GalaError) {
     const body = { error: err.code };
-    for (const key of ['remaining', 'required', 'spent', 'pools_total']) {
+    for (const key of ['remaining', 'required', 'spent', 'allocated', 'pools_total', 'max_draw_count']) {
       if (err[key] !== undefined) body[key] = err[key];
     }
     return res.status(err.status || 400).json(body);
