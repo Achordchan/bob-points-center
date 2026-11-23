@@ -53,9 +53,10 @@ function withDisplayReason(row = {}) {
   };
 }
 
-// 年会发放流水的唯一判定（恢复校验、流水查询、审计推断共用）：ref_id 恰为 GALA_W<中奖记录 ID>、
-// 原因以“年会奖励·”开头、且是入账。单看 ref_id 前缀不够：ref_id 也可能是转账对方的 userid。
-// 第三方发币接口不允许使用 GALA_W 前缀的 ref_id，新数据不会出现冒充。
+// 年会发放流水：出处以中奖记录的 ledger_id 为准（发放时在同一事务内写入，且全局唯一），
+// 流水查询与审计推断都用 galaPayoutLedgerSql 判定，不看 ref_id、原因这些外部也能写入的字符串。
+// galaPayoutWinnerId 只解析命名约定（ref_id = GALA_W<中奖记录 ID>、原因“年会奖励·”、入账），供备份校验核对一致性。
+// 外部发币接口不允许 GALA_W 前缀的 ref_id，新数据不会出现形似的流水。
 export const GALA_PAYOUT_REF_PREFIX = 'GALA_W';
 export const GALA_PAYOUT_REASON_PREFIX = '年会奖励·';
 
@@ -68,9 +69,7 @@ export function galaPayoutWinnerId(row) {
 }
 
 export function galaPayoutLedgerSql(alias = 'l') {
-  return `(COALESCE(${alias}.ref_id, '') ~ '^GALA_W[1-9][0-9]*$'
-    AND starts_with(COALESCE(${alias}.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
-    AND ${alias}.delta > 0)`;
+  return `EXISTS (SELECT 1 FROM gala_round_winners gw WHERE gw.ledger_id = ${alias}.id)`;
 }
 
 export async function ensureAccount(db, { userid, name, createUser = false }) {

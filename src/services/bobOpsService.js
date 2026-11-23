@@ -1,4 +1,4 @@
-import { deductBob, grantBob } from './ledgerService.js';
+import { GALA_PAYOUT_REF_PREFIX, deductBob, grantBob } from './ledgerService.js';
 import { confirmRedeem } from './redeemService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { getUserDetail } from './dingtalkService.js';
@@ -21,7 +21,16 @@ export async function getTrustedAccountOptions(db, cfg, userid) {
   return { userid: uid, name, createUser };
 }
 
+// GALA_W 前缀的引用号留给年会发放：外部发币（单发、批量、后台批量）都走这里，统一拒绝。
+export const RESERVED_REF_ID_ERROR = 'reserved refId prefix';
+export function assertExternalRefIdAllowed(refId) {
+  if (refId != null && String(refId).trim().toUpperCase().startsWith(GALA_PAYOUT_REF_PREFIX)) {
+    throw new Error(RESERVED_REF_ID_ERROR);
+  }
+}
+
 async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
+  assertExternalRefIdAllowed(refId);
   if (!Number.isInteger(Number(amount)) || Number(amount) <= 0) throw new Error('amount must be positive integer');
   const account = await getTrustedAccountOptions(db, cfg, userid);
   return await grantBob(db, { ...account, amount, reason, refId });
@@ -53,6 +62,7 @@ export async function grantWithNotify(db, cfg, { userid, amount, reason, refId, 
 }
 
 export async function grantBatchWithNotify(db, cfg, { userids, amount, reason, refId, awaitNotify } = {}) {
+  assertExternalRefIdAllowed(refId);
   const ids = Array.isArray(userids) ? userids : [];
   const results = [];
   for (const userid of ids) {

@@ -1,8 +1,6 @@
 import { Router } from 'express';
 
-import {
-  GALA_PAYOUT_REF_PREFIX, getBalance, listLedgerRecords, transferBob,
-} from '../services/ledgerService.js';
+import { getBalance, listLedgerRecords, transferBob } from '../services/ledgerService.js';
 import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.js';
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
@@ -12,7 +10,9 @@ import { parseCookies } from '../services/adminSession.js';
 import { isWebSessionValidLive, verifyWebSessionToken } from '../services/webSession.js';
 import { webSessionSigningSecret } from '../utils/sessionCrypto.js';
 import { getUserName, sendOrQueueNotify, toBool } from '../services/notifyOpsService.js';
-import { deductBatchWithNotify, deductWithNotify, getTrustedAccountOptions, grantBatchWithNotify, grantWithNotify } from '../services/bobOpsService.js';
+import {
+  RESERVED_REF_ID_ERROR, deductBatchWithNotify, deductWithNotify, getTrustedAccountOptions, grantBatchWithNotify, grantWithNotify,
+} from '../services/bobOpsService.js';
 import { publishMallRealtimeEvent } from '../services/mallRealtimeService.js';
 
 function toInt(value) {
@@ -229,10 +229,6 @@ export function ledgerRouter() {
     if (!userid) {
       return res.status(400).json({ error: 'missing userid' });
     }
-    // GALA_W 前缀留给年会发放（备份恢复与流水查询据此识别），第三方不能使用。
-    if (body.refId != null && String(body.refId).toUpperCase().startsWith(GALA_PAYOUT_REF_PREFIX)) {
-      return res.status(400).json({ error: 'reserved refId prefix' });
-    }
 
     try {
       const db = req.app.locals.db;
@@ -252,7 +248,7 @@ export function ledgerRouter() {
       return res.json({ ok: true, userid: out.userid, balance: out.balance, ledgerId: out.ledgerId });
     } catch (err) {
       const message = String(err?.message || err);
-      const status = message.includes('amount must be positive') ? 400 : 500;
+      const status = message.includes('amount must be positive') || message === RESERVED_REF_ID_ERROR ? 400 : 500;
       return res.status(status).json({ error: message });
     }
   });
@@ -286,7 +282,8 @@ export function ledgerRouter() {
       }
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === RESERVED_REF_ID_ERROR ? 400 : 500).json({ error: message });
     }
   });
 

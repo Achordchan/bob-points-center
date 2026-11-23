@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS gala_round_winners (
   CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_round_winners_event_user ON gala_round_winners(event_id, userid);
+-- 一条流水只能支付一笔奖励：ledger_id（包括用户重置后流水已删、凭据仍保留的）全局唯一，合并导入撞上已有记录也会被拒绝。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gala_round_winners_ledger ON gala_round_winners(ledger_id) WHERE ledger_id IS NOT NULL;
 
 -- 预留名额：指定某人在某环节第 N 轮中奖。仅超级管理员可读写，占本轮一个名额（抽 N 人时普通抽 N-1 人）。
 -- 奖励与本轮普通中奖人一致（发币轮按单价、无币轮为 0），从 pool_id 指定的预留奖池扣；amount 在名额被使用时记下实际金额。
@@ -115,8 +117,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   ON gala_reserved_slots(event_id, segment, round_no)
   WHERE status = 'pending';
 
--- 全量恢复代数：每次全量恢复 nextval 一次。不进备份，发放用它识别“开始之后发生过恢复”。
-CREATE SEQUENCE IF NOT EXISTS gala_restore_generation_seq;
+-- 全量恢复代数：单行计数器，全量恢复在自己的事务里加一（失败回滚则不变）。不进备份，
+-- 发放用它识别“开始之后发生过（成功的）恢复”。
+CREATE TABLE IF NOT EXISTS gala_restore_state (
+  id INTEGER PRIMARY KEY,
+  generation BIGINT NOT NULL DEFAULT 0,
+  CONSTRAINT chk_gala_restore_state_singleton CHECK (id = 1)
+);
+INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+DROP SEQUENCE IF EXISTS gala_restore_generation_seq;
 `;
 
 // public_granted_at 的回填规则（旧库补列、导入旧备份时共用）：执行过发放（整轮已完成、已有人到账或留有发放失败原因），

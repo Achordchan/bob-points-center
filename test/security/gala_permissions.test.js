@@ -141,10 +141,12 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
     ledger: [{ id: 1, ref_id: 'GALA_W11', delta: 10, reason: '年会奖励·测试' }, { id: 2, ref_id: 'GALA_W12', delta: 10, reason: '年会奖励·测试' }],
   };
   const errors = findGalaFundingErrors(snap);
-  assert.equal(errors.length, 2, errors.join('\n'));
-  // 没有任何年会表、流水里却有年会发放：不是真正的旧备份
+  // 只有 GALA_W11 指向备份里一条未发放的中奖记录（恢复后会重复发放）；GALA_W12 没有对应中奖记录，按普通流水处理
+  assert.equal(errors.length, 1, errors.join('\n'));
+  assert.ok(errors[0].startsWith('ledger#1'));
+  // 没有年会表的旧备份里，形似年会发放的入账（早期第三方接口可写入）按普通流水处理，备份照常可恢复
   const legacy = { ledger: [{ id: 1, ref_id: 'GALA_W11', delta: 10, reason: '年会奖励·测试' }] };
-  assert.equal(findGalaFundingErrors(legacy).length, 1);
+  assert.deepEqual(findGalaFundingErrors(legacy), []);
   assert.deepEqual(findGalaFundingErrors({ ledger: [{ id: 1, ref_id: 'ADMIN_1' }] }), []);
   // ref_id 恰好是名叫 GALA_W… 的用户（转账对方），原因不是年会奖励：不算年会发放，旧备份照常可恢复
   assert.deepEqual(findGalaFundingErrors({
@@ -174,9 +176,10 @@ test('年会备份逐笔核对：流水收款人/金额/ledger_id、重复流水
   wrongPayee.ledger[1].userid = 'a';
   assert.ok(findGalaFundingErrors(wrongPayee).some((e) => e.includes('收款人或金额')));
 
+  // 出处以中奖记录的 ledger_id 为准：已发放并引用 101 的中奖记录，另一条形似的流水只是普通入账，不会再发一次
   const dupLedger = ok();
   dupLedger.ledger.push({ id: 103, userid: 'a', delta: 10, ref_id: 'GALA_W1', reason: '年会奖励·测试' });
-  assert.ok(findGalaFundingErrors(dupLedger).some((e) => e.includes('重复指向')));
+  assert.deepEqual(findGalaFundingErrors(dupLedger), []);
 
   const wrongLink = ok();
   wrongLink.gala_round_winners[0].ledger_id = 102;
@@ -466,4 +469,30 @@ test('年会备份：预留中奖记录的金额与本轮普通奖励一致', ()
   paidInNone.gala_reserved_slots[1].amount = 5;
   paidInNone.gala_reserved_slots[1].pool_id = 2;
   assert.ok(findGalaFundingErrors(paidInNone).some((e) => e.startsWith('gala_round_winners#3') && e.includes('本轮奖励不一致')));
+});
+
+test('年会备份：两条中奖记录不能共用同一付款凭据', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 20 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 1, public_granted_at: 1 }],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 77 },
+      { id: 2, round_id: 1, event_id: 1, userid: 'b', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 78 },
+    ],
+    gala_reserved_slots: [],
+    ledger: [],
+  };
+  assert.deepEqual(findGalaFundingErrors(snap), []);
+  snap.gala_round_winners[1].ledger_id = 77;
+  assert.ok(findGalaFundingErrors(snap).some((e) => e.startsWith('gala_round_winners#2') && e.includes('共用付款凭据')));
+});
+
+test('外部发币不能使用年会发放的引用号前缀', async () => {
+  const { assertExternalRefIdAllowed, RESERVED_REF_ID_ERROR } = await import('../../src/services/bobOpsService.js');
+  for (const ref of ['GALA_W1', 'gala_w99', ' GALA_Wx']) {
+    assert.throws(() => assertExternalRefIdAllowed(ref), (e) => e.message === RESERVED_REF_ID_ERROR, ref);
+  }
+  for (const ref of [undefined, null, 'ORDER_1', 'GALA1']) assert.doesNotThrow(() => assertExternalRefIdAllowed(ref));
 });

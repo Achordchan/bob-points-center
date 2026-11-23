@@ -64,7 +64,7 @@ export function registerAdminGalaRoutes(router) {
     });
   }));
 
-  router.get('/gala/events', requireAdminSession(), handle(async (_req, res, db) => {
+  router.get('/gala/events', requireAdminSession(), handle(async (req, res, db) => {
     res.json({ ok: true, data: await listGalaEvents(db, { beforeId: req.query?.before_id, limit: req.query?.limit }) });
   }));
 

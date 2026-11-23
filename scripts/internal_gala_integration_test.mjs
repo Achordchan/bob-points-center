@@ -28,7 +28,7 @@ import {
   GALA_DRAW_HEADROOM,
   GALA_MAX_RESERVED_SLOTS,
   GALA_PAYOUT_LOCK,
-  GALA_RESTORE_GENERATION_SEQ,
+  bumpGalaRestoreGeneration,
   GALA_SEGMENTS,
 } from '../src/services/galaService.js';
 import { purgeUserBusinessData } from '../src/services/userDataPurgeService.js';
@@ -197,6 +197,14 @@ async function main() {
     assert.equal(Number(poolAfter.spent), 80);
     const reservedAfter = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [reservedPool.id]);
     assert.equal(Number(reservedAfter.spent), 20);
+    // 一条流水只能支付一笔奖励：数据库层面 ledger_id 唯一
+    {
+      const two = await db.all('SELECT id, ledger_id FROM gala_round_winners WHERE round_id = ? AND ledger_id IS NOT NULL ORDER BY id LIMIT 2', [r2.round.id]);
+      await assert.rejects(
+        db.run('UPDATE gala_round_winners SET ledger_id = ? WHERE id = ?', [two[0].ledger_id, two[1].id]),
+        (e) => e.code === '23505',
+      );
+    }
     console.log('✓ 并发发币幂等，员工奖池与预留奖池分别扣减');
 
     // 预算不足：已分配 200，剩余 400，一轮 25 × 20 = 500 被拒
@@ -585,7 +593,7 @@ async function main() {
           // 与全量恢复相同的加锁顺序：恢复排他锁 → 推进代数 → 锁流水表和中奖记录表
           await db.transaction(async (tx) => {
             await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
-            await tx.get(`SELECT nextval('${GALA_RESTORE_GENERATION_SEQ}') AS g`, []);
+            await bumpGalaRestoreGeneration(tx);
             await tx.exec('LOCK TABLE ledger, gala_round_winners IN SHARE ROW EXCLUSIVE MODE');
           });
         })(),
@@ -672,12 +680,25 @@ async function main() {
       const kidNone = none.winners.find((w) => w.userid === uid(1));
       assert.ok(kidNone && Number(kidNone.amount) === 0 && kidNone.pool_id == null, '无币轮预留对象同样没有奖励');
       // 本轮单价 8，预留池只有 7：名额作废，本轮是普通抽签
-      const big = await drawGalaRound(db, { eventId: ev.id, segment: 'giveaway', drawCount: 2, prizeType: 'coin', poolId: ep.id, amountEach: 8 });
+      // FIRST 按名单顺序抽：uid(2) 的名额作废后不再被排除，和普通参与者一样能被抽中
+      const big = await drawGalaRound(db, {
+        eventId: ev.id, segment: 'giveaway', drawCount: 2, prizeType: 'coin', poolId: ep.id, amountEach: 8, randomInt: FIRST,
+      });
       assert.ok(big.winners.every((w) => Number(w.is_reserved) === 0 && Number(w.amount) === 8));
+      assert.ok(big.winners.some((w) => w.userid === uid(2)), '作废名额的人重新进入普通候选');
       const slot2 = await db.get('SELECT status, note FROM gala_reserved_slots WHERE event_id = ? AND segment = ?', [ev.id, 'giveaway']);
       assert.equal(slot2.status, 'cancelled');
       assert.ok(String(slot2.note).includes('预留奖池余额不足'));
-      console.log('✓ 预留奖励与本轮普通奖励一致；预留奖池不足时名额作废');
+      // 预留奖池不能把预算压到已支出 + 待发预留奖励以下
+      const rp2 = await createGalaPool(db, { eventId: ev.id, name: '预留池2', budget: 50, reserved: true });
+      await createGalaReservedSlot(db, { eventId: ev.id, segment: 'game', roundNo: 1, userid: uid(3), poolId: rp2.id });
+      await drawGalaRound(db, { eventId: ev.id, segment: 'game', drawCount: 1, prizeType: 'coin', poolId: ep.id, amountEach: 30 });
+      await assert.rejects(
+        updateGalaPool(db, { poolId: rp2.id, budget: 29, allowReserved: true }),
+        (e) => e.code === 'budget_below_spent' && e.spent === 30,
+      );
+      await updateGalaPool(db, { poolId: rp2.id, budget: 30, allowReserved: true });
+      console.log('✓ 预留奖励与本轮普通奖励一致；预留奖池不足时名额作废；预留预算不低于待发');
     }
 
     // 参数严格校验：布尔、数组、超出 INTEGER 的值不会被隐式转换
@@ -765,6 +786,15 @@ async function main() {
       r = await call(operatorId, 'POST', '/gala/participants/add', { event_id: hid, userids: [uid(3), uid(4), uid(5)] });
       assert.equal(r.status, 200);
       await addFiller(db, hid);
+      // 活动列表经 HTTP 路由（含分页参数）
+      r = await call(operatorId, 'GET', '/gala/events');
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(r.body.data[0].id, hid);
+      r = await call(operatorId, 'GET', `/gala/events?limit=1&before_id=${hid}`);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.ok(r.body.data.length === 1 && r.body.data[0].id < hid);
+      r = await call(operatorId, 'GET', '/gala/events?limit=abc');
+      assert.deepEqual([r.status, r.body?.error], [400, 'invalid_limit']);
       r = await call(superId, 'POST', '/gala/pools/create', { event_id: hid, name: '员工池', budget: 1000 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const hPool = r.body.data.id;
@@ -815,8 +845,10 @@ async function main() {
       assert.equal(r.body.data.ledger.filter(isGalaW).length, 0, '非超管的用户流水里没有预留发放');
       r = await call(superId, 'GET', `/users/${encodeURIComponent(kid)}`);
       assert.equal(r.body.data.ledger.filter(isGalaW).length, 2, '超管能看到两笔预留发放');
+      // 取流水仍在的普通中奖人（前面的测试重置过部分用户，他们的发放流水已被合法清除）
       const ordinaryWinner = (await db.get(
-        `SELECT w.userid FROM gala_round_winners w WHERE w.round_id = ? AND w.is_reserved = 0 AND w.awarded_at IS NOT NULL LIMIT 1`,
+        `SELECT w.userid FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+          WHERE w.round_id = ? AND w.is_reserved = 0 ORDER BY w.id LIMIT 1`,
         [r2.round.id],
       )).userid;
       // 只藏预留那一笔会让预留对象成为“唯一没有发放流水的中奖人”，所以非超管对所有中奖人都看不到年会发放流水
@@ -825,10 +857,13 @@ async function main() {
       r = await call(superId, 'GET', `/users/${encodeURIComponent(ordinaryWinner)}`);
       assert.ok(r.body.data.ledger.some(isGalaW), '超管能看到普通中奖人的发放流水');
       // 判定要求 ref_id、原因、入账方向都符合：ref_id 恰好像 GALA_W… 的普通流水照常可见
-      await db.run('INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)', [ordinaryWinner, 1, 'transfer_in', 'GALA_W999999999']);
+      const fake = await db.get(
+        'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?) RETURNING id',
+        [ordinaryWinner, 1, '年会奖励·外部', 'GALA_W999999999'],
+      );
       r = await call(operatorId, 'GET', `/users/${encodeURIComponent(ordinaryWinner)}`);
-      assert.equal(r.body.data.ledger.filter(isGalaW).length, 1, '非年会流水不被当作年会发放隐藏');
-      await db.run("DELETE FROM ledger WHERE ref_id = 'GALA_W999999999'");
+      assert.equal(r.body.data.ledger.filter(isGalaW).length, 1, '没有中奖记录引用的流水不被当作年会发放隐藏');
+      await db.run('DELETE FROM ledger WHERE id = ?', [fake.id]);
       console.log('✓ HTTP：预留接口仅超管可用，非超管返回中不暴露预留信息');
     } finally {
       server.close();

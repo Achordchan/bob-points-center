@@ -44,7 +44,9 @@ import {
   saveCharityProject,
 } from '../../services/charityService.js';
 import { normalizeMallProductInput } from '../../services/mallService.js';
-import { adminDeductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify } from '../../services/bobOpsService.js';
+import {
+  RESERVED_REF_ID_ERROR, adminDeductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify,
+} from '../../services/bobOpsService.js';
 import { toBool } from '../../services/notifyOpsService.js';
 import { sendRobotPrivateText } from '../../services/robotNotifyService.js';
 import {
@@ -2009,7 +2011,8 @@ export function adminRouter() {
       }
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === RESERVED_REF_ID_ERROR ? 400 : 500).json({ error: message });
     }
   });
 

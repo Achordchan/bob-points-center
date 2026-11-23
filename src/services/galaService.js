@@ -116,19 +116,33 @@ async function inTx(db, fn) {
   return await db.transaction(run);
 }
 
+// 多条语句拼成一个结果的读取放进同一个可重复读快照：中途提交的覆盖恢复可能复用同一批 ID，
+// 分开读会把恢复后的中奖记录挂到恢复前的轮次（或奖池、计数）上。
+async function inSnapshot(db, fn) {
+  if (db?.__txScoped === true) return await fn(db);
+  return await db.transaction(async (tx) => {
+    await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+    return await fn(tx);
+  });
+}
+
 // 全量恢复与年会写入的互斥：会写中奖记录或流水的年会事务（抽签、发放、记录发放失败、收尾）一开始就拿
 // 这把共享锁，恢复在锁任何表之前拿它的排他锁。两边都先拿同一把锁、再碰表和行，就不会互相等待成死锁。
 export const GALA_PAYOUT_LOCK = 'bob.gala.payout';
-// 恢复代数：全量恢复每次在排他锁内 nextval 一次（序列不进备份）。一次发放开始时记下代数，
-// 之后每个发放事务在共享锁内重读，代数变了说明期间发生过恢复，整次发放作废。
-export const GALA_RESTORE_GENERATION_SEQ = 'gala_restore_generation_seq';
+// 恢复代数：gala_restore_state 单行计数器，全量恢复在排他锁内、自己的事务里加一（不进备份；恢复失败回滚则不变）。
+// 一次发放开始时记下代数，之后每个发放事务在共享锁内重读，代数变了说明期间成功恢复过，整次发放作废。
+export async function bumpGalaRestoreGeneration(tx) {
+  await tx.run(
+    `INSERT INTO gala_restore_state(id, generation) VALUES (1, 1)
+     ON CONFLICT (id) DO UPDATE SET generation = gala_restore_state.generation + 1`,
+    [],
+  );
+}
 
 async function enterGalaWrite(tx, generation) {
   await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
   if (generation === undefined) return null;
-  const row = await tx.get(
-    `SELECT CASE WHEN is_called THEN last_value ELSE 0 END AS generation FROM ${GALA_RESTORE_GENERATION_SEQ}`,
-  );
+  const row = await tx.get('SELECT generation FROM gala_restore_state WHERE id = 1');
   const current = String(row?.generation ?? 0);
   if (generation !== null && current !== String(generation)) throw new GalaError('round_changed', 409);
   return current;
@@ -255,12 +269,15 @@ export async function createGalaEvent(db, { title, eventDate, totalBudget, enabl
   const budget = totalBudget === undefined || totalBudget === null || totalBudget === '' ? 0 : toNonNegativeInt(totalBudget);
   if (budget === null) throw new GalaError('invalid_total_budget');
   const segments = enabledSegments === undefined ? Object.keys(GALA_SEGMENTS) : normalizeEnabledSegments(enabledSegments);
-  const row = await db.get(
-    `INSERT INTO gala_events(title, event_date, total_budget, enabled_segments, created_by, created_name)
-     VALUES(?, ?, ?, ?, ?, ?) RETURNING *`,
-    [cleanTitle, cleanText(eventDate, 32) || null, budget, JSON.stringify(segments), actor.userid || null, actor.name || null],
-  );
-  return serializeEvent(row);
+  // 与其他年会写入一样在持恢复互斥共享锁的事务里插入：全量恢复进行中会等它结束，不会混进恢复结果或被随后清掉。
+  return await inTx(db, async (tx) => {
+    const row = await tx.get(
+      `INSERT INTO gala_events(title, event_date, total_budget, enabled_segments, created_by, created_name)
+       VALUES(?, ?, ?, ?, ?, ?) RETURNING *`,
+      [cleanTitle, cleanText(eventDate, 32) || null, budget, JSON.stringify(segments), actor.userid || null, actor.name || null],
+    );
+    return serializeEvent(row);
+  });
 }
 
 export async function updateGalaEvent(db, { eventId, title, eventDate, totalBudget, status, enabledSegments }) {
@@ -317,6 +334,10 @@ export async function listGalaEvents(db, { limit = 100, beforeId = null } = {}) 
 export async function getGalaEventDetail(db, { eventId, includeReserved = false }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
+  return await inSnapshot(db, async (snap) => readGalaEventDetail(snap, { id, includeReserved }));
+}
+
+async function readGalaEventDetail(db, { id, includeReserved }) {
   const event = await db.get('SELECT * FROM gala_events WHERE id = ?', [id]);
   if (!event) throw new GalaError('event_not_found', 404);
   const pools = await db.all(
@@ -393,7 +414,14 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
     const reservedPool = Number(pool.is_reserved) === 1;
     const allocated = reservedPool ? 0 : ((await allocatedByPool(tx, [id])).get(id) || 0);
     if (reservedPool) {
-      if (nextBudget < Number(pool.spent)) throw new GalaError('budget_below_spent', 409, { spent: Number(pool.spent) });
+      // 预留奖池的下限是已支出加上已抽中、尚未发放的预留奖励：抽签时已确认付得起，不能事后把预算压到付不出。
+      // 待发额在锁住奖池之后单独查询，进行中的发放要么已提交（计入 spent）、要么仍待发（计入待发），不会重复计算。
+      const pendingRow = await tx.get(
+        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL',
+        [id],
+      );
+      const committed = Number(pool.spent) + Number(pendingRow?.n || 0);
+      if (nextBudget < committed) throw new GalaError('budget_below_spent', 409, { spent: committed });
     } else {
       // 员工奖池按已分配额校验（实际支出不会超过已分配额）；报错也只给公开的已分配额。
       const floor = Math.max(allocated, Number(pool.spent));
@@ -568,19 +596,6 @@ export async function drawGalaRound(db, {
       }
     }
 
-    const eligibleRows = await tx.all(
-      `SELECT p.userid, p.name_snapshot
-         FROM gala_participants p
-        WHERE p.event_id = ?
-          AND NOT EXISTS (
-            SELECT 1 FROM gala_reserved_slots r
-             WHERE r.event_id = p.event_id AND r.userid = p.userid AND r.status <> 'cancelled')
-          ${excludePreviousWinners ? `AND NOT EXISTS (
-            SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
-             WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}
-        ORDER BY p.id`,
-      excludePreviousWinners ? [id, seg] : [id],
-    );
     // 预留名额占本轮一个名额：抽 N 人时普通抽 N-1 人，再加上预留对象，总数仍是 N。
     // 这样操作者和大屏看到的人数与请求一致，看不出本轮有预留。奖励仍从预留奖池出，不占员工预算。
     const pendingSlot = await tx.get(
@@ -612,16 +627,17 @@ export async function drawGalaRound(db, {
     // 本轮按普通抽签进行，而不是让预留对象中奖却到不了账（同样会因余额没变而暴露）。
     let reservedPoolId = null;
     if (pendingSlot && !voidNote && amount > 0) {
+      // 先锁住奖池，再用单独的语句读待发额：同一语句里的子查询用的是加锁前的快照，
+      // 若锁等到了一笔进行中的发放，这笔奖励会同时出现在 spent 和待发额里被算两次。
       const rp = pendingSlot.pool_id == null ? null : await tx.get(
-        `SELECT p.id, p.budget, p.spent,
-                COALESCE((SELECT SUM(w.amount) FROM gala_round_winners w
-                           WHERE w.pool_id = p.id AND w.awarded_at IS NULL), 0) AS pending
-           FROM gala_pools p
-          WHERE p.id = ? AND p.event_id = ? AND p.is_reserved = 1
-          FOR SHARE`,
+        'SELECT id, budget, spent FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1 FOR SHARE',
         [pendingSlot.pool_id, id],
       );
-      if (!rp || Number(rp.budget) - Number(rp.spent) - Number(rp.pending) < amount) {
+      const rpPending = rp ? await tx.get(
+        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL',
+        [rp.id],
+      ) : null;
+      if (!rp || Number(rp.budget) - Number(rp.spent) - Number(rpPending?.n || 0) < amount) {
         voidNote = '（预留奖池余额不足以支付本轮单价，自动作废）';
       } else {
         reservedPoolId = Number(rp.id);
@@ -634,6 +650,20 @@ export async function drawGalaRound(db, {
       );
       slot = null;
     }
+    // 普通候选人在预留名额处理完之后再查：刚作废的名额对应的人此时不再被排除，和其他人一样参与本轮抽签。
+    const eligibleRows = await tx.all(
+      `SELECT p.userid, p.name_snapshot
+         FROM gala_participants p
+        WHERE p.event_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM gala_reserved_slots r
+             WHERE r.event_id = p.event_id AND r.userid = p.userid AND r.status <> 'cancelled')
+          ${excludePreviousWinners ? `AND NOT EXISTS (
+            SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
+             WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}
+        ORDER BY p.id`,
+      excludePreviousWinners ? [id, seg] : [id],
+    );
     const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
 
     // 公开准入已留出 GALA_DRAW_HEADROOM 的余量（不少于预留上限），这里理论上不会触发；
@@ -696,6 +726,10 @@ export async function listGalaRounds(db, { eventId, includeReserved = false, lim
   const rawLimit = limit === null || limit === undefined || limit === '' ? 200 : toPositiveId(limit);
   if (!rawLimit) throw new GalaError('invalid_limit');
   const pageSize = Math.min(rawLimit, 200);
+  return await inSnapshot(db, async (snap) => readGalaRounds(snap, { id, before, pageSize, includeReserved }));
+}
+
+async function readGalaRounds(db, { id, before, pageSize, includeReserved }) {
   const rounds = before
     ? await db.all('SELECT * FROM gala_rounds WHERE event_id = ? AND id < ? ORDER BY id DESC LIMIT ?', [id, before, pageSize])
     : await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, pageSize]);
