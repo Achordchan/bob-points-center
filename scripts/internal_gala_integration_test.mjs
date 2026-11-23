@@ -17,6 +17,7 @@ import {
   drawGalaRound,
   getGalaEventDetail,
   grantGalaRound,
+  listGalaEvents,
   listGalaRounds,
   updateGalaEvent,
   updateGalaPool,
@@ -26,6 +27,8 @@ import {
   serializeGrantResult,
   GALA_DRAW_HEADROOM,
   GALA_MAX_RESERVED_SLOTS,
+  GALA_PAYOUT_LOCK,
+  GALA_RESTORE_GENERATION_SEQ,
   GALA_SEGMENTS,
 } from '../src/services/galaService.js';
 import { purgeUserBusinessData } from '../src/services/userDataPurgeService.js';
@@ -557,6 +560,38 @@ async function main() {
       console.log(`✓ 发放绑定轮次身份，被替换时停止（本次${g.status === 'rejected' ? '中途停止' : '在替换前完成'}）`);
     }
 
+    // 发放绑定恢复代数：发放途中发生全量恢复（推进代数，持恢复排他锁），即使轮次数据看起来没变也整次停止
+    {
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 恢复代数`, totalBudget: 0 });
+      const p = await createGalaPool(db, { eventId: ev.id, name: '池', budget: 1000 });
+      await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 20 }, (_, k) => uid(k + 1)) });
+      const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 10, prizeType: 'coin', poolId: p.id, amountEach: 1 });
+      const [g, restore] = await Promise.allSettled([
+        grantGalaRound(db, { roundId: d.round.id }),
+        (async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          // 与全量恢复相同的加锁顺序：恢复排他锁 → 推进代数 → 锁流水表和中奖记录表
+          await db.transaction(async (tx) => {
+            await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+            await tx.get(`SELECT nextval('${GALA_RESTORE_GENERATION_SEQ}') AS g`, []);
+            await tx.exec('LOCK TABLE ledger, gala_round_winners IN SHARE ROW EXCLUSIVE MODE');
+          });
+        })(),
+      ]);
+      assert.equal(restore.status, 'fulfilled', String(restore.reason));
+      if (g.status === 'rejected') assert.equal(g.reason?.code, 'round_changed', String(g.reason));
+      const errs = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND award_error IS NOT NULL', [d.round.id]);
+      assert.equal(Number(errs.n), 0);
+      const r1 = await db.get('SELECT status FROM gala_rounds WHERE id = ?', [d.round.id]);
+      if (g.status === 'rejected') assert.equal(r1.status, 'drawn', '中途停止的发放不应标记整轮完成');
+      await grantGalaRound(db, { roundId: d.round.id });
+      const paid = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [d.round.id]);
+      assert.equal(Number(paid.n), 10);
+      const pool = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [p.id]);
+      assert.equal(Number(pool.spent), 10);
+      console.log(`✓ 发放绑定恢复代数，与恢复加锁顺序一致不死锁（本次${g.status === 'rejected' ? '中途停止' : '在恢复前完成'}）`);
+    }
+
     // 预留名额遵守本环节排除规则、每场活动有上限；单人发币轮的员工预算准入与预留无关
     {
       const ev = await createGalaEvent(db, { title: `${PREFIX} 预留规则`, totalBudget: 0 });
@@ -622,6 +657,17 @@ async function main() {
         (e) => e.code === 'invalid_table_no',
       );
       console.log('✓ ID 与整数参数只接受数字或十进制字符串');
+      // 活动列表按 id 倒序分页
+      const e1 = await createGalaEvent(db, { title: `${PREFIX} 分页1` });
+      const e2 = await createGalaEvent(db, { title: `${PREFIX} 分页2` });
+      const page1 = await listGalaEvents(db, { limit: 1 });
+      assert.equal(page1.length, 1);
+      assert.equal(page1[0].id, e2.id);
+      const page2 = await listGalaEvents(db, { limit: 1, beforeId: e2.id });
+      assert.equal(page2[0].id, e1.id);
+      await assert.rejects(listGalaEvents(db, { beforeId: 'x' }), (e) => e.code === 'invalid_before_id');
+      await assert.rejects(listGalaEvents(db, { limit: 0 }), (e) => e.code === 'invalid_limit');
+      console.log('✓ 活动列表可按游标翻页');
     }
 
 
@@ -720,7 +766,7 @@ async function main() {
       assert.equal(r.body.data[0].status, 'granted');
       assert.equal(r.body.data[0].winners.find((w) => w.is_reserved === 1).awarded, 1);
       assert.ok(!JSON.stringify(r.body).includes('balance'), '轮次接口不返回余额');
-      // 流水查询端：预留名额的发放流水只给超管；非超管看不到，审计推断也不会带出
+      // 流水查询端：年会发放流水只给超管；非超管看不到任何人的，审计推断也不会带出
       const isGalaW = (row) => String(row.ref_id || '').startsWith('GALA_W');
       r = await call(operatorId, 'GET', `/users/${encodeURIComponent(kid)}`);
       assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -731,8 +777,11 @@ async function main() {
         `SELECT w.userid FROM gala_round_winners w WHERE w.round_id = ? AND w.is_reserved = 0 AND w.awarded_at IS NOT NULL LIMIT 1`,
         [r2.round.id],
       )).userid;
+      // 只藏预留那一笔会让预留对象成为“唯一没有发放流水的中奖人”，所以非超管对所有中奖人都看不到年会发放流水
       r = await call(operatorId, 'GET', `/users/${encodeURIComponent(ordinaryWinner)}`);
-      assert.ok(r.body.data.ledger.some(isGalaW), '普通中奖人的发放流水照常可见');
+      assert.equal(r.body.data.ledger.filter(isGalaW).length, 0, '非超管看普通中奖人同样没有年会发放流水');
+      r = await call(superId, 'GET', `/users/${encodeURIComponent(ordinaryWinner)}`);
+      assert.ok(r.body.data.ledger.some(isGalaW), '超管能看到普通中奖人的发放流水');
       console.log('✓ HTTP：预留接口仅超管可用，非超管返回中不暴露预留信息');
     } finally {
       server.close();

@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS gala_reserved_slots (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   ON gala_reserved_slots(event_id, segment, round_no)
   WHERE status = 'pending';
+
+-- 全量恢复代数：每次全量恢复 nextval 一次。不进备份，发放用它识别“开始之后发生过恢复”。
+CREATE SEQUENCE IF NOT EXISTS gala_restore_generation_seq;
 `;
 
 // public_granted_at 的回填规则（旧库补列、导入旧备份时共用）：执行过发放（整轮已完成、已有人到账或留有发放失败原因），

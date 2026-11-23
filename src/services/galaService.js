@@ -104,9 +104,33 @@ function requireSegment(segment) {
   return key;
 }
 
+// 年会的写事务一律先拿恢复互斥的共享锁（见 enterGalaWrite），再碰任何表：全量恢复先拿排他锁，
+// 两边加锁顺序一致，并发时只会排队，不会死锁，也不会在恢复删到一半的数据上做校验。
 async function inTx(db, fn) {
-  if (db?.__txScoped === true) return await fn(db);
-  return await db.transaction(fn);
+  const run = async (tx) => {
+    await enterGalaWrite(tx);
+    return await fn(tx);
+  };
+  if (db?.__txScoped === true) return await run(db);
+  return await db.transaction(run);
+}
+
+// 全量恢复与年会写入的互斥：会写中奖记录或流水的年会事务（抽签、发放、记录发放失败、收尾）一开始就拿
+// 这把共享锁，恢复在锁任何表之前拿它的排他锁。两边都先拿同一把锁、再碰表和行，就不会互相等待成死锁。
+export const GALA_PAYOUT_LOCK = 'bob.gala.payout';
+// 恢复代数：全量恢复每次在排他锁内 nextval 一次（序列不进备份）。一次发放开始时记下代数，
+// 之后每个发放事务在共享锁内重读，代数变了说明期间发生过恢复，整次发放作废。
+export const GALA_RESTORE_GENERATION_SEQ = 'gala_restore_generation_seq';
+
+async function enterGalaWrite(tx, generation) {
+  await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+  if (generation === undefined) return null;
+  const row = await tx.get(
+    `SELECT CASE WHEN is_called THEN last_value ELSE 0 END AS generation FROM ${GALA_RESTORE_GENERATION_SEQ}`,
+  );
+  const current = String(row?.generation ?? 0);
+  if (generation !== null && current !== String(generation)) throw new GalaError('round_changed', 409);
+  return current;
 }
 
 /** 均匀随机抽取 count 个（部分 Fisher-Yates），使用 CSPRNG。 */
@@ -275,8 +299,17 @@ export async function updateGalaEvent(db, { eventId, title, eventDate, totalBudg
   });
 }
 
-export async function listGalaEvents(db) {
-  const rows = await db.all('SELECT * FROM gala_events ORDER BY id DESC LIMIT 100');
+export async function listGalaEvents(db, { limit = 100, beforeId = null } = {}) {
+  // 按 id 倒序分页：传上一页最后一个活动的 id 作为 before_id 即可取更早的活动。
+  const hasBefore = beforeId !== null && beforeId !== undefined && beforeId !== '';
+  const before = hasBefore ? toPositiveId(beforeId) : null;
+  if (hasBefore && !before) throw new GalaError('invalid_before_id');
+  const rawLimit = limit === null || limit === undefined || limit === '' ? 100 : toPositiveId(limit);
+  if (!rawLimit) throw new GalaError('invalid_limit');
+  const pageSize = Math.min(rawLimit, 100);
+  const rows = before
+    ? await db.all('SELECT * FROM gala_events WHERE id < ? ORDER BY id DESC LIMIT ?', [before, pageSize])
+    : await db.all('SELECT * FROM gala_events ORDER BY id DESC LIMIT ?', [pageSize]);
   return rows.map(serializeEvent);
 }
 
@@ -672,11 +705,11 @@ function sameRound(a, b) {
     && a.segment === b.segment && Number(a.round_no) === Number(b.round_no) && Number(a.created_at) === Number(b.created_at);
 }
 
-async function awardWinner(db, { winnerId, round, reason }) {
+async function awardWinner(db, { winnerId, round, reason, generation }) {
   return await db.transaction(async (tx) => {
-    // 先领取中奖记录（写中奖记录表，全量恢复进行中会在这里等它结束），再共享锁住本轮并核对它仍是
-    // 发放开始时读到的那一轮：恢复会删除并重建轮次，若已被替换则回滚并停止整次发放，
-    // 不会按旧的中奖记录 ID 给恢复后的另一条记录发币。先等表锁、后拿行锁，避免与恢复互相等待。
+    // 先拿恢复互斥的共享锁并核对恢复代数：发放开始后若有过全量恢复，中奖记录 ID 可能已指向恢复后的另一条记录，
+    // 整次发放作废。之后再领取中奖记录、共享锁住本轮并核对轮次身份（兜底）。
+    await enterGalaWrite(tx, generation);
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
         WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND amount > 0
@@ -720,12 +753,19 @@ async function awardWinner(db, { winnerId, round, reason }) {
 export async function grantGalaRound(db, { roundId }) {
   const id = toPositiveId(roundId);
   if (!id) throw new GalaError('invalid_round_id');
-  const round = await db.get('SELECT * FROM gala_rounds WHERE id = ?', [id]);
+  // 代数、轮次和待发名单在同一个持共享锁的事务里读，保证三者来自同一份数据（不会读到恢复一半）。
+  const start = await db.transaction(async (tx) => {
+    const generation = await enterGalaWrite(tx, null);
+    const round = await tx.get('SELECT * FROM gala_rounds WHERE id = ?', [id]);
+    if (!round) return { generation, round: null, winners: [] };
+    const winners = await tx.all(
+      'SELECT * FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0 ORDER BY display_order',
+      [id],
+    );
+    return { generation, round, winners };
+  });
+  const { generation, round, winners } = start;
   if (!round) throw new GalaError('round_not_found', 404);
-  const winners = await db.all(
-    'SELECT * FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0 ORDER BY display_order',
-    [id],
-  );
   const label = GALA_SEGMENTS[round.segment] || round.segment;
   // 流水原因固定带环节名称，方便按环节对账；自定义标题附在后面。
   const reason = `年会奖励·${label}${round.title ? `（${round.title}）` : ''}·第${round.round_no}轮`;
@@ -734,33 +774,40 @@ export async function grantGalaRound(db, { roundId }) {
   for (const w of winners) {
     const reserved = Number(w.is_reserved) === 1 ? 1 : 0;
     try {
-      const r = await awardWinner(db, { winnerId: w.id, round, reason });
+      const r = await awardWinner(db, { winnerId: w.id, round, reason, generation });
       if (!r.skipped) granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
     } catch (err) {
       // 本轮已被恢复替换：整次发放作废，不把错误写到新数据的中奖记录上。
       if (err?.code === 'round_changed') throw err;
       const code = String(err?.code || err?.message || err);
       failed.push({ userid: w.userid, error: code, is_reserved: reserved });
-      await db.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND round_id = ? AND awarded_at IS NULL', [code, w.id, id]);
+      // 记录失败原因同样在共享锁内核对恢复代数和轮次身份，恢复后的记录不会被写上旧数据的失败原因。
+      await db.transaction(async (tx) => {
+        await enterGalaWrite(tx, generation);
+        const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [id]);
+        if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
+        await tx.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND round_id = ? AND awarded_at IS NULL', [code, w.id, id]);
+      });
     }
   }
-  const pending = await db.get(
-    `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_reserved = 0) AS public_n
-       FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0`,
-    [id],
-  );
-  if (Number(pending?.public_n || 0) === 0) {
-    await db.run(
-      'UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ? AND created_at = ?',
-      [id, round.created_at],
+  // 收尾：待发数量与两个完成标记在同一事务、同一恢复代数下读写，不会拿恢复前的计数去标记恢复后的轮次。
+  const pending = await db.transaction(async (tx) => {
+    await enterGalaWrite(tx, generation);
+    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR UPDATE', [id]);
+    if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
+    const counts = await tx.get(
+      `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_reserved = 0) AS public_n
+         FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0`,
+      [id],
     );
-  }
-  if (Number(pending?.n || 0) === 0 && round.status !== 'granted') {
-    await db.run(
-      `UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND created_at = ? AND status = 'drawn'`,
-      [id, round.created_at],
-    );
-  }
+    if (Number(counts?.public_n || 0) === 0) {
+      await tx.run('UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ?', [id]);
+    }
+    if (Number(counts?.n || 0) === 0) {
+      await tx.run(`UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND status = 'drawn'`, [id]);
+    }
+    return counts;
+  });
   return {
     round_id: id,
     granted,
@@ -813,16 +860,18 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   if (!user) throw new GalaError('user_not_found', 404);
   const value = toNonNegativeInt(amount ?? 0);
   if (value === null) throw new GalaError('invalid_amount');
-  let pid = null;
-  if (value > 0) {
-    pid = toPositiveId(poolId);
-    const pool = pid ? await db.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1', [pid, id]) : null;
-    if (!pool) throw new GalaError('reserved_pool_required');
-  }
+  const pid = value > 0 ? toPositiveId(poolId) : null;
+  if (value > 0 && !pid) throw new GalaError('reserved_pool_required');
   // 锁活动行与抽签串行：避免抽签进行中插入的预留名额在该轮结束后才提交，变成永远用不到的悬挂名额。
   return await inTx(db, async (tx) => {
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
+    // 奖池在同一事务里、锁住活动之后再核对（并共享锁住，直到名额写入）：事务外读到的奖池可能已被恢复替换成
+    // 别的活动或员工奖池，名额写进去要到发放时才失败。
+    if (pid) {
+      const pool = await tx.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1 FOR SHARE', [pid, id]);
+      if (!pool) throw new GalaError('reserved_pool_required');
+    }
     // 抽签总是从该环节已抽的最大轮次 + 1 开始，轮次号不大于最大已抽轮次的名额永远用不到
     // （例如恢复的数据里有第 1、3 轮，第 2 轮的名额不会被消费，却会一直把这个人排除在普通抽签之外）。
     const drawn = await tx.get(

@@ -21,7 +21,9 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
-import { GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_SEGMENTS } from '../../services/galaService.js';
+import {
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_RESTORE_GENERATION_SEQ, GALA_SEGMENTS,
+} from '../../services/galaService.js';
 import { GALA_PUBLIC_GRANT_BACKFILL_SQL } from '../../db/galaSchema.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
@@ -335,8 +337,10 @@ export function findGalaFundingErrors(backupData) {
     }
     if (w?.pool_id != null && !poolOk(w.pool_id, w.event_id, reserved)) {
       errors.push(`gala_round_winners#${w?.id} 引用的奖池 ${w.pool_id} 不是同一活动的${reserved ? '预留' : '员工'}奖池`);
-    } else if (w?.awarded_at == null && Number(w?.amount) > 0 && w?.pool_id == null) {
-      errors.push(`gala_round_winners#${w?.id} 未发放奖励 ${w?.amount} 缺少同一活动的${reserved ? '预留' : '员工'}奖池`);
+    } else if (Number(w?.amount) > 0 && w?.pool_id == null) {
+      // 已发和待发的正数奖励都必须有出处：已发的没有奖池，就是一笔不在任何预算里的支出，
+      // 恢复后奖池账面会少算这笔钱（预留奖池可以借此超发）。
+      errors.push(`gala_round_winners#${w?.id} 的奖励 ${w?.amount} 缺少同一活动的${reserved ? '预留' : '员工'}奖池`);
     }
   }
   // 待用名额的轮次号必须大于该活动该环节已抽的最大轮次，否则恢复后永远用不到，
@@ -358,8 +362,8 @@ export function findGalaFundingErrors(backupData) {
     }
     if (slot?.pool_id != null && !poolOk(slot.pool_id, slot.event_id, true)) {
       errors.push(`gala_reserved_slots#${slot?.id} 引用的奖池 ${slot.pool_id} 不是同一活动的预留奖池`);
-    } else if ((slot?.status ?? 'pending') === 'pending' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
-      errors.push(`gala_reserved_slots#${slot?.id} 待用名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
+    } else if ((slot?.status ?? 'pending') !== 'cancelled' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
+      errors.push(`gala_reserved_slots#${slot?.id} 的名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
     }
     if (slot?.status === 'used' && slot?.used_round_id == null) {
       errors.push(`gala_reserved_slots#${slot?.id} 已使用却没有关联轮次`);
@@ -370,6 +374,14 @@ export function findGalaFundingErrors(backupData) {
         errors.push(`gala_reserved_slots#${slot?.id} 引用的轮次 ${slot.used_round_id} 不在备份的同一活动中`);
       } else if (String(used.segment) !== String(slot?.segment) || Number(used.round_no) !== Number(slot?.round_no)) {
         errors.push(`gala_reserved_slots#${slot?.id} 预定的是 ${slot?.segment} 第 ${slot?.round_no} 轮，却记在轮次 ${used.id}（${used.segment} 第 ${used.round_no} 轮）上`);
+      } else if (slot?.status === 'used') {
+        // 已使用的名额占本轮一个位置。对应的预留中奖记录只会因用户重置被删掉，那时本轮一定空出一个位置；
+        // 记录不在、位置却被别人占满，说明这一位被换成了普通中奖人，恢复后会从员工奖池发给错误的人。
+        const hasWinner = winnersList.some((w) => Number(w?.round_id) === Number(used.id)
+          && Number(w?.is_reserved) === 1 && String(w?.userid) === String(slot?.userid));
+        if (!hasWinner && (winnersPerRound.get(Number(used.id)) || 0) >= Number(used.draw_count || 0)) {
+          errors.push(`gala_reserved_slots#${slot?.id} 已使用，但轮次 ${used.id} 里没有它的中奖记录且名额已被占满`);
+        }
       }
     }
   }
@@ -1267,10 +1279,13 @@ export function registerAdminBackupRoutes(router) {
     try {
       const report = await runInTransaction(db, async (tx) => {
         await lockAdminAccountProtection(tx);
-        // 全量恢复与发币、入账互斥：在动任何数据之前锁住流水表和中奖记录表（阻塞并发 INSERT/UPDATE，
-        // 不阻塞读）。恢复期间没有新流水分配 ID，后面推进流水序列时不会回拨；进行中的年会发放也会等恢复结束，
-        // 再按轮次核对发现数据已被替换而停止。
+        // 全量恢复与发币、入账互斥。先拿年会写入锁的排他模式：年会抽签/发放事务都在碰任何表之前拿它的共享模式，
+        // 两边加锁顺序一致，不会出现“恢复锁了流水表等中奖记录、发放改了中奖记录等流水表”的死锁。
+        // 再推进恢复代数（发放据此发现期间发生过恢复而整次作废），然后锁住流水表和中奖记录表
+        // （阻塞并发 INSERT/UPDATE，不阻塞读），恢复期间没有新流水分配 ID，后面推进流水序列时不会回拨。
         if (backupMode === 'full') {
+          await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+          await tx.get(`SELECT nextval('${GALA_RESTORE_GENERATION_SEQ}') AS generation`, []);
           await tx.exec('LOCK TABLE ledger, gala_round_winners IN SHARE ROW EXCLUSIVE MODE');
         }
         const report = {};

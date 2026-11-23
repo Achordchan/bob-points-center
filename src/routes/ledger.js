@@ -107,8 +107,8 @@ export function ledgerRouter() {
       const account = req.bobToken
         ? await getTrustedAccountOptions(db, req.app.locals.cfg, userid)
         : { userid };
-      // 第三方系统（bob_token）查询时不返回年会预留名额的发放流水；用户本人（会话）照常可见。
-      const result = await listLedgerRecords(db, { ...account, page, pageSize, hideReservedGala: Boolean(req.bobToken) });
+      // 第三方系统（bob_token）查询时不返回任何年会发放流水（只藏预留那一笔会让预留对象显得与众不同）；用户本人（会话）照常可见。
+      const result = await listLedgerRecords(db, { ...account, page, pageSize, hideGalaAwards: Boolean(req.bobToken) });
       return res.json(result);
     } catch (err) {
       const message = String(err?.message || err);

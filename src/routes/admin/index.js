@@ -1167,9 +1167,10 @@ export function adminRouter() {
           [userid],
         )
         : null;
-      // 年会预留名额的发放流水只给超级管理员看：中奖记录 ID 是公开的，流水的 ref_id 与金额能把预留对象对应出来。
+      // 年会发放流水（GALA_W）只给超级管理员看：若只藏预留那一笔，公开中奖名单里“唯独没有发放流水”的人就是预留对象，
+      // 所以普通管理员一律看不到任何人的年会发放流水（余额照常，含这些奖励）。
       const ledgerResult = await listLedgerRecords(db, {
-        userid, page: 1, pageSize: 120, hideReservedGala: req.adminAccess?.isSuperAdmin !== true,
+        userid, page: 1, pageSize: 120, hideGalaAwards: req.adminAccess?.isSuperAdmin !== true,
       });
       const ledger = ledgerResult.data || [];
       const redeems = await db.all(

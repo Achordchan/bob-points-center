@@ -376,3 +376,50 @@ test('年会备份：普通奖励已发完、只剩预留奖励待发时允许�
   };
   assert.deepEqual(findGalaFundingErrors(snap), []);
 });
+
+test('年会备份：已发放的正数奖励和已使用名额同样必须挂在奖池上', () => {
+  const ok = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 8 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'none', amount_each: 0, status: 'granted', granted_at: 1, public_granted_at: 1 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 8, pool_id: 2, is_reserved: 1, awarded_at: 1, ledger_id: 9 }],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
+    ledger: [{ id: 9, userid: 'k', delta: 8, ref_id: 'GALA_W1' }],
+  });
+  assert.deepEqual(findGalaFundingErrors(ok()), []);
+  // 已发放的预留奖励和对应名额都去掉奖池：这笔钱不在任何预算里
+  const paid = ok();
+  paid.gala_round_winners[0].pool_id = null;
+  paid.gala_reserved_slots[0].pool_id = null;
+  const errors = findGalaFundingErrors(paid);
+  assert.ok(errors.some((e) => e.startsWith('gala_round_winners#1') && e.includes('缺少同一活动的预留奖池')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('缺少同一活动的预留奖池')), errors.join('\n'));
+  // 已取消的名额不再要求奖池
+  const cancelled = ok();
+  cancelled.gala_round_winners = [];
+  cancelled.gala_pools[0].spent = 0;
+  cancelled.ledger = [];
+  cancelled.gala_rounds[0].status = 'drawn';
+  cancelled.gala_rounds[0].granted_at = null;
+  cancelled.gala_rounds[0].public_granted_at = null;
+  cancelled.gala_reserved_slots[0] = { id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', amount: 8, pool_id: null, status: 'cancelled' };
+  assert.deepEqual(findGalaFundingErrors(cancelled), []);
+});
+
+test('年会备份：已使用名额缺少预留中奖记录时，本轮必须空出一个位置', () => {
+  const snap = (winners) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 10, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
+    gala_round_winners: winners,
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
+    ledger: [],
+  });
+  // 预留记录被用户重置删掉、位置空着：合法
+  assert.deepEqual(findGalaFundingErrors(snap([])), []);
+  // 单人轮：名额已使用，唯一的位置却是另一个普通中奖人
+  const errors = findGalaFundingErrors(snap([{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null }]));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('名额已被占满')), errors.join('\n'));
+});
