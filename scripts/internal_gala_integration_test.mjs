@@ -207,6 +207,57 @@ async function main() {
       const left = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [ev.id, target]);
       assert.equal(Number(left.n), 0);
       console.log('✓ 用户重置会清理未发放的年会奖励与参与记录');
+
+      // 抽签与重置并发：无论谁先拿到锁，重置后的账户都不能再拿到这一轮的奖励
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const evR = await createGalaEvent(db, { title: `${PREFIX} 重置并发${i}`, totalBudget: 0 });
+        // eslint-disable-next-line no-await-in-loop
+        const pR = await createGalaPool(db, { eventId: evR.id, name: '并发重置池', budget: 1000 });
+        // eslint-disable-next-line no-await-in-loop
+        await addGalaParticipants(db, { eventId: evR.id, userids: [target, uid(1)] });
+        // eslint-disable-next-line no-await-in-loop
+        const [dr, pr] = await Promise.allSettled([
+          drawGalaRound(db, { eventId: evR.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pR.id, amountEach: 7 }),
+          db.transaction((tx) => purgeUserBusinessData(tx, [target])),
+        ]);
+        assert.equal(dr.status, 'fulfilled', String(dr.reason?.code || dr.reason));
+        assert.equal(pr.status, 'fulfilled', String(pr.reason?.code || pr.reason));
+        // eslint-disable-next-line no-await-in-loop
+        await grantGalaRound(db, { roundId: dr.value.round.id });
+        // eslint-disable-next-line no-await-in-loop
+        const leftover = await db.get(
+          'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND userid = ?',
+          [dr.value.round.id, target],
+        );
+        assert.equal(Number(leftover.n), 0, '重置后不应残留该用户的中奖记录');
+        // eslint-disable-next-line no-await-in-loop
+        assert.equal(await balanceOf(db, target), 0, '抽签与重置并发后不应给已重置账户发币');
+      }
+      console.log('✓ 抽签与用户重置并发：已重置账户不会拿到奖励');
+    }
+
+    // 兜底：缺少奖池或奖池不属于同一活动的正数奖励不能发放
+    {
+      const evA = await createGalaEvent(db, { title: `${PREFIX} 无池`, totalBudget: 0 });
+      const evB = await createGalaEvent(db, { title: `${PREFIX} 他池`, totalBudget: 0 });
+      const pB = await createGalaPool(db, { eventId: evB.id, name: '他池', budget: 1000 });
+      const pA = await createGalaPool(db, { eventId: evA.id, name: '本池', budget: 1000 });
+      await addGalaParticipants(db, { eventId: evA.id, userids: [uid(2), uid(3)] });
+      const d = await drawGalaRound(db, { eventId: evA.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pA.id, amountEach: 9 });
+      const [w1, w2] = d.winners.map((w) => w.userid);
+      await db.exec(`UPDATE gala_round_winners SET pool_id = NULL WHERE round_id = ${Number(d.round.id)} AND userid = '${w1}'`);
+      await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pB.id)} WHERE round_id = ${Number(d.round.id)} AND userid = '${w2}'`);
+      const b1 = await balanceOf(db, w1);
+      const b2 = await balanceOf(db, w2);
+      const g = await grantGalaRound(db, { roundId: d.round.id });
+      assert.equal(g.granted.length, 0);
+      assert.deepEqual(g.failed.map((f) => f.error).sort(), ['winner_pool_missing', 'winner_pool_missing']);
+      assert.equal(await balanceOf(db, w1), b1);
+      assert.equal(await balanceOf(db, w2), b2);
+      const spentB = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pB.id]);
+      assert.equal(Number(spentB.spent), 0);
+      console.log('✓ 发币兜底：无奖池或跨活动奖池的奖励不会发放');
     }
 
     // 环节停用后不能抽签

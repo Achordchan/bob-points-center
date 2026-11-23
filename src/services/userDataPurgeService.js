@@ -47,6 +47,11 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
        FOR UPDATE`,
     [...targets, ...targets, ...targets],
   );
+  // 年会抽签先锁活动行（FOR UPDATE）再读取参与者、写入中奖记录。清理先对全部年会活动加共享锁，
+  // 与进行中的抽签串行：抽签先拿到锁，清理会等它提交后再删除新写入的中奖记录；
+  // 清理先拿到锁，抽签会等清理提交后才读参与者，此时目标用户已不在名单里。
+  // 年会活动数量很少，全部加锁的代价可以忽略；共享锁之间不冲突，多个清理可以并行。
+  await tx.all('SELECT id FROM gala_events ORDER BY id FOR SHARE');
   // 年会发币顺序是「中奖记录 → 奖池 → 账户」，这里同样先锁未发放的中奖记录再锁账户：
   // 并发发币要么在清理前完成（随后流水被删、余额清零），要么等清理提交后发现记录已删除而跳过，
   // 不会给已重置的账户补发旧奖励。

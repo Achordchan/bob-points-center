@@ -32,6 +32,35 @@ const GALA_BACKUP_TABLES = [
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
 
+// 校验备份中年会数据的资金关系，返回错误描述列表（为空表示通过）。
+export function findGalaFundingErrors(backupData) {
+  const errors = [];
+  const asList = (v) => (Array.isArray(v) ? v : []);
+  const pools = new Map(asList(backupData?.gala_pools).map((p) => [Number(p?.id), p]));
+  const rounds = new Map(asList(backupData?.gala_rounds).map((r) => [Number(r?.id), r]));
+  const poolOk = (poolId, eventId, reserved) => {
+    const pool = pools.get(Number(poolId));
+    if (!pool || Number(pool.event_id) !== Number(eventId)) return false;
+    return reserved == null || (Number(pool.is_reserved) === 1) === reserved;
+  };
+  for (const w of asList(backupData?.gala_round_winners)) {
+    const round = rounds.get(Number(w?.round_id));
+    if (!round || Number(round.event_id) !== Number(w?.event_id)) {
+      errors.push(`gala_round_winners#${w?.id} 的轮次不存在或不属于同一活动`);
+      continue;
+    }
+    if (w?.awarded_at == null && Number(w?.amount) > 0 && !poolOk(w?.pool_id, w?.event_id, null)) {
+      errors.push(`gala_round_winners#${w?.id} 未发放奖励 ${w?.amount} 缺少同一活动的奖池`);
+    }
+  }
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') === 'pending' && Number(slot?.amount) > 0 && !poolOk(slot?.pool_id, slot?.event_id, true)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
+    }
+  }
+  return errors;
+}
+
 export function registerAdminBackupRoutes(router) {
 
   // 设置类表：结构配置，适合日常导出恢复
@@ -441,6 +470,20 @@ export function registerAdminBackupRoutes(router) {
         const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
+      }
+      // 资金关系校验：未发放的正数奖励（中奖记录/待用预留名额）必须挂在备份内同一活动的奖池上，
+      // 中奖记录必须属于备份内同一活动的轮次。否则发币时会在任何预算之外入账。
+      // merge 拒绝任何年会 ID 冲突、overwrite 会先清空年会表，所以只需在备份内部校验。
+      if (present.length === GALA_BACKUP_TABLES.length) {
+        const galaFundingErrors = findGalaFundingErrors(backupData);
+        if (galaFundingErrors.length) {
+          await failHistory('失败', { reason: 'invalid_gala_funding', errors: galaFundingErrors.slice(0, 20), backupMode });
+          return res.status(400).json({
+            error: `年会数据资金关系不完整，已拒绝导入：${galaFundingErrors.slice(0, 5).join('；')}`,
+            errors: galaFundingErrors.slice(0, 20),
+            backupMode,
+          });
+        }
       }
     }
 

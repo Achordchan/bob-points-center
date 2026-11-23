@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matchPathPermission } from '../../src/services/adminPermissionService.js';
 import { pickRandom } from '../../src/services/galaService.js';
+import { findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
 
 test('年会预留名额与预留奖池只允许超级管理员', () => {
   for (const [m, p] of [
@@ -61,4 +62,31 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
   assert.match(source, /for \(const table of GALA_BACKUP_TABLES\) optionalFullTables\.add\(table\.name\)/);
   assert.match(source, /年会数据必须整组导入/);
   assert.match(source, /合并导入存在年会数据 ID 冲突/);
+});
+
+test('年会备份资金关系校验：未发放奖励必须挂在同一活动的奖池上', () => {
+  const base = {
+    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0 }, { id: 2, event_id: 10, is_reserved: 1 }, { id: 3, event_id: 20, is_reserved: 0 }],
+    gala_rounds: [{ id: 5, event_id: 10 }],
+    gala_round_winners: [
+      { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
+      { id: 2, round_id: 5, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
+      { id: 3, round_id: 5, event_id: 10, amount: 50, pool_id: null, awarded_at: 1700000000 },
+    ],
+    gala_reserved_slots: [
+      { id: 1, event_id: 10, amount: 20, pool_id: 2, status: 'pending' },
+      { id: 2, event_id: 10, amount: 20, pool_id: null, status: 'used' },
+    ],
+  };
+  assert.deepEqual(findGalaFundingErrors(base), []);
+  const bad = structuredClone(base);
+  bad.gala_round_winners.push({ id: 4, round_id: 5, event_id: 10, amount: 50, pool_id: null, awarded_at: null });
+  bad.gala_round_winners.push({ id: 5, round_id: 5, event_id: 10, amount: 50, pool_id: 3, awarded_at: null });
+  bad.gala_round_winners.push({ id: 6, round_id: 99, event_id: 10, amount: 0, pool_id: null, awarded_at: null });
+  bad.gala_reserved_slots.push({ id: 3, event_id: 10, amount: 20, pool_id: 1, status: 'pending' });
+  const errors = findGalaFundingErrors(bad);
+  assert.equal(errors.length, 4, errors.join('\n'));
+  for (const tag of ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_reserved_slots#3']) {
+    assert.ok(errors.some((e) => e.startsWith(tag)), tag);
+  }
 });

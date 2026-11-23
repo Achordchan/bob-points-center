@@ -535,19 +535,23 @@ async function awardWinner(db, { winnerId, reason }) {
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
         WHERE id = ? AND awarded_at IS NULL AND amount > 0
-        RETURNING id, userid, name_snapshot, pool_id, amount`,
+        RETURNING id, event_id, userid, name_snapshot, pool_id, amount`,
       [winnerId],
     );
     if (!claimed) return { skipped: true };
     const amount = Number(claimed.amount);
-    if (claimed.pool_id) {
-      const pool = await tx.get(
-        `UPDATE gala_pools SET spent = spent + ?, updated_at = unixepoch()
-          WHERE id = ? AND spent + ? <= budget
-          RETURNING id`,
-        [amount, claimed.pool_id, amount],
-      );
-      if (!pool) throw new GalaError('pool_budget_exceeded', 409);
+    // 每一笔正数奖励都必须从同一活动的奖池扣减。抽签与预留名额只会产生这种记录，
+    // 这里再兜底一次，防止残缺或被篡改的备份导入后在预算之外发币。
+    if (!claimed.pool_id) throw new GalaError('winner_pool_missing', 409);
+    const pool = await tx.get(
+      `UPDATE gala_pools SET spent = spent + ?, updated_at = unixepoch()
+        WHERE id = ? AND event_id = ? AND spent + ? <= budget
+        RETURNING id`,
+      [amount, claimed.pool_id, claimed.event_id, amount],
+    );
+    if (!pool) {
+      const exists = await tx.get('SELECT 1 AS x FROM gala_pools WHERE id = ? AND event_id = ?', [claimed.pool_id, claimed.event_id]);
+      throw new GalaError(exists ? 'pool_budget_exceeded' : 'winner_pool_missing', 409);
     }
     const granted = await grantBob(tx, {
       userid: claimed.userid,
