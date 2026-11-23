@@ -92,7 +92,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_reserved_slots.push({ id: 3, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
   // #5 挂到别的活动的奖池上，那个奖池也因此“欠账”超过已分配额
-  const tags = ['gala_pools#3', 'gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
+  const tags = ['gala_rounds#5', 'gala_pools#3', 'gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
   for (const tag of tags) assert.ok(errors.some((e) => e.startsWith(tag)), tag);
   assert.ok(errors.every((e) => tags.some((tag) => e.startsWith(tag))), errors.join('\n'));
 });
@@ -333,6 +333,24 @@ test('年会备份：每轮中奖人数不超过抽签人数、已分配额不�
   const dangling = ok();
   dangling.gala_reserved_slots.push({ id: 9, event_id: 1, segment: 'game', round_no: 1, userid: 'k', amount: 0, status: 'used', used_round_id: null });
   assert.ok(findGalaFundingErrors(dangling).some((e) => e.startsWith('gala_reserved_slots#9') && e.includes('没有关联轮次')));
+
+  // 奖品配置与在线抽签一致
+  const noneWithPool = ok();
+  noneWithPool.gala_rounds[0].prize_type = 'none';
+  noneWithPool.gala_round_winners = [];
+  assert.ok(findGalaFundingErrors(noneWithPool).some((e) => e.startsWith('gala_rounds#1') && e.includes('无币轮')));
+  const coinZero = ok();
+  coinZero.gala_rounds[0].amount_each = 0;
+  assert.ok(findGalaFundingErrors(coinZero).some((e) => e.startsWith('gala_rounds#1') && e.includes('单价')));
+
+  // 同一轮两个已使用名额
+  const twoUsed = ok();
+  twoUsed.gala_pools.push({ id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 });
+  twoUsed.gala_reserved_slots.push(
+    { id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k1', amount: 0, status: 'used', used_round_id: 1 },
+    { id: 2, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k2', amount: 0, status: 'used', used_round_id: 1 },
+  );
+  assert.ok(findGalaFundingErrors(twoUsed).some((e) => e.startsWith('gala_reserved_slots#2') && e.includes('每轮最多 1 个')));
 
   // 完成状态与待发记录矛盾
   const pubDone = ok();

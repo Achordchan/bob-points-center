@@ -1167,7 +1167,10 @@ export function adminRouter() {
           [userid],
         )
         : null;
-      const ledgerResult = await listLedgerRecords(db, { userid, page: 1, pageSize: 120 });
+      // 年会预留名额的发放流水只给超级管理员看：中奖记录 ID 是公开的，流水的 ref_id 与金额能把预留对象对应出来。
+      const ledgerResult = await listLedgerRecords(db, {
+        userid, page: 1, pageSize: 120, hideReservedGala: req.adminAccess?.isSuperAdmin !== true,
+      });
       const ledger = ledgerResult.data || [];
       const redeems = await db.all(
         `SELECT r.exchange_id, r.userid, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,

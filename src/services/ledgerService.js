@@ -188,7 +188,7 @@ export async function deductBob(db, { userid, amount, reason, refId, name }) {
   return await run(db);
 }
 
-export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name, createUser = false }) {
+export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, name, createUser = false, hideReservedGala = false }) {
   if (!userid) {
     throw new Error('missing userid');
   }
@@ -208,6 +208,9 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
      LEFT JOIN users peer ON peer.userid = l.ref_id
      LEFT JOIN redeems r ON r.exchange_id = l.ref_id
      WHERE l.userid = ?
+       ${hideReservedGala ? `AND NOT EXISTS (
+         SELECT 1 FROM gala_round_winners w
+          WHERE w.is_reserved = 1 AND l.ref_id = 'GALA_W' || w.id::text)` : ''}
      ORDER BY l.created_at DESC, l.id DESC
      LIMIT ? OFFSET ?`,
     [String(userid), ps, offset],

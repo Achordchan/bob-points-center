@@ -346,6 +346,7 @@ export async function inferLedgerOperation(db, row, direction) {
      LEFT JOIN users u ON u.userid = l.userid
      WHERE l.created_at BETWEEN ? AND ?
        AND ${positive ? 'l.delta > 0' : "l.delta < 0 AND l.reason = 'admin_deduct'"}
+       AND COALESCE(l.ref_id, '') NOT LIKE 'GALA_W%'
      ORDER BY l.id ASC
      LIMIT 50`,
     [createdAt - 5, createdAt + 2],

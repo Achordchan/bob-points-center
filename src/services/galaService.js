@@ -401,19 +401,19 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   return await inTx(db, async (tx) => {
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
-    return allActiveDingtalk ? await addAllActive(tx, id) : await addListed(tx, id, list, table);
+    return allActiveDingtalk ? await addAllActive(tx, id, table) : await addListed(tx, id, list, table);
   });
 }
 
-async function addAllActive(db, id) {
+async function addAllActive(db, id, table) {
   const result = await db.run(
-    `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
-     SELECT ?, u.userid, COALESCE(NULLIF(p.name, ''), u.name), 'admin'
+    `INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
+     SELECT ?, u.userid, COALESCE(NULLIF(p.name, ''), u.name), CAST(? AS INTEGER), 'admin'
        FROM users u
        JOIN user_dingtalk_profiles p ON p.userid = u.userid
       WHERE p.active = 1 AND u.source = 'dingtalk'
      ON CONFLICT (event_id, userid) DO NOTHING`,
-    [id],
+    [id, table],
   );
   return { added: result.changes, missing: [] };
 }

@@ -149,8 +149,21 @@ export function findGalaFundingErrors(backupData) {
     }
   }
   for (const r of rounds.values()) {
-    if (r?.pool_id != null && !poolOk(r.pool_id, r.event_id, false)) {
-      errors.push(`gala_rounds#${r?.id} 引用的奖池 ${r.pool_id} 不是同一活动的员工奖池`);
+    // 与在线抽签一致：无币轮没有奖池、单价为 0；发币轮必须挂同一活动的员工奖池且单价为正。
+    // 否则无币轮也会被计入已分配额，永久占用员工预算。
+    const prize = r?.prize_type ?? 'none';
+    if (prize === 'none') {
+      if (r?.pool_id != null || Number(r?.amount_each || 0) !== 0) {
+        errors.push(`gala_rounds#${r?.id} 是无币轮，却带奖池或单价`);
+      }
+    } else if (prize === 'coin') {
+      if (r?.pool_id == null || !poolOk(r.pool_id, r.event_id, false)) {
+        errors.push(`gala_rounds#${r?.id} 引用的奖池 ${r?.pool_id} 不是同一活动的员工奖池`);
+      } else if (!(Number(r?.amount_each) > 0)) {
+        errors.push(`gala_rounds#${r?.id} 是发币轮，单价必须大于 0`);
+      }
+    } else {
+      errors.push(`gala_rounds#${r?.id} 的奖品类型 ${prize} 无效`);
     }
   }
 
@@ -190,6 +203,23 @@ export function findGalaFundingErrors(backupData) {
     if (round && n > Number(round?.draw_count || 0)) {
       errors.push(`gala_rounds#${roundId} 有 ${n} 条中奖记录，超过抽签人数 ${Number(round?.draw_count || 0)}`);
     }
+  }
+  // 每轮最多一个预留中奖人、一个已使用名额（在线抽签每轮只消费一个名额）。
+  const reservedPerRound = new Map();
+  for (const w of winnersList) {
+    if (Number(w?.is_reserved) !== 1) continue;
+    const key = Number(w?.round_id);
+    reservedPerRound.set(key, (reservedPerRound.get(key) || 0) + 1);
+  }
+  for (const [roundId, n] of reservedPerRound) {
+    if (n > 1) errors.push(`gala_rounds#${roundId} 有 ${n} 条预留中奖记录，每轮最多 1 条`);
+  }
+  const slotKeys = new Map();
+  for (const sl of asList(backupData?.gala_reserved_slots)) {
+    if (sl?.status !== 'used') continue;
+    const key = `${Number(sl?.event_id)}:${sl?.segment}:${Number(sl?.round_no)}`;
+    if (slotKeys.has(key)) errors.push(`gala_reserved_slots#${sl?.id} 与 #${slotKeys.get(key)} 是同一轮的已使用名额，每轮最多 1 个`);
+    else slotKeys.set(key, sl?.id);
   }
   // 与在线创建相同：每场活动未取消的预留名额不超过上限。
   const slotsPerEvent = new Map();

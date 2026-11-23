@@ -720,6 +720,19 @@ async function main() {
       assert.equal(r.body.data[0].status, 'granted');
       assert.equal(r.body.data[0].winners.find((w) => w.is_reserved === 1).awarded, 1);
       assert.ok(!JSON.stringify(r.body).includes('balance'), '轮次接口不返回余额');
+      // 流水查询端：预留名额的发放流水只给超管；非超管看不到，审计推断也不会带出
+      const isGalaW = (row) => String(row.ref_id || '').startsWith('GALA_W');
+      r = await call(operatorId, 'GET', `/users/${encodeURIComponent(kid)}`);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(r.body.data.ledger.filter(isGalaW).length, 0, '非超管的用户流水里没有预留发放');
+      r = await call(superId, 'GET', `/users/${encodeURIComponent(kid)}`);
+      assert.equal(r.body.data.ledger.filter(isGalaW).length, 2, '超管能看到两笔预留发放');
+      const ordinaryWinner = (await db.get(
+        `SELECT w.userid FROM gala_round_winners w WHERE w.round_id = ? AND w.is_reserved = 0 AND w.awarded_at IS NOT NULL LIMIT 1`,
+        [r2.round.id],
+      )).userid;
+      r = await call(operatorId, 'GET', `/users/${encodeURIComponent(ordinaryWinner)}`);
+      assert.ok(r.body.data.ledger.some(isGalaW), '普通中奖人的发放流水照常可见');
       console.log('✓ HTTP：预留接口仅超管可用，非超管返回中不暴露预留信息');
     } finally {
       server.close();
