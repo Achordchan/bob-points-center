@@ -225,3 +225,20 @@ test('年会备份：标识符必须是安全范围内的正整数', () => {
   assert.ok(errors.some((e) => e.startsWith('gala_events#9007199254740993') && e.includes('id=')), errors.join('\n'));
   assert.ok(errors.some((e) => e.startsWith('gala_pools#1') && e.includes('event_id=')), errors.join('\n'));
 });
+
+test('年会备份：待用名额必须落在可抽签环节', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [], gala_participants: [], gala_rounds: [], gala_round_winners: [],
+    gala_reserved_slots: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, amount: 0, status: 'pending' },
+      { id: 2, event_id: 1, segment: 'lotery', round_no: 1, amount: 0, status: 'pending' },
+      { id: 3, event_id: 1, segment: 'danmaku', round_no: 1, amount: 0, status: 'pending' },
+      { id: 4, event_id: 1, segment: 'lotery', round_no: 1, amount: 0, status: 'cancelled' },
+    ],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.equal(errors.length, 2, errors.join('\n'));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#2')));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#3')));
+});

@@ -21,6 +21,7 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
+import { GALA_DRAW_SEGMENTS } from '../../services/galaService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
 const GALA_BACKUP_TABLES = [
@@ -207,7 +208,12 @@ export function findGalaFundingErrors(backupData) {
     maxDrawn.set(key, Math.max(maxDrawn.get(key) || 0, Number(r?.round_no || 0)));
   }
   for (const slot of asList(backupData?.gala_reserved_slots)) {
-    if ((slot?.status ?? 'pending') === 'pending'
+    const pending = (slot?.status ?? 'pending') === 'pending';
+    // 与在线创建相同：待用名额必须落在可抽签的环节、轮次号为正整数，否则永远用不到，
+    // 却会把对应的人一直排除在普通抽签之外。
+    if (pending && (!GALA_DRAW_SEGMENTS.has(String(slot?.segment)) || !Number.isSafeInteger(Number(slot?.round_no)) || Number(slot?.round_no) < 1)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的环节 ${slot?.segment} 或轮次 ${slot?.round_no} 无效`);
+    } else if (pending
       && Number(slot?.round_no) <= (maxDrawn.get(`${Number(slot?.event_id)}:${slot?.segment}`) || 0)) {
       errors.push(`gala_reserved_slots#${slot?.id} 待用名额的第 ${slot?.round_no} 轮已经抽过`);
     }
