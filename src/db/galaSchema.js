@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   created_name TEXT,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   granted_at BIGINT,
+  -- 非超管看到的“已发放”时间：只要普通中奖记录全部发完（或本轮没有普通奖励）且执行过发放就写入，
+  -- 与预留名额发放成败无关，避免公开状态随预留奖励变化而暴露预留对象。
+  public_granted_at BIGINT,
   CONSTRAINT uq_gala_rounds_segment_no UNIQUE (event_id, segment, round_no),
   CONSTRAINT chk_gala_rounds_prize CHECK (prize_type IN ('none', 'coin')),
   CONSTRAINT chk_gala_rounds_status CHECK (status IN ('drawn', 'granted'))

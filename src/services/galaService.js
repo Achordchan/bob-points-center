@@ -152,20 +152,19 @@ function serializeWinner(row, { includeReserved }) {
 
 // 非超管看到的轮次状态只由普通中奖记录决定，完全不读整轮状态（整轮状态包含预留名额的发放结果）。
 // 没有普通待发奖励的轮次（不发币、或只有预留名额带奖励）没有“发放”这一步，固定显示 drawn。
-function publicRoundStatus(row, winners) {
-  const visible = (winners || []).filter((w) => Number(w.is_reserved) !== 1 && Number(w.amount) > 0);
-  if (visible.length === 0) return { status: 'drawn', granted_at: null };
-  const pending = visible.filter((w) => !w.awarded_at);
-  if (pending.length > 0) return { status: 'drawn', granted_at: null };
-  const grantedAt = Math.max(...visible.map((w) => Number(w.awarded_at)));
-  return { status: 'granted', granted_at: grantedAt };
+function publicRoundStatus(row) {
+  // 只看 public_granted_at：执行发放后普通奖励已全部发完（或本轮没有普通奖励）即写入，
+  // 与预留名额是否发放成功无关。单人轮次里无论中奖的是普通人还是预留对象，公开状态都一样。
+  return row.public_granted_at
+    ? { status: 'granted', granted_at: Number(row.public_granted_at) }
+    : { status: 'drawn', granted_at: null };
 }
 
 function serializeRound(row, winners, { includeReserved }) {
   const sorted = (winners || []).slice().sort((a, b) => Number(a.display_order) - Number(b.display_order));
   const state = includeReserved
     ? { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null }
-    : publicRoundStatus(row, sorted);
+    : publicRoundStatus(row);
   return {
     id: Number(row.id),
     event_id: Number(row.event_id),
@@ -465,9 +464,10 @@ export async function drawGalaRound(db, {
     // 预留名额占本轮一个名额：抽 N 人时普通抽 N-1 人，再加上预留对象，总数仍是 N。
     // 这样操作者和大屏看到的人数与请求一致，看不出本轮有预留。奖励仍从预留奖池出，不占员工预算。
     const pendingSlot = await tx.get(
-      `SELECT s.*, u.name AS user_name,
-              EXISTS (SELECT 1 FROM gala_participants p WHERE p.event_id = s.event_id AND p.userid = s.userid) AS enrolled
-         FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
+      `SELECT s.*, u.name AS user_name, p.name_snapshot AS participant_name, (p.userid IS NOT NULL) AS enrolled
+         FROM gala_reserved_slots s
+         JOIN users u ON u.userid = s.userid
+         LEFT JOIN gala_participants p ON p.event_id = s.event_id AND p.userid = s.userid
         WHERE s.event_id = ? AND s.segment = ? AND s.round_no = ? AND s.status = 'pending'
         FOR UPDATE OF s`,
       [id, seg, roundNo],
@@ -484,7 +484,9 @@ export async function drawGalaRound(db, {
     }
     const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
 
-    if (picked.length === 0 && !slot) throw new GalaError('no_eligible_participants', 409);
+    // 必须能把本轮名额全部填满，否则拒绝且不透露可抽人数：既不会留下一个永远补不齐的轮次，
+    // 也不会出现“抽出来的正好是名单里除了某人之外的所有人”而暴露未来的预留对象。
+    if (picked.length < (slot ? count - 1 : count)) throw new GalaError('not_enough_participants', 409);
 
     if (pool) {
       const remaining = Number(pool.budget) - Number(pool.spent);
@@ -503,7 +505,8 @@ export async function drawGalaRound(db, {
     if (slot) {
       winners.push({
         userid: slot.userid,
-        name: slot.user_name || slot.userid,
+        // 与普通中奖人一样取名单快照里的名字，避免只有预留对象显示得和名单不一样。
+        name: slot.participant_name || slot.userid,
         poolId: slot.pool_id ? Number(slot.pool_id) : null,
         amount: Number(slot.amount || 0),
         reserved: 1,
@@ -643,6 +646,9 @@ export async function grantGalaRound(db, { roundId }) {
        FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0`,
     [id],
   );
+  if (Number(pending?.public_n || 0) === 0) {
+    await db.run('UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ?', [id]);
+  }
   if (Number(pending?.n || 0) === 0 && round.status !== 'granted') {
     await db.run(`UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND status = 'drawn'`, [id]);
   }

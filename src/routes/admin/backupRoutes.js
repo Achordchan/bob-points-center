@@ -21,14 +21,14 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
-import { GALA_DRAW_SEGMENTS } from '../../services/galaService.js';
+import { GALA_DRAW_SEGMENTS, GALA_SEGMENTS } from '../../services/galaService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
 const GALA_BACKUP_TABLES = [
-  { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: '[]' } },
+  { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: JSON.stringify(Object.keys(GALA_SEGMENTS)) } },
   { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
   { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
-  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
+  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at', 'public_granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
   { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
@@ -157,6 +157,7 @@ export function findGalaFundingErrors(backupData) {
     if (cap > 0 && total > cap) errors.push(`gala_events#${eventId} 员工奖池预算合计 ${total} 超过活动总预算 ${cap}`);
   }
 
+  const usedSlots = asList(backupData?.gala_reserved_slots).filter((sl) => sl?.status === 'used');
   // 已发奖励必须已计入奖池支出，否则恢复后奖池还能再发一遍。
   const awardedByPool = new Map();
   for (const w of winnersList) {
@@ -178,6 +179,15 @@ export function findGalaFundingErrors(backupData) {
       continue;
     }
     const reserved = Number(w?.is_reserved) === 1;
+    // 预留中奖记录必须对应一条已使用的预留名额（同轮次、同一人、同奖池、同金额），
+    // 否则残缺备份可以凭空恢复出一笔预留奖励，发给错误的人或错误的金额。
+    if (reserved) {
+      const match = usedSlots.some((sl) => Number(sl.used_round_id) === Number(w.round_id)
+        && String(sl.userid) === String(w.userid)
+        && (sl.pool_id == null ? null : Number(sl.pool_id)) === (w.pool_id == null ? null : Number(w.pool_id))
+        && Number(sl.amount || 0) === Number(w.amount || 0));
+      if (!match) errors.push(`gala_round_winners#${w?.id} 是预留中奖记录，但找不到对应的已使用预留名额`);
+    }
     // 已发放的正数奖励必须带 ledger_id 作为付款凭据。用户重置会删除流水但保留 ledger_id，
     // 所以只要求 ledger_id 存在，不要求对应流水仍在备份里；完全没有凭据的“已发放”会让这笔奖励永远补发不了。
     if (w?.awarded_at != null && Number(w?.amount) > 0 && w?.ledger_id == null) {
@@ -2523,6 +2533,19 @@ export function registerAdminBackupRoutes(router) {
               }
               report[table.name] = count;
             }
+            // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
+            // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
+            await execOrThrow(
+              tx,
+              `SELECT setval(pg_get_serial_sequence('ledger', 'id'),
+                 GREATEST(
+                   COALESCE(pg_sequence_last_value(pg_get_serial_sequence('ledger', 'id')::regclass), 1),
+                   COALESCE((SELECT MAX(id) FROM ledger), 1),
+                   COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 1)
+                 ), true)`,
+              [],
+              'ledger sequence bump',
+            );
             // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水：
             // 合并后逐条核对，指向的流水若存在，ref_id 必须正是这条中奖记录。
             const winnerIds = (requireArray('gala_round_winners') || []).map((r) => Number(r?.id)).filter((n) => n > 0);

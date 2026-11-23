@@ -2,7 +2,6 @@ import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
 import { galaSchemaSql } from './galaSchema.js';
-import { GALA_SEGMENTS } from '../services/galaService.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -764,18 +763,6 @@ export async function initDb(input) {
   await db.get('SELECT 1');
   await db.exec(schemaSql);
   await db.exec(galaSchemaSql);
-  // enabled_segments 晚于 gala_events 引入时：先加列，再把加列前已存在的活动补成“全部环节启用”，
-  // 与新建活动的默认值一致；之后有意设置为空的活动不受影响（只在本次真正加列时回填）。
-  {
-    const col = await db.get(
-      `SELECT 1 AS x FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'gala_events' AND column_name = 'enabled_segments'`,
-    );
-    if (!col) {
-      await db.exec("ALTER TABLE gala_events ADD COLUMN enabled_segments TEXT NOT NULL DEFAULT '[]'");
-      await db.run('UPDATE gala_events SET enabled_segments = ?', [JSON.stringify(Object.keys(GALA_SEGMENTS))]);
-    }
-  }
   // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
   await db.exec(`DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_gala_round_winners_reserved') THEN
