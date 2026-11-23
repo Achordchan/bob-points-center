@@ -389,25 +389,36 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
 export async function addGalaParticipants(db, { eventId, userids = [], allActiveDingtalk = false, tableNo = null }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const event = await db.get('SELECT id FROM gala_events WHERE id = ?', [id]);
-  if (!event) throw new GalaError('event_not_found', 404);
   const table = tableNo === null || tableNo === undefined || tableNo === '' ? null : toPositiveId(tableNo, PG_INT_MAX);
   if (tableNo !== null && tableNo !== undefined && tableNo !== '' && table === null) throw new GalaError('invalid_table_no');
-  if (allActiveDingtalk) {
-    const result = await db.run(
-      `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
-       SELECT ?, u.userid, COALESCE(NULLIF(p.name, ''), u.name), 'admin'
-         FROM users u
-         JOIN user_dingtalk_profiles p ON p.userid = u.userid
-        WHERE p.active = 1 AND u.source = 'dingtalk'
-       ON CONFLICT (event_id, userid) DO NOTHING`,
-      [id],
-    );
-    return { added: result.changes, missing: [] };
-  }
-  const list = [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanText(x, 128)).filter(Boolean))];
-  if (list.length === 0) throw new GalaError('userids_required');
+  const list = allActiveDingtalk
+    ? []
+    : [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanText(x, 128)).filter(Boolean))];
+  if (!allActiveDingtalk && list.length === 0) throw new GalaError('userids_required');
   if (list.length > 2000) throw new GalaError('too_many_userids');
+  // 先锁活动行再写名单，与抽签、创建预留名额、移出名单的加锁顺序一致：
+  // 否则导入先插入名单行、再为外键等活动行，而预留事务已锁活动行又在 ON CONFLICT 处等导入提交，互相等待死锁。
+  return await inTx(db, async (tx) => {
+    const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
+    if (!event) throw new GalaError('event_not_found', 404);
+    return allActiveDingtalk ? await addAllActive(tx, id) : await addListed(tx, id, list, table);
+  });
+}
+
+async function addAllActive(db, id) {
+  const result = await db.run(
+    `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
+     SELECT ?, u.userid, COALESCE(NULLIF(p.name, ''), u.name), 'admin'
+       FROM users u
+       JOIN user_dingtalk_profiles p ON p.userid = u.userid
+      WHERE p.active = 1 AND u.source = 'dingtalk'
+     ON CONFLICT (event_id, userid) DO NOTHING`,
+    [id],
+  );
+  return { added: result.changes, missing: [] };
+}
+
+async function addListed(db, id, list, table) {
   // 一条 INSERT … SELECT 原子写入整批名单：并发抽签只能看到导入前或导入后的完整名单，不会抽到半份名单。
   const found = await db.all('SELECT userid FROM users WHERE userid = ANY(?::text[])', [list]);
   const foundSet = new Set(found.map((r) => r.userid));
@@ -656,14 +667,24 @@ export function serializeDrawResult(result, { includeReserved = false } = {}) {
 
 // ---------------------------------------------------------------- 发币
 
-async function awardWinner(db, { winnerId, reason }) {
+function sameRound(a, b) {
+  return a && b && Number(a.id) === Number(b.id) && Number(a.event_id) === Number(b.event_id)
+    && a.segment === b.segment && Number(a.round_no) === Number(b.round_no) && Number(a.created_at) === Number(b.created_at);
+}
+
+async function awardWinner(db, { winnerId, round, reason }) {
   return await db.transaction(async (tx) => {
+    // 先领取中奖记录（写中奖记录表，全量恢复进行中会在这里等它结束），再共享锁住本轮并核对它仍是
+    // 发放开始时读到的那一轮：恢复会删除并重建轮次，若已被替换则回滚并停止整次发放，
+    // 不会按旧的中奖记录 ID 给恢复后的另一条记录发币。先等表锁、后拿行锁，避免与恢复互相等待。
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
-        WHERE id = ? AND awarded_at IS NULL AND amount > 0
+        WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND amount > 0
         RETURNING id, event_id, userid, name_snapshot, pool_id, amount, is_reserved`,
-      [winnerId],
+      [winnerId, round.id],
     );
+    const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [round.id]);
+    if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     if (!claimed) return { skipped: true };
     const amount = Number(claimed.amount);
     // 每一笔正数奖励都必须从同一活动、且类型一致的奖池扣减：普通中奖扣员工奖池，预留名额扣预留奖池。
@@ -713,12 +734,14 @@ export async function grantGalaRound(db, { roundId }) {
   for (const w of winners) {
     const reserved = Number(w.is_reserved) === 1 ? 1 : 0;
     try {
-      const r = await awardWinner(db, { winnerId: w.id, reason });
+      const r = await awardWinner(db, { winnerId: w.id, round, reason });
       if (!r.skipped) granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
     } catch (err) {
+      // 本轮已被恢复替换：整次发放作废，不把错误写到新数据的中奖记录上。
+      if (err?.code === 'round_changed') throw err;
       const code = String(err?.code || err?.message || err);
       failed.push({ userid: w.userid, error: code, is_reserved: reserved });
-      await db.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND awarded_at IS NULL', [code, w.id]);
+      await db.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND round_id = ? AND awarded_at IS NULL', [code, w.id, id]);
     }
   }
   const pending = await db.get(
@@ -727,10 +750,16 @@ export async function grantGalaRound(db, { roundId }) {
     [id],
   );
   if (Number(pending?.public_n || 0) === 0) {
-    await db.run('UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ?', [id]);
+    await db.run(
+      'UPDATE gala_rounds SET public_granted_at = COALESCE(public_granted_at, unixepoch()) WHERE id = ? AND created_at = ?',
+      [id, round.created_at],
+    );
   }
   if (Number(pending?.n || 0) === 0 && round.status !== 'granted') {
-    await db.run(`UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND status = 'drawn'`, [id]);
+    await db.run(
+      `UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND created_at = ? AND status = 'drawn'`,
+      [id, round.created_at],
+    );
   }
   return {
     round_id: id,

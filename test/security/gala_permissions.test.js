@@ -91,7 +91,8 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_round_winners.push({ id: 9, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 0, awarded_at: null });
   bad.gala_reserved_slots.push({ id: 3, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
-  const tags = ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
+  // #5 挂到别的活动的奖池上，那个奖池也因此“欠账”超过已分配额
+  const tags = ['gala_pools#3', 'gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
   for (const tag of tags) assert.ok(errors.some((e) => e.startsWith(tag)), tag);
   assert.ok(errors.every((e) => tags.some((tag) => e.startsWith(tag))), errors.join('\n'));
 });
@@ -314,6 +315,14 @@ test('年会备份：每轮中奖人数不超过抽签人数、已分配额不�
   const reopened = ok();
   reopened.gala_round_winners[0].ledger_id = 77;
   assert.ok(findGalaFundingErrors(reopened).some((e) => e.startsWith('gala_round_winners#1') && e.includes('重复发放')));
+
+  // 员工奖池：实际支出 + 待发普通奖励不能超过已分配额（预算 100、支出 80、没有轮次）
+  const phantom = ok();
+  phantom.gala_pools[0].budget = 100;
+  phantom.gala_pools[0].spent = 80;
+  phantom.gala_rounds = [];
+  phantom.gala_round_winners = [];
+  assert.ok(findGalaFundingErrors(phantom).some((e) => e.startsWith('gala_pools#1') && e.includes('已分配额')));
 
   // 员工奖池余额不够付待发奖励
   const short = ok();

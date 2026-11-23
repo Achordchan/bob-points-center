@@ -241,6 +241,8 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${c.all} 条奖励待发`);
     }
   }
+  // 员工奖池：实际支出 + 待发普通奖励不能超过已分配额（在线时普通奖励都出自已分配的名额，这一关系恒成立）。
+  // 否则恢复后按“预算 − 已分配额”准入的抽签会承诺超过实际余额的奖励。已分配额 ≤ 预算另有校验。
   // 员工奖池的余额必须够付已有的待发普通奖励，否则恢复后这些奖励必定发放失败。
   const pendingByPool = new Map();
   for (const w of winnersList) {
@@ -252,6 +254,14 @@ export function findGalaFundingErrors(backupData) {
     const pool = pools.get(poolId);
     if (pool && Number(pool?.is_reserved) !== 1 && Number(pool.spent || 0) + total > Number(pool.budget || 0)) {
       errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 加待发奖励 ${total} 超过预算 ${Number(pool.budget || 0)}`);
+    }
+  }
+  for (const p of pools.values()) {
+    if (Number(p?.is_reserved) === 1) continue;
+    const key = Number(p?.id);
+    const owed = Number(p?.spent || 0) + (pendingByPool.get(key) || 0);
+    if (owed > (allocated.get(key) || 0)) {
+      errors.push(`gala_pools#${key} 的支出加待发奖励 ${owed} 超过已分配额 ${allocated.get(key) || 0}`);
     }
   }
 
@@ -1227,6 +1237,12 @@ export function registerAdminBackupRoutes(router) {
     try {
       const report = await runInTransaction(db, async (tx) => {
         await lockAdminAccountProtection(tx);
+        // 全量恢复与发币、入账互斥：在动任何数据之前锁住流水表和中奖记录表（阻塞并发 INSERT/UPDATE，
+        // 不阻塞读）。恢复期间没有新流水分配 ID，后面推进流水序列时不会回拨；进行中的年会发放也会等恢复结束，
+        // 再按轮次核对发现数据已被替换而停止。
+        if (backupMode === 'full') {
+          await tx.exec('LOCK TABLE ledger, gala_round_winners IN SHARE ROW EXCLUSIVE MODE');
+        }
         const report = {};
         let failedTable = null;
         let failedIndex = null;
@@ -2638,7 +2654,9 @@ export function registerAdminBackupRoutes(router) {
             }
             // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
             // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
-            await execOrThrow(
+            // 只有中奖记录确实保留了流水 ID 时才需要额外推进（表已在事务开头锁住，期间不会有并发分配）。
+            const keptLedger = await tx.get('SELECT COALESCE(MAX(ledger_id), 0) AS m FROM gala_round_winners', []);
+            if (Number(keptLedger?.m || 0) > 0) await execOrThrow(
               tx,
               `SELECT setval(pg_get_serial_sequence('ledger', 'id'),
                  GREATEST(

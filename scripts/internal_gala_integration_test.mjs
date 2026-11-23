@@ -516,6 +516,47 @@ async function main() {
     }
     console.log('✓ 移出名单与抽签串行，准入检查与实际候选人一致');
 
+    // 批量导入名单与创建预留名额同时加入同一个人：两者都先锁活动行，不会死锁
+    for (let i = 0; i < 8; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 导入并发${i}`, totalBudget: 0 });
+      // eslint-disable-next-line no-await-in-loop
+      const [ad, sl] = await Promise.allSettled([
+        addGalaParticipants(db, { eventId: ev.id, userids: [uid(7), uid(8), uid(9)] }),
+        createGalaReservedSlot(db, { eventId: ev.id, segment: 'lottery', roundNo: 1, userid: uid(8) }),
+      ]);
+      assert.equal(ad.status, 'fulfilled', String(ad.reason?.code || ad.reason));
+      assert.equal(sl.status, 'fulfilled', String(sl.reason?.code || sl.reason));
+      // eslint-disable-next-line no-await-in-loop
+      const n = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ?', [ev.id]);
+      assert.equal(Number(n.n), 3);
+    }
+    console.log('✓ 导入名单与创建预留名额并发不死锁');
+
+    // 发放绑定开始时读到的轮次：轮次被替换（模拟全量恢复重建了同 ID 的轮次）后发放停止，不写新数据
+    {
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 轮次替换`, totalBudget: 0 });
+      const p = await createGalaPool(db, { eventId: ev.id, name: '池', budget: 1000 });
+      await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: 20 }, (_, k) => uid(k + 1)) });
+      const d = await drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 10, prizeType: 'coin', poolId: p.id, amountEach: 1 });
+      const [g, swap] = await Promise.allSettled([
+        grantGalaRound(db, { roundId: d.round.id }),
+        (async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          await db.run('UPDATE gala_rounds SET created_at = created_at + 1 WHERE id = ?', [d.round.id]);
+        })(),
+      ]);
+      assert.equal(swap.status, 'fulfilled');
+      if (g.status === 'rejected') assert.equal(g.reason?.code, 'round_changed');
+      const errs = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND award_error IS NOT NULL', [d.round.id]);
+      assert.equal(Number(errs.n), 0, '轮次被替换后不应把错误写到中奖记录上');
+      const after = await grantGalaRound(db, { roundId: d.round.id });
+      const paid = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL', [d.round.id]);
+      assert.equal(Number(paid.n), 10, '对替换后的轮次重新发放，剩余的照常到账');
+      assert.ok(after.failed.length === 0);
+      console.log(`✓ 发放绑定轮次身份，被替换时停止（本次${g.status === 'rejected' ? '中途停止' : '在替换前完成'}）`);
+    }
+
     // 预留名额遵守本环节排除规则、每场活动有上限；单人发币轮的员工预算准入与预留无关
     {
       const ev = await createGalaEvent(db, { title: `${PREFIX} 预留规则`, totalBudget: 0 });
