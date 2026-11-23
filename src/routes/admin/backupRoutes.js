@@ -1279,7 +1279,8 @@ export function registerAdminBackupRoutes(router) {
            DECLARE
              seq regclass := pg_get_serial_sequence('${tableName}', 'id')::regclass;
              mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('${tableName}', 'id')::regclass);
-             target NUMERIC := COALESCE((SELECT MAX(id) FROM ${tableName}), 1) + 1;
+             -- 先转 numeric 再加一：INTEGER/BIGINT 列的最大 ID 已到类型上限时，直接 +1 会先整数溢出，到不了耗尽分支。
+             target NUMERIC := COALESCE((SELECT MAX(id)::numeric FROM ${tableName}), 1) + 1;
            BEGIN
              IF target > mx THEN
                EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
@@ -2450,22 +2451,24 @@ export function registerAdminBackupRoutes(router) {
           // accounts
           {
             const rows = requireArray('accounts') || [];
-            // 合并按备份覆盖账户余额。目标库里已经到账的年会奖励不一定在这份备份里（合并不导入年会表），
-            // 备份的余额也就可能不含它：覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发。
-            // 无法确认两份余额能否合并，凡是覆盖到目标库已有年会到账的账户都拒绝。此时备份里的年会数据还没写入，
-            // 查到的都是目标库原有的记录；表已在事务开头锁住。
+            // 合并按备份覆盖账户余额，而年会表不随合并导入，目标库的中奖记录无法和备份余额核对：
+            // - 已到账的奖励：备份余额可能不含它，覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发；
+            // - 待发的奖励：备份可能来自发币之后，余额已含这笔奖励，目标库却仍是待发，之后再发一次就加了两遍。
+            // 无法确认余额来源，凡是目标库有年会奖励（已到账或待发）的账户，只放行不改变当前余额的合并。
+            // 此时备份里的年会数据不会写入，查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
               const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
-              // 付款流水仍在（或没有凭据、无法判断）的奖励：备份余额无法确认含这笔奖励，一律拒绝。
-              // 付款流水已被重置删除的奖励：这只能证明目标库发生过重置，不能证明备份余额来自重置之后
-              // （重置前的余额快照会把奖励加回来，库里却没有这笔入账）。无法核对，只放行不改变当前余额的合并。
+              // 已到账且付款流水仍在（或没有凭据、无法判断）的奖励：备份余额无法确认含这笔奖励，一律拒绝。
+              // 付款流水已被重置删除的奖励、以及待发的奖励：只放行不改变当前余额的合并
+              // （重置前的余额快照会把奖励加回来，发币后的余额快照会让待发奖励再付一次）。
               // 流水此时还没导入，查到的都是目标库原有的。
               const paidRows = uids.length ? await tx.all(
                 `SELECT w.userid,
-                        BOOL_OR(w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id)) AS live,
+                        BOOL_OR(w.awarded_at IS NOT NULL
+                                AND (w.ledger_id IS NULL OR EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id))) AS live,
                         MAX(a.balance) AS balance
                    FROM gala_round_winners w LEFT JOIN accounts a ON a.userid = w.userid
-                  WHERE w.awarded_at IS NOT NULL AND w.amount > 0 AND w.userid = ANY(?::text[])
+                  WHERE w.amount > 0 AND w.userid = ANY(?::text[])
                   GROUP BY w.userid ORDER BY w.userid`,
                 [uids],
               ) : [];
@@ -2476,7 +2479,7 @@ export function registerAdminBackupRoutes(router) {
                 return Number(next?.balance ?? 0) !== Number(p.balance ?? 0);
               }).slice(0, 20);
               if (blocked.length) {
-                throw new Error(`合并导入会覆盖已有年会奖励到账的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额包含这些奖励，已拒绝导入`);
+                throw new Error(`合并导入会改变已有年会奖励（已到账或待发）的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额与这些奖励一致，已拒绝导入`);
               }
             }
             let count = 0;
@@ -2603,6 +2606,20 @@ export function registerAdminBackupRoutes(router) {
               ) : [];
               if (relinked.length) {
                 throw new Error(`合并导入会把已重置用户的年会付款流水重新挂回中奖记录（${relinked.map((r) => `#${r.id}→ledger#${r.ledger_id}`).join(', ')}），余额无法随之核对，已拒绝导入`);
+              }
+              // 备份里中奖记录引用的付款流水：年会表不随合并导入，这些流水在目标库就失去了与中奖记录的关联，
+              // 而对非超管和第三方查询隐藏年会入账正是靠这个关联（galaPayoutLedgerSql），导入后会被当成普通流水公开。
+              // 目标库已有同 ID 流水的会被跳过（ON CONFLICT DO NOTHING），不受影响；其余拒绝导入。
+              const linkedIds = new Set((requireArray('gala_round_winners') || [])
+                .map((w) => (w?.ledger_id == null ? NaN : Number(w.ledger_id)))
+                .filter((n) => Number.isSafeInteger(n) && n > 0));
+              const payoutIds = ids.filter((n) => linkedIds.has(n));
+              if (payoutIds.length) {
+                const present = new Set((await tx.all('SELECT id FROM ledger WHERE id = ANY(?::bigint[])', [payoutIds])).map((r) => Number(r.id)));
+                const orphaned = payoutIds.filter((n) => !present.has(n)).slice(0, 20);
+                if (orphaned.length) {
+                  throw new Error(`合并导入不导入年会表，备份里的年会付款流水（ledger#${orphaned.join(', ledger#')}）会失去与中奖记录的关联、对非超管公开，已拒绝导入；年会数据请用覆盖导入恢复`);
+                }
               }
             }
             let count = 0;
@@ -3268,9 +3285,9 @@ export function registerAdminBackupRoutes(router) {
                  target NUMERIC;
                BEGIN
                  SELECT GREATEST(
-                          COALESCE(pg_sequence_last_value(seq), 0),
-                          COALESCE((SELECT MAX(id) FROM ledger), 0),
-                          COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 0)
+                          COALESCE(pg_sequence_last_value(seq)::numeric, 0),
+                          COALESCE((SELECT MAX(id)::numeric FROM ledger), 0),
+                          COALESCE((SELECT MAX(ledger_id)::numeric FROM gala_round_winners), 0)
                         ) + 1
                    INTO target;
                  -- 与在线一致：保留的凭据用到序列上限（最大安全整数）时照常恢复，序列停在“已用尽”，
