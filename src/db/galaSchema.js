@@ -75,6 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_gala_rounds_event ON gala_rounds(event_id, id DES
 CREATE INDEX IF NOT EXISTS idx_gala_rounds_pool ON gala_rounds(pool_id) WHERE pool_id IS NOT NULL;
 
 -- 每轮中奖人。awarded_at 为发币幂等闸门：只有把它从 NULL 改成时间戳的那个事务才会写账本。
+-- 用户重置保留历史中奖结果（含无币轮），仅用 award_cancelled_at 标记待发的正数奖励已取消。
 CREATE TABLE IF NOT EXISTS gala_round_winners (
   id BIGSERIAL PRIMARY KEY,
   round_id BIGINT NOT NULL REFERENCES gala_rounds(id) ON DELETE CASCADE,
@@ -86,12 +87,14 @@ CREATE TABLE IF NOT EXISTS gala_round_winners (
   amount BIGINT NOT NULL DEFAULT 0,
   is_reserved INTEGER NOT NULL DEFAULT 0,
   awarded_at BIGINT,
+  award_cancelled_at BIGINT,
   ledger_id BIGINT,
   award_error TEXT,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   CONSTRAINT uq_gala_round_winners_round_user UNIQUE (round_id, userid),
   CONSTRAINT chk_gala_round_winners_amount CHECK (amount >= 0),
-  CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1))
+  CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1)),
+  CONSTRAINT chk_gala_round_winners_cancelled CHECK (award_cancelled_at IS NULL OR (amount > 0 AND awarded_at IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_round_winners_event_user ON gala_round_winners(event_id, userid);
 -- 一条流水只能支付一笔奖励：ledger_id（包括用户重置后流水已删、凭据仍保留的）全局唯一，导入数据里重复的凭据也会被拒绝。
@@ -132,10 +135,35 @@ CREATE INDEX IF NOT EXISTS idx_gala_reserved_live_user
   ON gala_reserved_slots(event_id, userid)
   WHERE status <> 'cancelled';
 
--- 早期库补列（放在中奖表建好之后：回填要读中奖记录，按顺序执行时中奖表必须已存在）：新轮次默认排除已中奖者；补列前已有的轮次若有“同环节更早轮次的中奖人再次中奖”的记录，
--- 说明当时关闭了排除，回填为 0，免得升级后导出的备份（含自动恢复点）被跨轮重复中奖校验拒绝。只在补列时执行一次。
+-- 早期库补列：
+-- 1) gala_round_winners.award_cancelled_at（用户重置取消待发奖励而不删抽签结果）及一致性约束；
+-- 2) ledger.is_gala_payout（真实年会付款的独立来源标记），把已有被中奖记录 ledger_id 引用的流水回填为 1，
+--    而历史第三方接口写入的同名 GALA_W 流水保持 0；
+-- 3) gala_rounds.exclude_previous_winners。
 DO $$
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema = current_schema() AND table_name = 'gala_round_winners'
+                    AND column_name = 'award_cancelled_at') THEN
+    ALTER TABLE gala_round_winners ADD COLUMN award_cancelled_at BIGINT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'chk_gala_round_winners_cancelled'
+                    AND conrelid = 'gala_round_winners'::regclass) THEN
+    ALTER TABLE gala_round_winners
+      ADD CONSTRAINT chk_gala_round_winners_cancelled
+      CHECK (award_cancelled_at IS NULL OR (amount > 0 AND awarded_at IS NULL));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema = current_schema() AND table_name = 'ledger'
+                    AND column_name = 'is_gala_payout') THEN
+    ALTER TABLE ledger ADD COLUMN is_gala_payout SMALLINT NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'chk_ledger_gala_payout'
+                    AND conrelid = 'ledger'::regclass) THEN
+    ALTER TABLE ledger ADD CONSTRAINT chk_ledger_gala_payout CHECK (is_gala_payout IN (0, 1));
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = current_schema() AND table_name = 'gala_rounds'
                     AND column_name = 'exclude_previous_winners') THEN
@@ -150,14 +178,21 @@ BEGIN
   END IF;
 END $$;
 
--- 旧版本在最后一笔到账提交后、发放收尾之前退出，会留下“正数奖励已全部到账、却仍是 drawn”的发币轮。
--- 现在最后一笔到账与完成标记在同一事务里，不会再产生这种状态；这里在启动迁移时补齐（与备份导入的
--- completeFinishedCoinRounds 同一条件：完成时间取最后一笔到账时间，没有则取轮次创建时间）。仍有待发奖励的轮次、无币轮不动。幂等。
+UPDATE ledger l
+   SET is_gala_payout = 1
+ WHERE l.is_gala_payout = 0
+   AND EXISTS (SELECT 1 FROM gala_round_winners gw WHERE gw.ledger_id = l.id);
+
+-- 旧版本在最后一笔到账提交后、发放收尾之前退出，会留下“正数奖励已全部处理（到账或因用户重置取消）、却仍是 drawn”的发币轮。
+-- 现在最后一笔到账/取消与完成标记在同一事务里，不会再产生这种状态；这里在启动迁移时补齐（与备份导入的
+-- completeFinishedCoinRounds 同一条件：完成时间取最后一笔到账或取消时间，没有则取轮次创建时间）。仍有待发奖励的轮次、无币轮不动。幂等。
 UPDATE gala_rounds r
    SET status = 'granted',
-       granted_at = COALESCE((SELECT MAX(w.awarded_at) FROM gala_round_winners w WHERE w.round_id = r.id), r.created_at)
+       granted_at = COALESCE((SELECT MAX(COALESCE(w.awarded_at, w.award_cancelled_at)) FROM gala_round_winners w WHERE w.round_id = r.id), r.created_at)
  WHERE r.prize_type = 'coin' AND r.status = 'drawn'
-   AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.amount > 0);
+   AND NOT EXISTS (
+     SELECT 1 FROM gala_round_winners w
+      WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.award_cancelled_at IS NULL AND w.amount > 0);
 
 -- 全量恢复状态：单行。generation 计数，version_token 是数据版本（建库时随机生成，每次成功的全量恢复换新值，
 -- 失败回滚则不变）。不进备份；写接口和发放用 version_token 识别“读到数据之后发生过恢复”，换库也不会撞上旧值。
@@ -171,9 +206,8 @@ ALTER TABLE gala_restore_state ADD COLUMN IF NOT EXISTS version_token TEXT NOT N
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
 
 -- 年会表 ID 不超过 JS 安全整数（接口按 Number 解析 ID）：到上限时插入失败，而不是生成接口无法引用的记录。
--- 流水表同样设上限：年会付款凭据（中奖记录的 ledger_id、GALA_W 引用）和备份校验都按安全整数处理流水 ID。
--- 升级前的库里流水序列或已有流水 ID 可能已超过这个上限（旧版本的全量恢复按原值导入并推进序列）：
--- 这时不收紧流水序列，保持原范围让服务照常启动；年会发放在付款凭据处兜底（流水 ID 不是安全整数时整笔回滚）。
+-- 通用流水序列保留 PostgreSQL BIGINT 原有范围（避免把年会的 JS 精度限制施加到整个台账，防止序列恰好在安全整数边界时耗尽）；
+-- 年会付款凭据（ledger_id）按精确十进制字符串保存与比较。若旧版本曾收紧过流水序列上限，这里恢复为 NO MAXVALUE。
 DO $$
 DECLARE
   t TEXT;
@@ -182,25 +216,9 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'] LOOP
     EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', pg_get_serial_sequence(t, 'id'));
   END LOOP;
-  IF COALESCE(pg_sequence_last_value(ledger_seq), 0) <= 9007199254740991
-     AND COALESCE((SELECT MAX(id) FROM ledger), 0) <= 9007199254740991 THEN
-    EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', ledger_seq);
-  ELSE
-    RAISE WARNING 'ledger ids already exceed 9007199254740991; keeping the ledger sequence range (gala payouts refuse unsafe ledger ids)';
-  END IF;
-END $$;
-
--- 升级前第三方发币可以写入 GALA_W<n> 形式的引用号：把中奖记录序列推进到这些引用号之后（只升不降），
--- 新抽出的中奖记录 ID 不会与历史流水同名（否则那条流水像是它的付款，之后的备份无法恢复）。
--- 之后第三方接口不再接受 GALA_W 引用号；全量恢复后同样推进（见 backupRoutes）。
-DO $$
-DECLARE
-  w_seq regclass := pg_get_serial_sequence('gala_round_winners', 'id')::regclass;
-  legacy_ref NUMERIC := (SELECT MAX(substring(ref_id FROM 7)::numeric) FROM ledger WHERE ref_id ~ '^GALA_W[1-9][0-9]{0,18}$');
-  cur NUMERIC := GREATEST(COALESCE(pg_sequence_last_value(w_seq), 0), COALESCE((SELECT MAX(id) FROM gala_round_winners), 0));
-BEGIN
-  IF legacy_ref IS NOT NULL AND legacy_ref > cur THEN
-    PERFORM setval(w_seq, LEAST(legacy_ref, 9007199254740991)::bigint, true);
+  IF (SELECT seqmax FROM pg_sequence WHERE seqrelid = ledger_seq) < 9223372036854775807 THEN
+    EXECUTE format('ALTER SEQUENCE %s NO MAXVALUE', ledger_seq);
   END IF;
 END $$;
 `;
+

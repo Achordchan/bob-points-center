@@ -1219,3 +1219,118 @@ test('覆盖前校验恢复点：在线库里的异常年会数据让恢复点�
   // 校验在副本上进行，不改动快照本身
   assert.equal(legacy.gala_participants.length, 2);
 });
+
+test('年会付款来源列 is_gala_payout：历史普通 GALA_W 流水不误判为已付款，真实年会付款持久隐藏', async () => {
+  const { galaPayoutLedgerSql, galaPayoutWinnerId } = await import('../../src/services/ledgerService.js');
+  assert.match(galaPayoutLedgerSql('l'), /l\.is_gala_payout = 1/);
+  assert.equal(galaPayoutWinnerId({ ref_id: 'GALA_W1234567890123456789', reason: '年会奖励·超长', delta: 10 }), null);
+  assert.equal(galaPayoutWinnerId({ ref_id: 'GALA_W9007199254740991', reason: '年会奖励·上限', delta: 10 }), 9007199254740991);
+
+  const base = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
+    gala_round_winners: [{ id: 11, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: null, award_cancelled_at: null }],
+    gala_reserved_slots: [],
+    ledger: [{ id: 1, userid: 'a', ref_id: 'GALA_W11', delta: 10, reason: '年会奖励·第三方历史', is_gala_payout: 0 }],
+    accounts: [{ userid: 'a', balance: 10 }],
+  });
+  assert.deepEqual(findGalaFundingErrors(base()), [], '明确标记 is_gala_payout=0 的历史同名流水不阻塞待发奖励');
+
+  const realPaid = base();
+  realPaid.ledger[0].is_gala_payout = 1;
+  assert.ok(findGalaFundingErrors(realPaid).some((e) => e.startsWith('ledger#1') && e.includes('重复发放')));
+
+  const badFlag = base();
+  badFlag.ledger[0].is_gala_payout = 2;
+  assert.ok(findGalaFundingErrors(badFlag).some((e) => e.startsWith('ledger#1') && e.includes('is_gala_payout')));
+
+  const fakePayout = base();
+  fakePayout.ledger = [{ id: 2, userid: 'a', ref_id: 'ORDER_1', delta: 10, reason: '普通奖励', is_gala_payout: 1 }];
+  assert.ok(findGalaFundingErrors(fakePayout).some((e) => e.startsWith('ledger#2') && e.includes('is_gala_payout=1')));
+
+  const linkedNonGala = base();
+  linkedNonGala.gala_pools[0].spent = 10;
+  linkedNonGala.gala_rounds[0].status = 'granted';
+  linkedNonGala.gala_rounds[0].granted_at = 100;
+  linkedNonGala.gala_round_winners[0].awarded_at = 100;
+  linkedNonGala.gala_round_winners[0].ledger_id = 1;
+  assert.ok(findGalaFundingErrors(linkedNonGala).some((e) => e.startsWith('ledger#1') && e.includes('is_gala_payout=0')));
+});
+
+test('年会付款凭据 ledger_id 支持精确十进制字符串覆盖完整 BIGINT 范围，拒绝超界或被舍入的数字', () => {
+  const snap = (ledgerId, withLedgerRow = true) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 100 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: 100, ledger_id: ledgerId }],
+    gala_reserved_slots: [],
+    ledger: withLedgerRow ? [{ id: ledgerId, userid: 'u', delta: 10, ref_id: 'GALA_W1', reason: '年会奖励·抽奖', is_gala_payout: 1 }] : [],
+    accounts: [{ userid: 'u', balance: 10 }],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap('9007199254741005')), []);
+  assert.deepEqual(findGalaFundingErrors(snap('9223372036854775807')), []);
+  assert.deepEqual(findGalaFundingErrors(snap('9223372036854775807', false)), []);
+  for (const bad of [Number.MAX_SAFE_INTEGER + 2, '9223372036854775808', '0', '-5', '09007199254741005']) {
+    const errors = findGalaFundingErrors(snap(bad, false));
+    assert.ok(errors.some((e) => e.startsWith('gala_round_winners#1') && e.includes('ledger_id')), String(bad));
+  }
+});
+
+test('用户重置取消待发奖励（award_cancelled_at）：保留中奖记录，补齐轮次完成状态且非超管不暴露取消字段', async () => {
+  const { serializeDrawResult } = await import('../../src/services/galaService.js');
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', created_at: 100 }],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'u1', amount: 10, pool_id: 1, awarded_at: 200, award_cancelled_at: null, ledger_id: 5 },
+      { id: 2, round_id: 1, event_id: 1, userid: 'u2 ', amount: 10, pool_id: 1, awarded_at: null, award_cancelled_at: 350, ledger_id: null },
+    ],
+    gala_reserved_slots: [],
+    ledger: [{ id: 5, userid: 'u1', delta: 10, ref_id: 'GALA_W1', reason: '年会奖励·测试', is_gala_payout: 1 }],
+    accounts: [{ userid: 'u1', balance: 10 }],
+  });
+  const s = snap();
+  assert.equal(completeFinishedCoinRounds(s), 1);
+  assert.deepEqual([s.gala_rounds[0].status, s.gala_rounds[0].granted_at], ['granted', 350]);
+  assert.deepEqual(findGalaFundingErrors(s), []);
+
+  // 零金额与已发放记录不能带 award_cancelled_at
+  const zeroCancelled = snap();
+  zeroCancelled.gala_rounds.push({ id: 2, event_id: 1, segment: 'game', round_no: 1, draw_count: 1, pool_id: null, prize_type: 'none', amount_each: 0, status: 'drawn' });
+  zeroCancelled.gala_round_winners.push({ id: 3, round_id: 2, event_id: 1, userid: 'u3', amount: 0, pool_id: null, awarded_at: null, award_cancelled_at: 100, ledger_id: null });
+  completeFinishedCoinRounds(zeroCancelled);
+  assert.ok(findGalaFundingErrors(zeroCancelled).some((e) => e.startsWith('gala_round_winners#3') && e.includes('零金额')));
+
+  const paidCancelled = snap();
+  paidCancelled.gala_round_winners[0].award_cancelled_at = 250;
+  completeFinishedCoinRounds(paidCancelled);
+  assert.ok(findGalaFundingErrors(paidCancelled).some((e) => e.startsWith('gala_round_winners#1') && e.includes('不能同时标记奖励已取消')));
+
+  const drawn = {
+    round: { id: 1, event_id: 1, segment: 'lottery', round_no: 1, prize_type: 'coin', amount_each: 10, draw_count: 1, status: 'granted', created_at: 100 },
+    winners: [{ id: 2, userid: 'u2', name_snapshot: 'U2', display_order: 0, amount: 10, awarded_at: null, award_cancelled_at: 350, is_reserved: 0, pool_id: 1 }],
+    version_token: '11111111-2222-4333-8444-555555555555',
+  };
+  const pub = serializeDrawResult(drawn, { includeReserved: false });
+  assert.equal('award_cancelled' in pub.winners[0], false);
+  assert.equal('award_cancelled_at' in pub.winners[0], false);
+  const sup = serializeDrawResult(drawn, { includeReserved: true });
+  assert.equal(sup.winners[0].award_cancelled, 1);
+  assert.equal(sup.winners[0].award_cancelled_at, 350);
+});
+
+test('全量自动恢复点无条件锁定覆盖模式，旧版无年会表全量覆盖要求显式确认', async () => {
+  const { readFileSync } = await import('node:fs');
+  const backupSrc = readFileSync(new URL('../../src/routes/admin/backupRoutes.js', import.meta.url), 'utf8');
+  const uiSrc = readFileSync(new URL('../../src/admin-app/src/pages/Integrations.jsx', import.meta.url), 'utf8');
+  assert.match(backupSrc, /if \(isFullRecoveryPoint && mode !== 'overwrite'\)/);
+  assert.match(backupSrc, /if \(present\.length === 0 && req\.body\?\.confirm_clear_gala !== true\)/);
+  assert.match(uiSrc, /const isRecoveryPoint = data\._meta\?\.purpose === 'pre_import_recovery_point'[\s\S]*?data\._meta\?\.mode === 'full'/);
+  assert.match(uiSrc, /confirm_clear_gala: true/);
+});
+

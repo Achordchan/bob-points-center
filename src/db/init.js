@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS ledger (
   delta BIGINT NOT NULL,
   reason TEXT NOT NULL,
   ref_id TEXT,
+  is_gala_payout SMALLINT NOT NULL DEFAULT 0,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  CONSTRAINT chk_ledger_gala_payout CHECK (is_gala_payout IN (0, 1)),
   FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE
 );
 

@@ -23,8 +23,10 @@ function Tokens({ canEdit }) {
   </Card>;
 }
 
+const GALA_TABLES = ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'];
+const OPTIONAL_FULL_TABLES = [...GALA_TABLES, 'auction_activities', 'auction_bids', 'external_accounts'];
 const settingsTables = ['system_settings', 'mall_products', 'charity_projects', 'mall_opening_schedule', 'content_faq', 'content_announcements', 'content_announcement_revisions', 'system_versions', 'admin_roles'];
-const fullTables = ['users', 'accounts', 'bob_tokens', 'ledger', 'redeems', 'mall_order_listings', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'content_faq', 'content_announcements', 'content_announcement_revisions', 'content_announcement_acknowledgements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'admin_roles', 'admin_user_roles', 'system_settings'];
+const fullTables = ['users', 'accounts', 'external_accounts', 'bob_tokens', 'ledger', 'redeems', 'mall_order_listings', 'redeem_cdks', 'mall_products', 'charity_projects', 'charity_contributions', 'attendance_reward_records', 'mall_opening_schedule', 'red_packet_activity', 'red_packet_items', 'auction_activities', 'auction_bids', ...GALA_TABLES, 'content_faq', 'content_announcements', 'content_announcement_revisions', 'content_announcement_acknowledgements', 'system_versions', 'user_feedback', 'user_feedback_messages', 'audit_logs', 'admin_roles', 'admin_user_roles', 'system_settings'];
 function tableRowsFromMap(map = {}) {
   return Object.entries(map).map(([table, count]) => ({ table, count }));
 }
@@ -124,13 +126,23 @@ function Backup({ canExport, canImport }) {
     try {
       const data = JSON.parse(await file.text());
       if (!data?._meta || !data?.data) throw new Error('无效的备份文件');
-      // 设置恢复点、以及含年会数据的全量恢复点只能覆盖导入（合并会跳过年会表，恢复不回被覆盖掉的活动和奖励）。
-      const GALA_TABLES = ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'];
+      // 设置自动恢复点与全量自动恢复点均只允许覆盖导入（合并不会回滚新增数据，还会跳过年会表）。
       const isRecoveryPoint = data._meta?.purpose === 'pre_import_recovery_point'
-        && (data._meta?.mode === 'settings'
-          || (data._meta?.mode === 'full' && GALA_TABLES.some((t) => Array.isArray(data.data?.[t]) && data.data[t].length > 0)));
+        && (data._meta?.mode === 'settings' || data._meta?.mode === 'full');
+      const extraClearedTables = data._meta?.mode === 'full'
+        ? OPTIONAL_FULL_TABLES.filter((t) => data.data?.[t] == null)
+        : [];
+      const omitsGalaTables = data._meta?.mode === 'full'
+        && GALA_TABLES.every((t) => data.data?.[t] == null);
       if (isRecoveryPoint) setImportMode('overwrite');
-      setImportDetail({ filename: file.name, meta: data._meta, backup: data, isRecoveryPoint });
+      setImportDetail({
+        filename: file.name,
+        meta: data._meta,
+        backup: data,
+        isRecoveryPoint,
+        extraClearedTables,
+        omitsGalaTables,
+      });
       message.success('备份文件已读取');
     } catch (err) {
       setImportDetail(null);
@@ -142,10 +154,18 @@ function Backup({ canExport, canImport }) {
   const doImport = async () => {
     if (!importDetail?.backup) return message.warning('请先选择备份文件');
     const isRecoveryPoint = Boolean(importDetail.isRecoveryPoint);
-    const run = async () => {
+    const extraClearedTables = importDetail.extraClearedTables || [];
+    const omitsGalaTables = Boolean(importDetail.omitsGalaTables);
+    const run = async ({ confirmClearGala = false } = {}) => {
       setBusy(true);
       try {
-        const data = await api('/admin/backup/import', { method: 'POST', body: { backup: importDetail.backup, mode: importMode, filename: importDetail.filename } });
+        const body = {
+          backup: importDetail.backup,
+          mode: importMode,
+          filename: importDetail.filename,
+          ...(confirmClearGala ? { confirm_clear_gala: true } : {}),
+        };
+        const data = await api('/admin/backup/import', { method: 'POST', body });
         setImportReport(data.report || {});
         await loadHistory();
         message.success('备份导入完成');
@@ -156,15 +176,40 @@ function Backup({ canExport, canImport }) {
       }
     };
     if (importMode === 'overwrite') {
+      let confirmText = '';
       modal.confirm({
-        title: isRecoveryPoint ? '确认恢复自动恢复点？' : '确认覆盖导入？',
-        content: isRecoveryPoint
-          ? '恢复后，公告、修订和用户确认状态将精确回到该恢复点；恢复点之后新增的确认会被撤销。'
-          : '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。',
-        okText: isRecoveryPoint ? '确认恢复' : '确认覆盖导入',
+        title: omitsGalaTables ? '确认覆盖旧版备份并清空年会数据？' : isRecoveryPoint ? '确认恢复自动恢复点？' : '确认覆盖导入？',
+        content: omitsGalaTables
+          ? <Space direction="vertical" size={8}>
+              <Typography.Text>
+                {isRecoveryPoint
+                  ? '该自动恢复点生成于年会模块上线之前，恢复后会回到当时的快照，操作不可撤销。'
+                  : '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。'}
+              </Typography.Text>
+              <Typography.Text type="danger">
+                该旧版备份未包含以下数据表，覆盖导入仍会一并清空在线库中的这些表（含正在进行的年会活动、参与名单、抽签结果与预留名额）：
+                {extraClearedTables.join('、')}
+              </Typography.Text>
+              <Typography.Text type="secondary">请输入 DELETE 确认一并清空上述数据表：</Typography.Text>
+              <Input placeholder="DELETE" onChange={(e) => { confirmText = e.target.value; }} />
+            </Space>
+          : isRecoveryPoint
+            ? (importDetail.meta?.mode === 'full'
+              ? '恢复后，全部业务数据（含用户、账本、年会及公告确认状态）将精确回到该恢复点；恢复点之后新增的数据与确认将被撤销。'
+              : '恢复后，公告、修订和用户确认状态将精确回到该恢复点；恢复点之后新增的确认会被撤销。')
+            : extraClearedTables.length > 0
+              ? `覆盖模式会清空备份涉及的数据表后重新写入，并将额外清空该备份未包含的数据表：${extraClearedTables.join('、')}。操作不可撤销，请确认已经保留当前全量备份。`
+              : '覆盖模式会清空备份涉及的数据表后重新写入，操作不可撤销。请确认已经保留当前全量备份。',
+        okText: isRecoveryPoint && !omitsGalaTables ? '确认恢复' : '确认覆盖导入',
         okButtonProps: { danger: true },
         cancelText: '取消',
-        onOk: run,
+        onOk: async () => {
+          if (omitsGalaTables && String(confirmText || '').trim().toUpperCase() !== 'DELETE') {
+            message.warning('请输入 DELETE 确认清空年会等额外数据表');
+            return Promise.reject(new Error('confirmation_required'));
+          }
+          return run({ confirmClearGala: omitsGalaTables });
+        },
       });
       return null;
     }
@@ -238,7 +283,15 @@ function Backup({ canExport, canImport }) {
           type="error"
           showIcon
           message="这是导入前自动恢复点，只能覆盖恢复"
-          description="恢复会精确还原公告确认状态，恢复点之后新增的用户确认将被撤销。"
+          description={importDetail.meta?.mode === 'full'
+            ? '恢复会精确还原全部业务数据（含年会活动、名单、奖励与公告确认状态），恢复点之后新增的数据将被撤销。'
+            : '恢复会精确还原公告确认状态，恢复点之后新增的用户确认将被撤销。'}
+        />}
+        {importMode === 'overwrite' && (importDetail?.extraClearedTables?.length > 0) && <Alert
+          type="error"
+          showIcon
+          message="覆盖旧版全量备份将额外清空未包含的数据表"
+          description={`该备份不含以下数据表，覆盖导入仍会一并清空在线库中的这些表：${importDetail.extraClearedTables.join('、')}${importDetail.omitsGalaTables ? '（含正在进行的年会活动、名单、抽签结果与预留名额，确认弹窗中需输入 DELETE）' : ''}。`}
         />}
         {importDetail && <Descriptions bordered size="small" column={2} items={[
           { key: 'file', label: '文件', children: importDetail.filename },

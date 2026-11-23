@@ -53,23 +53,25 @@ function withDisplayReason(row = {}) {
   };
 }
 
-// 年会发放流水：出处以中奖记录的 ledger_id 为准（发放时在同一事务内写入，且全局唯一），
-// 流水查询与审计推断都用 galaPayoutLedgerSql 判定，不看 ref_id、原因这些外部也能写入的字符串。
-// galaPayoutWinnerId 只解析命名约定（ref_id = GALA_W<中奖记录 ID>、原因“年会奖励·”、入账），供备份校验核对一致性。
-// 外部发币接口不允许 GALA_W 前缀的 ref_id，新数据不会出现形似的流水。
+// 年会发放流水：以独立的来源列 is_gala_payout = 1（发放时在同一事务内写入）或中奖记录的 ledger_id 关联为准，
+// 流水查询与审计推断都用 galaPayoutLedgerSql 判定：即使全量覆盖清空了年会表而保留已入账的年会流水，
+// 真实年会付款仍按 is_gala_payout = 1 保持隐藏；而升级前外部接口写入的同名普通流水 is_gala_payout = 0，照常可见。
+// galaPayoutWinnerId 只解析命名约定（ref_id = GALA_W<安全正整数>、原因“年会奖励·”、入账），供备份校验核对一致性。
 export const GALA_PAYOUT_REF_PREFIX = 'GALA_W';
 export const GALA_PAYOUT_REASON_PREFIX = '年会奖励·';
 
 export function galaPayoutWinnerId(row) {
-  const m = /^GALA_W([1-9][0-9]*)$/.exec(String(row?.ref_id ?? ''));
+  const m = /^GALA_W([1-9][0-9]{0,15})$/.exec(String(row?.ref_id ?? ''));
   if (!m) return null;
+  const id = Number(m[1]);
+  if (!Number.isSafeInteger(id)) return null;
   if (!String(row?.reason ?? '').startsWith(GALA_PAYOUT_REASON_PREFIX)) return null;
   if (!(Number(row?.delta) > 0)) return null;
-  return Number(m[1]);
+  return id;
 }
 
 export function galaPayoutLedgerSql(alias = 'l') {
-  return `EXISTS (SELECT 1 FROM gala_round_winners gw WHERE gw.ledger_id = ${alias}.id)`;
+  return `(${alias}.is_gala_payout = 1 OR EXISTS (SELECT 1 FROM gala_round_winners gw WHERE gw.ledger_id = ${alias}.id))`;
 }
 
 export async function ensureAccount(db, { userid, name, createUser = false }) {
@@ -120,7 +122,7 @@ export async function getBalance(db, { userid, name, createUser = false }) {
   return row?.balance ?? 0;
 }
 
-export async function grantBob(db, { userid, amount, reason, refId, name, createUser = false }) {
+export async function grantBob(db, { userid, amount, reason, refId, name, createUser = false, isGalaPayout = false }) {
   const delta = toInt(amount);
   if (delta === null || delta <= 0) {
     throw new Error('amount must be positive integer');
@@ -131,10 +133,15 @@ export async function grantBob(db, { userid, amount, reason, refId, name, create
   const run = async (tx) => {
     await ensureAccount(tx, { userid, name, createUser });
 
-    const insert = await tx.run(
-      'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
-      [String(userid), delta, cleanReason, refId ? String(refId) : null],
-    );
+    const insert = isGalaPayout === true
+      ? await tx.run(
+          'INSERT INTO ledger(userid, delta, reason, ref_id, is_gala_payout) VALUES(?, ?, ?, ?, 1)',
+          [String(userid), delta, cleanReason, refId ? String(refId) : null],
+        )
+      : await tx.run(
+          'INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, ?, ?, ?)',
+          [String(userid), delta, cleanReason, refId ? String(refId) : null],
+        );
 
     await tx.run(
       'UPDATE accounts SET balance = balance + ?, updated_at = unixepoch() WHERE userid = ?',

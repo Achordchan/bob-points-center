@@ -22,7 +22,7 @@ import {
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 import {
-  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_RESET_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
   isOperableGalaUserid,
 } from '../../services/galaService.js';
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
@@ -33,7 +33,7 @@ export const GALA_BACKUP_TABLES = [
   { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
   { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
   { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'exclude_previous_winners', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, exclude_previous_winners: 1, status: 'drawn' } },
-  { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
+  { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'award_cancelled_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0, award_cancelled_at: null } },
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
 
@@ -77,8 +77,8 @@ export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_B
   return errors;
 }
 
-// 发币轮的正数奖励已全部到账、却仍是 drawn：旧版本在最后一笔到账后、发放收尾前退出就会留下这种数据。
-// 导入时补成 granted（完成时间取最后一笔到账时间，没有则取轮次创建时间），与在线“最后一笔到账即完成”一致。
+// 发币轮的正数奖励已全部到账（或因用户重置取消）、却仍是 drawn：旧版本在最后一笔到账后、发放收尾前退出就会留下这种数据。
+// 导入时补成 granted（完成时间取最后一笔到账或取消时间，没有则取轮次创建时间），与在线“最后一笔到账即完成”一致。
 // 无币轮不动。原地改写行对象，返回补齐的轮次数。
 export function completeFinishedCoinRounds(backupData) {
   const rounds = Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [];
@@ -88,7 +88,11 @@ export function completeFinishedCoinRounds(backupData) {
   for (const w of winners) {
     const key = Number(w?.round_id);
     if (w?.awarded_at == null) {
-      if (Number(w?.amount) > 0) pending.add(key);
+      if (w?.award_cancelled_at == null && Number(w?.amount) > 0) {
+        pending.add(key);
+      } else if (w?.award_cancelled_at != null && Number.isFinite(Number(w.award_cancelled_at))) {
+        lastPaid.set(key, Math.max(lastPaid.get(key) || 0, Number(w.award_cancelled_at)));
+      }
     } else if (Number.isFinite(Number(w.awarded_at))) {
       lastPaid.set(key, Math.max(lastPaid.get(key) || 0, Number(w.awarded_at)));
     }
@@ -169,22 +173,21 @@ export function prepareGalaRoundFlags(backupData, meta) {
   return errors;
 }
 
-// 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
-// 只看备份内部：年会表只随覆盖导入（会先清空年会表；合并导入跳过年会表），所以每条子记录引用的
-// 活动/轮次/奖池都必须在同一份备份里，不能落到目标库里已有的无关记录上。
-// 没有 ledger_id 关联时，一条形似 GALA_W<id> 的流水能否是这条（未发放）中奖记录的付款：收款人、金额一致即视为可能。
-// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同的，按历史同名流水处理。
-// 不按时间先后排除：数据库时钟回拨、或恢复到时钟稍慢的主库后发币，真实付款也可能“早于”中奖记录，
-// 宁可拒绝也不重复发放。与导入后整库上的 paidPending 查询保持同一判定。
-// 有 ledger_id 关联的已发放记录不用它判断（见下方逐笔核对）。
-// 升级前第三方发币可以写入 GALA_W<n> 形式的引用号。中奖记录 ID 若之后恰好分到 n，这条历史流水就像是它的付款，
-// 备份校验会因此拒绝恢复。恢复后把中奖记录序列推进到所有 GALA_W 引用号之后（只升不降），新中奖记录不会撞上历史引用号；
-// 启动迁移做同样的推进（见 galaSchema）。用 ALTER SEQUENCE … RESTART，随事务回滚。
-const WINNER_SEQ_PAST_LEGACY_REFS_SQL = `DO $$
+// 全量覆盖清空年会表但保留已入账的真实年会付款流水（is_gala_payout = 1）时，
+// 把中奖记录序列推进到这些真实年会付款的 GALA_W<id> 之后，避免新抽出的中奖记录与已归档的年会付款撞号。
+// 不根据普通/历史第三方 GALA_W 流水（is_gala_payout = 0）推进序列：旧第三方接口曾允许任意长数字后缀，
+// 若按它们跳号会直接耗尽中奖记录序列。
+const WINNER_SEQ_PAST_GALA_PAYOUT_REFS_SQL = `DO $$
 DECLARE
   seq regclass := pg_get_serial_sequence('gala_round_winners', 'id')::regclass;
   mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('gala_round_winners', 'id')::regclass);
-  ref NUMERIC := (SELECT MAX(substring(ref_id FROM 7)::numeric) FROM ledger WHERE ref_id ~ '^GALA_W[1-9][0-9]{0,18}$');
+  ref NUMERIC := (
+    SELECT MAX(substring(ref_id FROM 7)::numeric)
+      FROM ledger
+     WHERE is_gala_payout = 1
+       AND ref_id ~ '^GALA_W[1-9][0-9]{0,15}$'
+       AND substring(ref_id FROM 7)::numeric <= 9007199254740991
+  );
   cur NUMERIC := COALESCE((SELECT MAX(id)::numeric FROM gala_round_winners), 0);
 BEGIN
   IF ref IS NULL OR ref <= cur THEN RETURN; END IF;
@@ -201,6 +204,13 @@ function isExactLedgerId(v) {
   if (typeof v === 'number') return Number.isSafeInteger(v) && v > 0;
   if (typeof v !== 'string' || !/^[1-9][0-9]{0,18}$/.test(v)) return false;
   return BigInt(v) <= BIGINT_MAX;
+}
+
+function parseLedgerGalaPayoutFlag(v) {
+  if (v === undefined || v === null) return null;
+  if (v === 1 || v === '1' || v === true) return 1;
+  if (v === 0 || v === '0' || v === false) return 0;
+  return 'invalid';
 }
 
 function couldPayWinner(row, w) {
@@ -228,55 +238,63 @@ export function findGalaFundingErrors(backupData) {
   const winnersList = asList(backupData?.gala_round_winners);
   const winners = new Map(winnersList.map((w) => [Number(w?.id), w]));
 
-  // 发放流水是 awarded_at 幂等闸门的旁证，必须与中奖记录逐笔对上：
-  // - 流水里有 GALA_W<id>，对应中奖记录必须存在且已标记发放，否则恢复后会再发一次；
-  // - 收款人、金额必须一致，中奖记录的 ledger_id 若有值必须指向这条流水，否则真正的中奖人没拿到币、
-  //   闸门却已关闭，无法补发；
-  // - 同一条中奖记录只能有一条发放流水。
-  // 年会发放的出处以中奖记录的 ledger_id 为准（一条流水最多被一条中奖记录引用）：
-  // - 中奖记录引用的流水，收款人、金额必须与中奖记录一致，ref_id 必须正是它自己（见下方核对）；
-  // - 形如 GALA_W<id>、原因为“年会奖励·”的入账，若对应中奖记录在备份里却未发放，像是给未发放记录的付款，
-  //   恢复后会再发一次，拒绝；
-  // - 其余形似的流水（没有年会表的旧备份、对应中奖记录不存在、或中奖记录引用的是另一条流水）按普通流水处理，
-  //   不会因为引用号碰巧相同而让旧备份无法恢复。
   if (!hasGala) return errors;
   const ledgerRows = asList(backupData?.ledger);
-  // 只索引中奖记录 ledger_id 实际引用到的流水；没有中奖记录时整段流水核对都不需要。
+  for (const row of ledgerRows) {
+    const flag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
+    if (flag === 'invalid') {
+      errors.push(`ledger#${row?.id} 的 is_gala_payout=${row?.is_gala_payout} 只能是 0 或 1`);
+    } else if (flag === 1 && galaPayoutWinnerId(row) == null) {
+      errors.push(`ledger#${row?.id} 标记为年会付款（is_gala_payout=1），但不是有效的 GALA_W 正数入账`);
+    }
+  }
+  // 只索引中奖记录 ledger_id 实际引用到的流水（按精确十进制字符串比较，兼容完整 BIGINT 范围）。
   const referencedLedgerIds = new Set();
-  for (const w of winnersList) if (w?.ledger_id != null) referencedLedgerIds.add(Number(w.ledger_id));
+  for (const w of winnersList) {
+    if (isExactLedgerId(w?.ledger_id)) referencedLedgerIds.add(String(w.ledger_id));
+  }
   const ledgerById = new Map();
   if (winnersList.length > 0) {
     for (const r of ledgerRows) {
-      if (referencedLedgerIds.has(Number(r?.id))) ledgerById.set(Number(r.id), r);
+      if (isExactLedgerId(r?.id) && referencedLedgerIds.has(String(r.id))) {
+        ledgerById.set(String(r.id), r);
+      }
     }
   }
   for (const row of (winnersList.length > 0 ? ledgerRows : [])) {
+    const flag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
     const wid = galaPayoutWinnerId(row);
     if (wid == null) continue;
     const w = winners.get(wid);
     if (!w) continue;
-    if (w.ledger_id != null && Number(w.ledger_id) === Number(row.id)) {
-      // 中奖记录的 ledger_id 是发放事务里写下的关联，引用号、收款人、金额也对得上，就是这笔付款。
-      // 不再按时间先后否定：数据库时钟回拨、或恢复到时钟稍慢的新主库后立即发币，都会产生“早于中奖记录”的真实付款。
-      if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
+    if (isExactLedgerId(w.ledger_id) && isExactLedgerId(row?.id) && String(w.ledger_id) === String(row.id)) {
+      if (flag === 0) {
+        errors.push(`ledger#${row?.id} 标记为非年会流水（is_gala_payout=0），却被中奖记录 ${row.ref_id} 作为付款凭据引用`);
+      } else if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
         errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
       }
-    } else if (w.awarded_at == null && couldPayWinner(row, w)) {
+    } else if (flag === 1) {
+      if (w.awarded_at == null) {
+        errors.push(`ledger#${row?.id} 是 ${row.ref_id} 的年会发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
+      }
+    } else if (flag === null && w.awarded_at == null && w.award_cancelled_at == null && couldPayWinner(row, w)) {
+      // 旧格式备份无 is_gala_payout 列时保留兼容核对；明确标记 is_gala_payout=0 的历史同名普通流水不再误判。
       errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
     }
   }
-  // 零金额中奖（无币轮）从不发放：awarded_at、ledger_id 都必须为空。带着发放时间或付款凭据的零金额记录
-  // 会把一条流水（或已删除的流水号）错认作这条记录的付款，挡住真实付款的核对或补发。
+  // 零金额中奖（无币轮）从不发放也不取消奖励：awarded_at、award_cancelled_at、ledger_id 都必须为空。
   for (const w of winnersList) {
-    if (Number(w?.amount) === 0 && (w?.awarded_at != null || w?.ledger_id != null)) {
-      errors.push(`gala_round_winners#${w?.id} 是零金额中奖记录，却带有发放时间或付款凭据（awarded_at/ledger_id 必须为空）`);
+    if (Number(w?.amount) === 0 && (w?.awarded_at != null || w?.ledger_id != null || w?.award_cancelled_at != null)) {
+      errors.push(`gala_round_winners#${w?.id} 是零金额中奖记录，却带有发放时间、取消时间或付款凭据（awarded_at/award_cancelled_at/ledger_id 必须为空）`);
+    } else if (w?.award_cancelled_at != null && (w?.awarded_at != null || w?.ledger_id != null)) {
+      errors.push(`gala_round_winners#${w?.id} 已发放或带付款凭据，不能同时标记奖励已取消`);
     }
   }
   // 一条流水只能支付一笔奖励：即使流水已被用户重置删除，两条中奖记录也不能共用同一个付款凭据。
   const winnerByLedger = new Map();
   for (const w of winnersList) {
-    if (w?.ledger_id == null) continue;
-    const key = Number(w.ledger_id);
+    if (w?.ledger_id == null || !isExactLedgerId(w.ledger_id)) continue;
+    const key = String(w.ledger_id);
     if (winnerByLedger.has(key)) {
       errors.push(`gala_round_winners#${w.id} 与 #${winnerByLedger.get(key)} 共用付款凭据 ledger_id ${w.ledger_id}`);
     } else {
@@ -284,20 +302,17 @@ export function findGalaFundingErrors(backupData) {
     }
   }
   for (const w of winnersList) {
-    if (w?.ledger_id == null) continue;
-    const linked = ledgerById.get(Number(w.ledger_id));
+    if (w?.ledger_id == null || !isExactLedgerId(w.ledger_id)) continue;
+    const linked = ledgerById.get(String(w.ledger_id));
     if (linked && galaPayoutWinnerId(linked) !== Number(w.id)) {
       errors.push(`gala_round_winners#${w.id} 的 ledger_id ${w.ledger_id} 指向的不是它自己的发放流水`);
     }
   }
-  // 已发放、付款流水也在备份里的奖励，收款人的账户必须同在这份备份里：导入按备份覆盖账户余额，
-  // 同一次导出的余额本就含这笔奖励。缺了账户时（例如被删减过的备份），
-  // 目标库的余额不会因为导入这条流水而增加，awarded_at 却已挡住补发，等于流水显示已付、钱没到账。
-  // 无法确认余额是否含这笔奖励，就拒绝导入，而不是盲目补加。
+  // 已发放、付款流水也在备份里的奖励，收款人的账户必须同在这份备份里。
   const accountUsers = new Set(asList(backupData?.accounts).map((a) => String(a?.userid)));
   for (const w of winnersList) {
-    if (w?.awarded_at == null || w?.ledger_id == null || !(Number(w.amount) > 0)) continue;
-    if (!ledgerById.has(Number(w.ledger_id))) continue;
+    if (w?.awarded_at == null || !isExactLedgerId(w?.ledger_id) || !(Number(w.amount) > 0)) continue;
+    if (!ledgerById.has(String(w.ledger_id))) continue;
     if (!accountUsers.has(String(w.userid))) {
       errors.push(`gala_round_winners#${w.id} 已发放且付款流水在备份里，但备份缺少收款人 ${w.userid} 的账户，无法确认余额已含这笔奖励`);
     }
@@ -309,7 +324,7 @@ export function findGalaFundingErrors(backupData) {
     if (!isOperableGalaUserid(row?.userid)) errors.push(`${table}#${row?.id} 的 userid 无法按名单接口原样操作（首尾空白、超长或为空）`);
   };
   for (const p of asList(backupData?.gala_participants)) checkUserid('gala_participants', p);
-  for (const w of winnersList) if (w?.awarded_at == null) checkUserid('gala_round_winners', w);
+  for (const w of winnersList) if (w?.awarded_at == null && w?.award_cancelled_at == null) checkUserid('gala_round_winners', w);
   for (const slot of asList(backupData?.gala_reserved_slots)) if ((slot?.status ?? 'pending') === 'pending') checkUserid('gala_reserved_slots', slot);
 
   // 金额类字段先做与在线写入相同的安全整数校验：后续校验和发币都用 Number，
@@ -330,18 +345,22 @@ export function findGalaFundingErrors(backupData) {
       }
     }
   }
-  // 标识符同样必须是安全整数：校验里用 Number 做键，超出安全范围的不同 ID 会被当成同一个，
-  // 而数据库会按原值插入，导致校验通过的引用关系和实际写入的不是一回事。服务端返回 ID 时也按 Number 序列化。
-  const ID_FIELDS = ['id', 'event_id', 'pool_id', 'round_id', 'used_round_id', 'ledger_id'];
+  // 年会表自身的标识符必须是安全整数；付款凭据 ledger_id 允许精确十进制字符串覆盖完整 PostgreSQL BIGINT 范围。
+  const ID_FIELDS = ['id', 'event_id', 'pool_id', 'round_id', 'used_round_id'];
   for (const t of GALA_BACKUP_TABLES) {
     for (const row of asList(backupData?.[t.name])) {
       for (const f of ID_FIELDS) {
         if (row?.[f] == null) continue;
         if (!safeInt(row[f]) || Number(row[f]) <= 0) errors.push(`${t.name}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的正整数`);
       }
-      // 能否恢复只看已有记录：在线能分配出的 ID（年会表序列的上限就是最大安全整数）都必须能恢复，
-      // 否则在线新建了一条合法记录后，下一份备份和自动恢复点都无法恢复。序列还能否分配新号是另一回事：
-      // 恢复后序列停在上限，新建会失败，但已有数据照常可用。保留的 ledger_id 同理，在线发放只写安全整数的凭据。
+    }
+  }
+  for (const w of winnersList) {
+    if (w?.ledger_id != null && !isExactLedgerId(w.ledger_id)) {
+      errors.push(`gala_round_winners#${w?.id} 的 ledger_id=${w.ledger_id} 不是可原样恢复的正整数（数字须在安全整数内，更大的 id 须是十进制字符串且不超过 BIGINT）`);
+    }
+    if (w?.award_cancelled_at != null && (!safeInt(w.award_cancelled_at) || Number(w.award_cancelled_at) <= 0)) {
+      errors.push(`gala_round_winners#${w?.id} 的 award_cancelled_at=${w.award_cancelled_at} 不是安全范围内的正整数`);
     }
   }
   // 抽签人数与轮次号按在线抽签的范围校验：已分配额 = 单价 × 抽签人数，负数或超大值会让账面倒扣或溢出；
@@ -521,7 +540,7 @@ export function findGalaFundingErrors(backupData) {
   // 有任何待发记录却是 granted，会显示整轮完成；granted 却没有完成时间、或 drawn 却带完成时间，状态自相矛盾。
   const pendingCount = new Map();
   for (const w of winnersList) {
-    if (w?.awarded_at != null || !(Number(w?.amount) > 0)) continue;
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || !(Number(w?.amount) > 0)) continue;
     const key = Number(w?.round_id);
     pendingCount.set(key, (pendingCount.get(key) || 0) + 1);
   }
@@ -554,7 +573,7 @@ export function findGalaFundingErrors(backupData) {
   // 员工奖池的余额必须够付已有的待发普通奖励，否则恢复后这些奖励必定发放失败。
   const pendingByPool = new Map();
   for (const w of winnersList) {
-    if (w?.awarded_at != null || Number(w?.is_reserved) === 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || Number(w?.is_reserved) === 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
     const key = Number(w.pool_id);
     pendingByPool.set(key, (pendingByPool.get(key) || 0) + Number(w.amount));
   }
@@ -567,7 +586,7 @@ export function findGalaFundingErrors(backupData) {
   // 预留奖池：已支出加待发的预留奖励不能超过预算（与在线改预算的下限一致），否则恢复后这些奖励必定发放失败。
   const pendingReservedByPool = new Map();
   for (const w of winnersList) {
-    if (w?.awarded_at != null || Number(w?.is_reserved) !== 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || Number(w?.is_reserved) !== 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
     const key = Number(w.pool_id);
     pendingReservedByPool.set(key, (pendingReservedByPool.get(key) || 0) + Number(w.amount));
   }
@@ -1166,10 +1185,11 @@ export function registerAdminBackupRoutes(router) {
     if (isSettingsRecoveryPoint && mode !== 'overwrite') {
       return res.status(400).json({ error: '设置自动恢复点仅允许覆盖导入' });
     }
-    // 含年会数据的全量恢复点同样只能覆盖导入：合并会跳过年会表，“成功”之后被覆盖掉的活动和待发奖励仍然缺失。
-    if (backupMode === 'full' && backup._meta?.purpose === 'pre_import_recovery_point' && mode !== 'overwrite'
-      && GALA_BACKUP_TABLES.some((t) => Array.isArray(backup.data?.[t.name]) && backup.data[t.name].length > 0)) {
-      return res.status(400).json({ error: '含年会数据的全量自动恢复点仅允许覆盖导入' });
+    // 全量自动恢复点同样只能覆盖导入：合并不会回滚新增数据，还会跳过全部年会表，无法撤销之前的导入。
+    const isFullRecoveryPoint = backupMode === 'full'
+      && backup._meta?.purpose === 'pre_import_recovery_point';
+    if (isFullRecoveryPoint && mode !== 'overwrite') {
+      return res.status(400).json({ error: '全量自动恢复点仅允许覆盖导入' });
     }
     const backupData = backup.data;
     const v1ExcludedTables = new Set([
@@ -1237,6 +1257,18 @@ export function registerAdminBackupRoutes(router) {
         const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
+      }
+      // 覆盖导入上线前的旧版全量备份（完全不含六张年会表）时，仍会清空在线库的六张年会表（及其他缺省可选表）：要求显式确认。
+      if (present.length === 0 && req.body?.confirm_clear_gala !== true) {
+        const extraClearedTables = [...GALA_BACKUP_TABLES.map((t) => t.name), 'auction_activities', 'auction_bids', 'external_accounts']
+          .filter((n) => backupData[n] == null);
+        await failHistory('失败', { reason: 'confirm_clear_gala_required', extraClearedTables, backupMode });
+        return res.status(400).json({
+          error: `该旧版全量备份不含年会数据表，覆盖导入仍会清空在线库的额外数据表（${extraClearedTables.join(', ')}）；请确认后传 confirm_clear_gala=true 再导入`,
+          reason: 'confirm_clear_gala_required',
+          extraClearedTables,
+          backupMode,
+        });
       }
       // 当前格式的覆盖导入：各表行数必须与导出时记在 _meta.tables 里的一致（见 findGalaRowCountErrors）。
       // 被截短的数组（例如名单变成 []、中奖记录变成 []）在没有其他引用时校验发现不了：覆盖会恢复出残缺的活动，
@@ -1323,6 +1355,9 @@ export function registerAdminBackupRoutes(router) {
     // 那时在线库的序号已被推到备份里的 ID（可能接近安全整数上限）。全量恢复改用 ALTER SEQUENCE … RESTART，
     // 它随事务回滚；全量恢复已用 EXCLUSIVE 锁住所有表，序列上的锁不会挡到别人。设置类导入不锁表，保持原样。
     const bumpSerial = async (tx, tableName) => {
+      if (mode !== 'overwrite' && !(Array.isArray(backupData[tableName]) && backupData[tableName].length > 0)) {
+        return;
+      }
       if (backupMode === 'full') {
         await tx.exec(
           // 已用到序列上限（年会表、流水为最大安全整数）的表照常恢复，序列停在“已用尽”：之后新建报序列耗尽，
@@ -1624,6 +1659,12 @@ export function registerAdminBackupRoutes(router) {
             // 升级前的库可能已有超过安全整数的 BIGINT 流水 id，导出时是十进制字符串，按原值恢复（见流水导入处的序列处理）。
             pushPreflight('ledger', index, `id=${row.id} 不是可原样恢复的正整数（数字须在安全整数内，更大的 id 须是十进制字符串且不超过 BIGINT）`);
           }
+          const galaFlag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
+          if (galaFlag === 'invalid') {
+            pushPreflight('ledger', index, `is_gala_payout=${row?.is_gala_payout} 只能是 0 或 1`);
+          } else if (galaFlag === 1 && galaPayoutWinnerId(row) == null) {
+            pushPreflight('ledger', index, '标记 is_gala_payout=1 的流水必须是有效的 GALA_W 正数入账');
+          }
         });
 
         const redeems = requireArray('redeems') || [];
@@ -1715,10 +1756,11 @@ export function registerAdminBackupRoutes(router) {
       });
     }
 
-    // 覆盖导入前自动生成恢复点，防止中途失败后无回滚文件。
-    // 全量恢复的恢复点在导入事务内、锁住所有表之后生成：与覆盖写入处在同一个禁止并发写入的区间，
+    // 导入前自动生成恢复点，防止中途失败后无回滚文件。
+    // 全量覆盖（overwrite）的恢复点在导入事务内、锁住所有表之后生成：与覆盖写入处在同一个禁止并发写入的区间，
     // 快照之后不会再有发币等写入提交而既被覆盖、又不在恢复点里（锁重试也不会拉大这个窗口）。
-    // 设置类导入不锁表，仍在事务前生成。
+    // 设置类导入与全量合并（merge）不清空表：在事务前用 REPEATABLE READ READ ONLY 快照生成恢复点并落盘，
+    // 不在 EXCLUSIVE 表锁内读取、序列化和写盘整库，避免大库或慢磁盘阻塞无关的发币、下单和注册。
     let recoveryPoint = null;
     let recoveryHistory = null;
     const saveRecoveryPoint = (tablesToSnapshot, snapshotData) => {
@@ -1786,13 +1828,21 @@ export function registerAdminBackupRoutes(router) {
       } catch (err) {
         return await recoveryPointFailed(err);
       }
+    } else if (mode !== 'overwrite') {
+      try {
+        const mergeSnapshot = await dumpTablesConsistently(db, FULL_TABLES, { keepSecrets: true });
+        saveRecoveryPoint(FULL_TABLES, mergeSnapshot);
+        await flushRecoveryHistory();
+      } catch (err) {
+        return await recoveryPointFailed(err);
+      }
     }
 
     const importedRoleIdMap = new Map();
 
     try {
       const report = await runWithRestoreLockRetry(db, async (tx) => {
-        // 全量恢复的每一把前置锁（账号保护锁、年会写入锁、全部表锁）都设等待上限，超时整体回滚后重试：
+        // 全量恢复的每一把前置锁（账号保护锁、年会写入锁、表锁）都设等待上限，超时整体回滚后重试：
         // 例如抽签持有年会共享锁、正等在活动行上时，恢复不会无限等待，也就不会一直占着账号保护锁，
         // 让外部账号注册等无关操作跟着卡住。
         const busy = async (step) => {
@@ -1805,14 +1855,7 @@ export function registerAdminBackupRoutes(router) {
         };
         if (backupMode === 'full') await tx.exec("SET LOCAL lock_timeout = '500ms'");
         await busy(() => lockAdminAccountProtection(tx));
-        // 全量恢复与所有写入互斥，且恢复自己永远不会在持有表锁时等待别人，因而不可能参与死锁：
-        // 1. 先拿年会写入锁的排他模式（年会事务在碰任何表之前拿它的共享模式），此时恢复还没持有任何表锁；
-        // 2. 推进恢复代数（事务内计数，恢复失败或重试回滚时不变），进行中的年会发放据此发现期间发生过恢复而整次作废；
-        // 3. 一次性以 EXCLUSIVE 模式锁住全量恢复要写的所有表（只放行普通读），每一步等锁都不超过 500ms
-        //    （短于数据库的死锁检测间隔）。拿不到说明有入账、清理等事务正持有行锁：整个恢复事务回滚、稍后重试，
-        //    让对方先完成，而不是持着一部分表去等它。拿到之后再没有别的事务能在这些表上持有或申请行锁，
-        //    恢复后续的删除、写入都不会等待；恢复期间也不会有新流水分配 ID，推进流水序列时不会回拨。
-        if (backupMode === 'full') {
+        if (backupMode === 'full' && mode === 'overwrite') {
           await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]));
           await busy(() => bumpGalaRestoreGeneration(tx));
           await busy(() => tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`));
@@ -1829,19 +1872,33 @@ export function registerAdminBackupRoutes(router) {
             throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
           }
           // 覆盖会清空在线数据，之后唯一的退路就是这个恢复点：它必须能通过同样的年会校验重新导入。
-          // 在线库里若有旧版本留下的异常年会数据（例如首尾带空白的 userid、带付款凭据的零金额记录），
-          // 恢复点导不回来，覆盖后就无法撤销，所以先拒绝覆盖并列出要先处理的记录。
-          if (mode === 'overwrite') {
-            const recoveryErrors = findRecoveryPointGalaErrors(snapshotData);
-            if (recoveryErrors.length) {
-              throw Object.assign(new Error('recovery_point_not_importable'), { recoveryPointInvalid: true, errors: recoveryErrors });
-            }
+          const recoveryErrors = findRecoveryPointGalaErrors(snapshotData);
+          if (recoveryErrors.length) {
+            throw Object.assign(new Error('recovery_point_not_importable'), { recoveryPointInvalid: true, errors: recoveryErrors });
           }
           try {
             saveRecoveryPoint(FULL_TABLES, snapshotData);
           } catch (err) {
             throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
           }
+        } else if (backupMode === 'full') {
+          // 合并模式跳过六张年会表，只对本次实际写入的非年会表加锁；
+          // 涉及账户或流水写入时需读取中奖记录核对收款人与付款凭据，先拿年会写入锁与重置锁。
+          const galaTableSet = new Set(GALA_BACKUP_TABLES.map((t) => t.name));
+          const hasAccountRows = Array.isArray(backupData.accounts) && backupData.accounts.length > 0;
+          const hasLedgerRows = Array.isArray(backupData.ledger) && backupData.ledger.length > 0;
+          if (hasAccountRows || hasLedgerRows) {
+            await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]));
+            await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]));
+          }
+          const mergeTables = FULL_TABLES.filter((t) => !galaTableSet.has(t)
+            && ((Array.isArray(backupData[t]) && backupData[t].length > 0)
+              || (t === 'content_announcement_revisions' && backupVersion === 1
+                && Array.isArray(backupData.content_announcements) && backupData.content_announcements.length > 0)));
+          if (mergeTables.length > 0) {
+            await busy(() => tx.exec(`LOCK TABLE ${mergeTables.join(', ')} IN EXCLUSIVE MODE`));
+          }
+          await tx.exec('SET LOCAL lock_timeout = DEFAULT');
         }
         const report = {};
         let failedTable = null;
@@ -2515,17 +2572,21 @@ export function registerAdminBackupRoutes(router) {
               const paidRows = uids.length ? await tx.all(
                 `SELECT w.userid, MAX(a.balance) AS balance
                    FROM gala_round_winners w LEFT JOIN accounts a ON a.userid = w.userid
-                  WHERE w.amount > 0 AND w.userid = ANY(?::text[])
+                  WHERE w.amount > 0 AND w.award_cancelled_at IS NULL AND w.userid = ANY(?::text[])
                   GROUP BY w.userid ORDER BY w.userid`,
                 [uids],
               ) : [];
               const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
               // 来源备份里的年会收款人同样保护：他们的备份余额可能含一笔年会奖励，而年会表不随合并导入，
               // 目标库不会有对应的中奖记录（付款流水另有检查，只放行目标库已有完全相同的一行）。
-              // 来源收款人按备份里的正数中奖记录、以及形似年会付款的流水识别。
+              // 来源收款人按备份里的正数中奖记录、以及真实年会付款流水（is_gala_payout=1 或旧格式同名流水）识别。
               const sourcePayees = new Set([
-                ...(requireArray('gala_round_winners') || []).filter((w) => Number(w?.amount) > 0 && w?.userid != null).map((w) => String(w.userid)),
-                ...(requireArray('ledger') || []).filter((r) => r?.userid != null && galaPayoutWinnerId(r) != null).map((r) => String(r.userid)),
+                ...(requireArray('gala_round_winners') || []).filter((w) => Number(w?.amount) > 0 && w?.award_cancelled_at == null && w?.userid != null).map((w) => String(w.userid)),
+                ...(requireArray('ledger') || []).filter((r) => {
+                  if (r?.userid == null) return false;
+                  const f = parseLedgerGalaPayoutFlag(r?.is_gala_payout);
+                  return f === 1 || (f === null && galaPayoutWinnerId(r) != null);
+                }).map((r) => String(r.userid)),
               ]);
               const guarded = new Map(paidRows.map((p) => [String(p.userid), p.balance]));
               const sourceOnly = uids.filter((u) => sourcePayees.has(u) && !guarded.has(u));
@@ -2659,7 +2720,7 @@ export function registerAdminBackupRoutes(router) {
             // 备份若带回那条原流水（而余额不随之恢复），会出现流水显示入账、余额却没有的账目。
             // 此时备份里的年会数据还没写入，查到的都是目标库原有的中奖记录；凭据当前指向不存在的流水才算重新挂回。
             if (mode !== 'overwrite' && rows.length) {
-              const ids = [...new Set(rows.map((r) => Number(r?.id)).filter((n) => Number.isSafeInteger(n) && n > 0))];
+              const ids = [...new Set(rows.filter((r) => isExactLedgerId(r?.id)).map((r) => String(r.id)))];
               const relinked = ids.length ? await tx.all(
                 `SELECT w.id, w.ledger_id FROM gala_round_winners w
                   WHERE w.ledger_id = ANY(?::bigint[])
@@ -2670,41 +2731,59 @@ export function registerAdminBackupRoutes(router) {
               if (relinked.length) {
                 throw new Error(`合并导入会把已重置用户的年会付款流水重新挂回中奖记录（${relinked.map((r) => `#${r.id}→ledger#${r.ledger_id}`).join(', ')}），余额无法随之核对，已拒绝导入`);
               }
-              // 年会付款流水不能单独合并：年会表不随合并导入，这些流水在目标库会失去与中奖记录的关联，
-              // 而对非超管和第三方查询隐藏年会入账正是靠这个关联（galaPayoutLedgerSql），导入后会被当成普通流水公开；
-              // 余额若随之覆盖，还会包含一笔目标库没有中奖凭据的奖励。
-              // 识别不依赖备份里的中奖记录（它可能缺失或被截短）：按年会付款的命名约定（GALA_W<id>、年会奖励·、入账）
-              // 识别，再加上备份中奖记录 ledger_id 引用到的流水。目标库已有完全相同的一行（同 ID、收款人、金额、引用号、原因）
-              // 的才放行（会被 ON CONFLICT 跳过，目标库原有的关联不变）；同 ID 的无关流水不算，拒绝整个导入。
+              // 年会付款流水不能单独合并：年会表不随合并导入，这些流水在目标库会失去与中奖记录的关联。
+              // 识别按来源标记 is_gala_payout=1、旧格式下的命名约定（GALA_W<id>、年会奖励·、入账），以及备份中奖记录 ledger_id 引用到的流水。
+              // 目标库已有完全相同的一行（同 ID、收款人、金额、引用号、原因，且已是年会付款流水）才放行。
               const linkedIds = new Set((requireArray('gala_round_winners') || [])
-                .map((w) => (w?.ledger_id == null ? NaN : Number(w.ledger_id)))
-                .filter((n) => Number.isSafeInteger(n) && n > 0));
-              const payoutRows = rows.filter((r) => galaPayoutWinnerId(r) != null || linkedIds.has(Number(r?.id)));
+                .filter((w) => isExactLedgerId(w?.ledger_id))
+                .map((w) => String(w.ledger_id)));
+              const payoutRows = rows.filter((r) => {
+                const f = parseLedgerGalaPayoutFlag(r?.is_gala_payout);
+                return f === 1
+                  || (f === null && galaPayoutWinnerId(r) != null)
+                  || (isExactLedgerId(r?.id) && linkedIds.has(String(r.id)));
+              });
               if (payoutRows.length) {
-                const targetRows = new Map((await tx.all(
-                  'SELECT id, userid, delta, ref_id, reason FROM ledger WHERE id = ANY(?::bigint[])',
-                  [[...new Set(payoutRows.map((r) => Number(r.id)).filter((n) => Number.isSafeInteger(n) && n > 0))]],
-                )).map((r) => [Number(r.id), r]));
+                const payoutIds = [...new Set(payoutRows.filter((r) => isExactLedgerId(r?.id)).map((r) => String(r.id)))];
+                const targetRows = new Map((payoutIds.length ? await tx.all(
+                  'SELECT id, userid, delta, ref_id, reason, is_gala_payout FROM ledger WHERE id = ANY(?::bigint[])',
+                  [payoutIds],
+                ) : []).map((r) => [String(r.id), r]));
                 const same = (a, b) => String(a ?? '') === String(b ?? '');
                 const unmatched = payoutRows.filter((r) => {
-                  const t = targetRows.get(Number(r?.id));
-                  return !t || !same(t.userid, r.userid) || !same(t.delta, r.delta) || !same(t.ref_id, r.ref_id) || !same(t.reason, r.reason ?? '');
+                  const t = isExactLedgerId(r?.id) ? targetRows.get(String(r.id)) : null;
+                  return !t
+                    || Number(t.is_gala_payout) !== 1
+                    || !same(t.userid, r.userid)
+                    || !same(t.delta, r.delta)
+                    || !same(t.ref_id, r.ref_id)
+                    || !same(t.reason, r.reason ?? '');
                 }).slice(0, 20);
                 if (unmatched.length) {
                   throw new Error(`合并导入不导入年会表，备份里的年会付款流水（ledger#${unmatched.map((r) => r?.id).join(', ledger#')}）在目标库没有完全相同的记录，导入后会失去与中奖记录的关联、对非超管公开，已拒绝导入；年会数据请用覆盖导入恢复`);
                 }
               }
             }
+            const importedWinnerLedgerIds = new Set(
+              (mode === 'overwrite' ? (requireArray('gala_round_winners') || []) : [])
+                .filter((w) => isExactLedgerId(w?.ledger_id))
+                .map((w) => String(w.ledger_id)),
+            );
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
               if (!row?.userid || !row?.id) continue;
+              const parsedFlag = parseLedgerGalaPayoutFlag(row.is_gala_payout);
+              const isGalaPayout = parsedFlag === 1
+                || (parsedFlag === null && importedWinnerLedgerIds.has(String(row.id)))
+                ? 1
+                : 0;
               try {
                 // eslint-disable-next-line no-await-in-loop
                 await execOrThrow(
                   tx,
-                  'INSERT INTO ledger(id, userid, delta, reason, ref_id, created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
-                  [row.id, row.userid, row.delta, row.reason ?? '', row.ref_id ?? null, row.created_at ?? nowTs()],
+                  'INSERT INTO ledger(id, userid, delta, reason, ref_id, is_gala_payout, created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',
+                  [row.id, row.userid, row.delta, row.reason ?? '', row.ref_id ?? null, isGalaPayout, row.created_at ?? nowTs()],
                   `ledger[${i}]`,
                 );
                 count++;
@@ -2713,11 +2792,8 @@ export function registerAdminBackupRoutes(router) {
               }
             }
             try {
-              // 备份里有超过安全整数的流水 id（升级前的库，见 galaSchema）：与启动迁移同一口径，流水序列放开到 BIGINT 原范围，
-              // 否则序列被推进到这些 id 之后只能停在“已用尽”，之后所有新流水都会失败。年会发放另在付款凭据处拒绝不安全的 id。
-              // ALTER SEQUENCE 随事务回滚。
-              if (rows.some((r) => r?.id != null && BigInt(String(r.id)) > 9007199254740991n)) {
-                await tx.exec(`DO $$ BEGIN EXECUTE format('ALTER SEQUENCE %s NO MAXVALUE', pg_get_serial_sequence('ledger', 'id')); END $$`, []);
+              if (mode === 'overwrite' || rows.length > 0) {
+                await tx.exec(`DO $$ BEGIN IF (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass) < 9223372036854775807 THEN EXECUTE format('ALTER SEQUENCE %s NO MAXVALUE', pg_get_serial_sequence('ledger', 'id')); END IF; END $$`, []);
               }
               await bumpSerial(tx, 'ledger');
             } catch (err) {
@@ -3316,73 +3392,70 @@ export function registerAdminBackupRoutes(router) {
                 // eslint-disable-next-line no-await-in-loop
                 await bumpSerial(tx, table.name);
                 // eslint-disable-next-line no-await-in-loop
-                if (table.name === 'gala_round_winners') await tx.exec(WINNER_SEQ_PAST_LEGACY_REFS_SQL, []);
+                if (table.name === 'gala_round_winners') await tx.exec(WINNER_SEQ_PAST_GALA_PAYOUT_REFS_SQL, []);
               } catch (err) {
                 markAndThrow(table.name, null, err);
               }
               report[table.name] = count;
             }
-            // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水。
-            // 导入后对整张表核对，而不只是本次导入的中奖记录：备份里一条无关流水也可能恰好占用目标库
-            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id、收款人、金额必须正是这条中奖记录的（不按时间先后判断）。
-            const mismatched = await tx.all(
-              `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
-                WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
-                   OR l.userid IS DISTINCT FROM w.userid
-                   OR l.delta IS DISTINCT FROM w.amount
-                   OR NOT starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
-                ORDER BY w.id LIMIT 20`,
-              [],
-            );
-            if (mismatched.length) {
-              throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
+            if (mode === 'overwrite' || (Array.isArray(backupData.ledger) && backupData.ledger.length > 0)) {
+              // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水或普通流水。
+              const mismatched = await tx.all(
+                `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+                  WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
+                     OR l.userid IS DISTINCT FROM w.userid
+                     OR l.delta IS DISTINCT FROM w.amount
+                     OR l.is_gala_payout <> 1
+                     OR NOT starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                  ORDER BY w.id LIMIT 20`,
+                [],
+              );
+              if (mismatched.length) {
+                throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
+              }
+              // 整库再核对一次“待发中奖记录已有真实年会发放流水”：历史普通流水（is_gala_payout = 0）或已取消奖励不在此列。
+              const paidPending = await tx.all(
+                `SELECT w.id, l.id AS ledger_row FROM gala_round_winners w
+                   JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
+                  WHERE w.awarded_at IS NULL AND w.award_cancelled_at IS NULL
+                    AND l.is_gala_payout = 1
+                    AND l.delta > 0
+                    AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                    AND l.userid = w.userid AND l.delta = w.amount
+                  ORDER BY w.id LIMIT 20`,
+                [],
+              );
+              if (paidPending.length) {
+                throw new Error(`年会中奖记录尚未发放，库里却已有它的发放流水（${paidPending.map((r) => `#${r.id}←ledger#${r.ledger_row}`).join(', ')}），已拒绝导入`);
+              }
+              // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
+              // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
+              const keptLedger = await tx.get('SELECT MAX(ledger_id)::text AS m FROM gala_round_winners', []);
+              if (keptLedger?.m) await execOrThrow(
+                tx,
+                `DO $$
+                 DECLARE
+                   seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
+                   mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass);
+                   target NUMERIC;
+                 BEGIN
+                   SELECT GREATEST(
+                            COALESCE(pg_sequence_last_value(seq)::numeric, 0),
+                            COALESCE((SELECT MAX(id)::numeric FROM ledger), 0),
+                            COALESCE((SELECT MAX(ledger_id)::numeric FROM gala_round_winners), 0)
+                          ) + 1
+                     INTO target;
+                   IF target > mx THEN
+                     EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+                     PERFORM nextval(seq);
+                     RETURN;
+                   END IF;
+                   EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
+                 END $$`,
+                [],
+                'ledger sequence bump',
+              );
             }
-            // 合并后的整库再核对一次“待发中奖记录已有形似发放流水”：两者可能分别来自目标库和备份，
-            // 单看备份文件发现不了，留下来会让之后的发放再付一次。
-            const paidPending = await tx.all(
-              `SELECT w.id, l.id AS ledger_row FROM gala_round_winners w
-                 JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
-                WHERE w.awarded_at IS NULL AND l.delta > 0
-                  AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
-                  -- 与备份预检 couldPayWinner 同一判定：收款人、金额不同的历史同名流水不算付款；不按时间排除（时钟可能回拨）
-                  AND l.userid = w.userid AND l.delta = w.amount
-                ORDER BY w.id LIMIT 20`,
-              [],
-            );
-            if (paidPending.length) {
-              throw new Error(`年会中奖记录尚未发放，库里却已有它的发放流水（${paidPending.map((r) => `#${r.id}←ledger#${r.ledger_row}`).join(', ')}），已拒绝导入`);
-            }
-            // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
-            // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
-            // 放在所有可能拒绝导入的核对之后，并用 ALTER SEQUENCE … RESTART（随事务回滚；setval 不回滚）：
-            // 导入被拒绝时在线库的流水序号保持不变。表已在事务开头锁住，期间不会有并发分配。
-            const keptLedger = await tx.get('SELECT COALESCE(MAX(ledger_id), 0) AS m FROM gala_round_winners', []);
-            if (Number(keptLedger?.m || 0) > 0) await execOrThrow(
-              tx,
-              `DO $$
-               DECLARE
-                 seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
-                 mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass);
-                 target NUMERIC;
-               BEGIN
-                 SELECT GREATEST(
-                          COALESCE(pg_sequence_last_value(seq)::numeric, 0),
-                          COALESCE((SELECT MAX(id)::numeric FROM ledger), 0),
-                          COALESCE((SELECT MAX(ledger_id)::numeric FROM gala_round_winners), 0)
-                        ) + 1
-                   INTO target;
-                 -- 与在线一致：保留的凭据用到序列上限（最大安全整数）时照常恢复，序列停在“已用尽”，
-                 -- 之后新流水报序列耗尽，而不是复用这个仍被引用的 id。同一事务里的 nextval 随事务回滚。
-                 IF target > mx THEN
-                   EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
-                   PERFORM nextval(seq);
-                   RETURN;
-                 END IF;
-                 EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
-               END $$`,
-              [],
-              'ledger sequence bump',
-            );
           }
         }
 

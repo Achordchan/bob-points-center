@@ -311,7 +311,14 @@ async function allocatedByPool(db, poolIds) {
   return map;
 }
 
-// 非超管视图不带任何逐人的发放信息（金额、是否已发、失败原因、奖池）。预留名额的金额、奖池、
+const PG_BIGINT_MAX = 9223372036854775807n;
+function normalizePositiveBigInt(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  if (typeof value !== 'string' || !/^[1-9][0-9]{0,18}$/.test(value)) return null;
+  return BigInt(value) <= PG_BIGINT_MAX ? value : null;
+}
+
+// 非超管视图不带任何逐人的发放信息（金额、是否已发、取消状态、失败原因、奖池）。预留名额的金额、奖池、
 // 发放结果都可能与同轮其他人不同，只要逐人展示就能被认出来；员工侧只需要知道谁中了。
 function serializeWinner(row, { includeReserved }) {
   const out = {
@@ -324,6 +331,8 @@ function serializeWinner(row, { includeReserved }) {
     out.amount = Number(row.amount || 0);
     out.awarded = row.awarded_at ? 1 : 0;
     out.awarded_at = row.awarded_at ? Number(row.awarded_at) : null;
+    out.award_cancelled = row.award_cancelled_at ? 1 : 0;
+    out.award_cancelled_at = row.award_cancelled_at ? Number(row.award_cancelled_at) : null;
     out.award_error = row.award_error || '';
     out.is_reserved = Number(row.is_reserved) === 1 ? 1 : 0;
     out.pool_id = row.pool_id ? Number(row.pool_id) : null;
@@ -526,7 +535,7 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, reserv
       // 预留奖池的下限是已支出加上已抽中、尚未发放的预留奖励：抽签时已确认付得起，不能事后把预算压到付不出。
       // 待发额在锁住奖池之后单独查询，进行中的发放要么已提交（计入 spent）、要么仍待发（计入待发），不会重复计算。
       const pendingRow = await tx.get(
-        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL',
+        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL',
         [id],
       );
       const committed = Number(pool.spent) + Number(pendingRow?.n || 0);
@@ -876,7 +885,7 @@ export async function drawGalaRound(db, {
         [pendingSlot.pool_id, id],
       );
       const rpPending = rp ? await tx.get(
-        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL',
+        'SELECT COALESCE(SUM(amount), 0) AS n FROM gala_round_winners WHERE pool_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL',
         [rp.id],
       ) : null;
       if (!rp || Number(rp.budget) - Number(rp.spent) - Number(rpPending?.n || 0) < amount) {
@@ -1027,7 +1036,7 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
     if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
-        WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND amount > 0
+        WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL AND amount > 0
         RETURNING id, event_id, userid, name_snapshot, pool_id, amount, is_reserved`,
       [winnerId, round.id],
     );
@@ -1069,20 +1078,23 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
       amount,
       reason,
       refId: `GALA_W${claimed.id}`,
+      isGalaPayout: true,
     });
-    // 付款凭据必须是安全整数（接口、备份校验都按 Number 处理）。升级前的库若流水 ID 已超出安全范围
-    // （见 galaSchema：此时不收紧流水序列），这笔付款整笔回滚，记录保持待发，而不是写下一个会被舍入的凭据。
-    const ledgerId = granted.ledgerId;
-    if (!/^[1-9][0-9]{0,15}$/.test(String(ledgerId ?? '')) || !Number.isSafeInteger(Number(ledgerId))) {
+    // 付款凭据按精确十进制字符串保存与比较（支持完整 PostgreSQL BIGINT 正整数范围），不把年会的 JS 精度限制施加到整个台账。
+    const ledgerId = normalizePositiveBigInt(granted.ledgerId);
+    if (!ledgerId) {
       throw new GalaError('ledger_id_unsafe', 409);
     }
-    await tx.run('UPDATE gala_round_winners SET ledger_id = ? WHERE id = ?', [ledgerId, claimed.id]);
+    await tx.run('UPDATE gala_round_winners SET ledger_id = ?::bigint WHERE id = ?', [ledgerId, claimed.id]);
     // 这是本轮最后一笔待发的正数奖励时，与到账同一事务标记整轮完成（与发放收尾、用户重置同一口径）。
     // 否则进程在到账提交后、收尾之前退出，余额和流水都已更新，轮次却一直显示未发完，导出的备份也带着这个状态。
     await tx.run(
       `UPDATE gala_rounds r SET status = 'granted', granted_at = unixepoch()
         WHERE r.id = ? AND r.status = 'drawn'
-          AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.amount > 0)`,
+          AND NOT EXISTS (
+            SELECT 1 FROM gala_round_winners w
+             WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.award_cancelled_at IS NULL AND w.amount > 0
+          )`,
       [round.id],
     );
     return { skipped: false, userid: claimed.userid, amount, balance: granted.balance };
@@ -1106,7 +1118,7 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
     const round = await tx.get('SELECT * FROM gala_rounds WHERE id = ?', [id]);
     if (!round) return { generation, round: null, winners: [] };
     const winners = await tx.all(
-      'SELECT * FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0 ORDER BY display_order',
+      'SELECT * FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL AND amount > 0 ORDER BY display_order',
       [id],
     );
     return { generation, round, winners };
@@ -1152,7 +1164,7 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
         await enterGalaWrite(tx, generation);
         const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR SHARE', [id]);
         if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
-        await tx.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND round_id = ? AND awarded_at IS NULL', [code, w.id, id]);
+        await tx.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND round_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL', [code, w.id, id]);
       });
     }
   }
@@ -1162,7 +1174,7 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
     const current = await tx.get('SELECT * FROM gala_rounds WHERE id = ? FOR UPDATE', [id]);
     if (!sameRound(current, round)) throw new GalaError('round_changed', 409);
     const counts = await tx.get(
-      'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0',
+      'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND award_cancelled_at IS NULL AND amount > 0',
       [id],
     );
     if (Number(counts?.n || 0) === 0) {
