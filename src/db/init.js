@@ -2,6 +2,7 @@ import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
 import { galaSchemaSql } from './galaSchema.js';
+import { GALA_PAYOUT_LOCK, GALA_RESET_LOCK } from '../services/galaService.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -766,6 +767,11 @@ export async function initDb(input) {
   // CREATE … IF NOT EXISTS 在并发下仍可能撞上系统表唯一约束，串行后后到的实例只会看到已存在。
   await db.transaction(async (tx) => {
     await tx.get("SELECT pg_advisory_xact_lock(hashtext('bob.gala.migration')) AS locked");
+    // 滚动发布时旧实例仍在抽签、发币：迁移要碰多张年会表（建索引、补列、回填），加表锁的顺序与在线写入不同，
+    // 交错时会死锁。先拿在线写入的两把全局锁的排他锁（顺序与抽签相同：先恢复互斥、再重置互斥），
+    // 等进行中的年会写入和用户重置提交后再动表，迁移期间新的写入排队。
+    await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+    await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
     await tx.exec(galaSchemaSql);
     // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
     await tx.exec(`DO $$ BEGIN

@@ -2397,6 +2397,22 @@ export function registerAdminBackupRoutes(router) {
           // accounts
           {
             const rows = requireArray('accounts') || [];
+            // 合并按备份覆盖账户余额。目标库里已经到账的年会奖励不在这份备份里（年会 ID 冲突会被拒绝），
+            // 备份的余额也就不含它：覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发。
+            // 无法确认两份余额能否合并，凡是覆盖到目标库已有年会到账的账户都拒绝。此时备份里的年会数据还没写入，
+            // 查到的都是目标库原有的记录；表已在事务开头锁住。
+            if (mode !== 'overwrite' && rows.length) {
+              const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
+              const paid = uids.length ? await tx.all(
+                `SELECT DISTINCT w.userid FROM gala_round_winners w
+                  WHERE w.awarded_at IS NOT NULL AND w.amount > 0 AND w.userid = ANY(?::text[])
+                  ORDER BY w.userid LIMIT 20`,
+                [uids],
+              ) : [];
+              if (paid.length) {
+                throw new Error(`合并导入会覆盖已有年会奖励到账的账户余额（${paid.map((r) => r.userid).join(', ')}），无法确认备份余额包含这些奖励，已拒绝导入`);
+              }
+            }
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
@@ -3127,7 +3143,9 @@ export function registerAdminBackupRoutes(router) {
                   markAndThrow(table.name, i, err);
                 }
               }
-              if (rows.length) {
+              // 覆盖已清空年会表：即使这张表备份里没有行，也要把序列重置回起点，否则旧库里接近上限的序列
+              // 会让恢复后的第一次新建（例如抽签写中奖记录）因序列耗尽失败。合并没导入行时保留原序列。
+              if (rows.length || mode === 'overwrite') {
                 try {
                   // eslint-disable-next-line no-await-in-loop
                   await bumpSerial(tx, table.name);

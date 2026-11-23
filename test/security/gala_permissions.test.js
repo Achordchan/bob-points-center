@@ -1023,6 +1023,10 @@ test('名单导入：第一项无效值的位置，包括清洗时抛错的超�
     [['', 'x'.repeat(5000)], 0],
     [['ok', 9007199254740993], 1],
     [['ok', 'ok2', null], 2],
+    // 写库时无法原样往返的标识：孤立代理码元（会变成 U+FFFD）、NUL（无法作为参数传入）
+    [['ok', 'ab\uD83D'], 1],
+    [['ok', 'ok2', 'a\u0000b'], 2],
+    [['\uDE00x', 'ok'], 0],
   ];
   for (const [list, index] of cases) {
     // eslint-disable-next-line no-await-in-loop

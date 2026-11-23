@@ -144,6 +144,30 @@ async function main() {
     await again.close();
     console.log('✓ DDL 幂等');
 
+    // 启动迁移与在线年会写入互斥：一笔进行中的发币（持有恢复互斥的共享锁）提交前，迁移不碰年会表
+    {
+      let released;
+      const holding = new Promise((resolve) => { released = resolve; });
+      let entered;
+      const enteredP = new Promise((resolve) => { entered = resolve; });
+      const payout = db.transaction(async (tx) => {
+        await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+        await tx.get('SELECT 1 FROM gala_round_winners LIMIT 1');
+        entered();
+        await holding;
+      });
+      await enteredP;
+      let migrated = false;
+      const migration = initDb({ db: itDb }).then((m) => { migrated = true; return m; });
+      await new Promise((r) => setTimeout(r, 800));
+      assert.equal(migrated, false, '发币事务未提交时迁移在等待');
+      released();
+      await payout;
+      await (await migration).close();
+      assert.equal(migrated, true);
+      console.log('✓ 启动迁移等进行中的年会写入提交后才动年会表');
+    }
+
     for (let i = 1; i <= USERS + 1; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await db.run('INSERT INTO users(userid, name) VALUES(?, ?)', [uid(i), `年会测试${i}`]);
@@ -534,7 +558,12 @@ async function main() {
           if (page.length < 2) break;
           after = page[page.length - 1].id;
         }
-        assert.deepEqual(all.map((x) => x.userid), [uid(1), uid(2), uid(3), uid(4), uid(5)]);
+        // 与按 id 读取的基准名单比较（导入时的插入顺序不保证与请求数组一致），并确认跨页无重复、无遗漏
+        const baseline = await db.all('SELECT id, userid FROM gala_participants WHERE event_id = ? ORDER BY id', [evP.id]);
+        assert.equal(baseline.length, 5);
+        assert.deepEqual(all.map((x) => [x.id, x.userid]), baseline.map((x) => [Number(x.id), x.userid]));
+        assert.equal(new Set(all.map((x) => x.id)).size, all.length, '跨页无重复');
+        assert.deepEqual([...new Set(all.map((x) => x.userid))].sort(), [uid(1), uid(2), uid(3), uid(4), uid(5)].sort(), '跨页无遗漏');
         assert.ok(all.every((x) => Number.isSafeInteger(x.id) && x.gala_version === evP.gala_version));
         await assert.rejects(listGalaParticipants(db, { eventId: evP.id, afterId: 'x' }), (e) => e.code === 'invalid_after_id');
         await assert.rejects(listGalaParticipants(db, { eventId: evP.id, limit: 0 }), (e) => e.code === 'invalid_limit');
@@ -1010,6 +1039,9 @@ async function main() {
         const left = (await listGalaParticipants(db, { eventId: evU.id })).map((p) => p.userid);
         assert.deepEqual(left, [uid(1)], '只删掉完全匹配的那个人');
         await assert.rejects(removeGalaParticipant(db, { eventId: evU.id, userid: 'y'.repeat(600) }), (e) => e.code === 'invalid_userid');
+        // 孤立代理码元、NUL 在查询前拒绝：不会匹配到含 U+FFFD 的另一个人，也不会变成 500
+        await assert.rejects(removeGalaParticipant(db, { eventId: evU.id, userid: `${uid(1)}\uD83D` }), (e) => e.code === 'invalid_userid');
+        await assert.rejects(addGalaParticipants(db, { eventId: evU.id, userids: [uid(2), 'a\u0000b'] }), (e) => e.code === 'invalid_userid' && e.index === 1);
         await db.run('DELETE FROM users WHERE userid = ?', [longId]);
       }
       console.log('✓ ID 与整数参数只接受数字或十进制字符串');
@@ -1502,6 +1534,22 @@ async function realRestoreChecks(cfg) {
       assert.ok(JSON.stringify(r.body).includes('缺少收款人'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before4);
     }
+    // 2b'') 合并会覆盖目标库里已有年会奖励到账的账户余额（备份不含那次活动，余额也不含那笔奖励）：拒绝
+    {
+      const paidUser = await tdb.get('SELECT userid FROM gala_round_winners WHERE awarded_at IS NOT NULL AND amount > 0 ORDER BY id LIMIT 1');
+      assert.ok(paidUser, '目标库应已有到账的年会奖励');
+      const balBefore = await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidUser.userid]);
+      const stale = structuredClone(bad);
+      for (const name of ['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) stale.data[name] = [];
+      stale.data.accounts = [{ userid: paidUser.userid, balance: 0, updated_at: now }];
+      recount(stale);
+      const before6 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: stale, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('已有年会奖励到账'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before6);
+      assert.deepEqual(await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidUser.userid]), balBefore, '余额不变');
+    }
     // 2c) 当前格式的覆盖导入：年会表被截短（名单变成空数组）时拒绝，不恢复出残缺的活动
     {
       const cut = structuredClone(b0);
@@ -1591,6 +1639,18 @@ async function realRestoreChecks(cfg) {
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
       assert.equal(await generation(), String(Number(genHeld) + 1));
       console.log('✓ 恢复等年会写入锁有上限，等待期间不长期占用账号保护锁');
+    }
+    // 6) 覆盖导入的备份里某张年会表为空：表被清空，序列也要重置；接近上限的旧序列不能留到恢复后
+    {
+      const emptyGala = structuredClone(b0);
+      for (const name of ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) emptyGala.data[name] = [];
+      emptyGala._meta.tables = Object.fromEntries(Object.entries(emptyGala._meta.tables).map(([k, v]) => [k, Array.isArray(emptyGala.data[k]) ? emptyGala.data[k].length : v]));
+      await tdb.get("SELECT setval(pg_get_serial_sequence('gala_round_winners', 'id'), 9007199254740990)");
+      r = await call('POST', '/backup/import', { backup: emptyGala, mode: 'overwrite' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      const next = await tdb.get("SELECT nextval(pg_get_serial_sequence('gala_round_winners', 'id')) AS n");
+      assert.ok(Number(next.n) < 10, `覆盖空表后序列应回到起点，实际 ${next.n}`);
+      console.log('✓ 覆盖导入时空的年会表也重置序列');
     }
   } finally {
     if (server) server.close();

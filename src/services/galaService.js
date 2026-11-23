@@ -128,6 +128,9 @@ function cleanUserid(value) {
   if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new GalaError('invalid_userid');
   const uid = String(value).trim();
   if (uid.length > MAX_USERID_LENGTH) throw new GalaError('invalid_userid');
+  // 标识不能像展示文本那样替换字符：孤立的 UTF-16 代理码元写库时会变成 U+FFFD，可能等于另一个人的 ID；
+  // NUL 无法作为 PostgreSQL 参数传入（会变成 500）。两者都在查询前拒绝。
+  if (!uid.isWellFormed() || uid.includes('\u0000')) throw new GalaError('invalid_userid');
   return uid;
 }
 
