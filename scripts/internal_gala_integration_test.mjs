@@ -97,7 +97,7 @@ async function cleanup(db) {
 
 // 发币需带上操作者看到的轮次凭据；测试里默认取当前代数（等同于刚刷新过轮次列表）。
 async function grantRound(db, roundId, token, onAwarded) {
-  const t = token ?? `${(await db.get('SELECT generation FROM gala_restore_state WHERE id = 1')).generation}.${Number(roundId)}`;
+  const t = token ?? `${(await db.get('SELECT version_token FROM gala_restore_state WHERE id = 1')).version_token}.${Number(roundId)}`;
   return grantGalaRound(db, { roundId, grantToken: t, onAwarded });
 }
 
@@ -353,6 +353,46 @@ async function main() {
         await grantRound(db, dN.round.id);
         assert.equal(await balanceOf(db, target), 0);
         console.log('✓ 重置期间新建的活动：抽签等重置提交后再读名单');
+      }
+
+      // 创建预留名额（会把人加进名单）与用户重置串行：结果等同于先重置、后创建
+      {
+        const evS = await createGalaEvent(db, { title: `${PREFIX} 重置与名额`, totalBudget: 0 });
+        const rpS = await createGalaPool(db, { eventId: evS.id, name: '预留S', budget: 100, reserved: true });
+        let slotSettled = false;
+        let slotPromise = null;
+        await db.transaction(async (tx) => {
+          await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
+          slotPromise = createGalaReservedSlot(db, { eventId: evS.id, segment: 'lottery', roundNo: 1, userid: target, poolId: rpS.id })
+            .finally(() => { slotSettled = true; });
+          await new Promise((r) => { setTimeout(r, 300); });
+          assert.equal(slotSettled, false, '用户重置进行中时，创建预留名额应等待');
+          await purgeUserBusinessData(tx, [target]);
+        });
+        await slotPromise;
+        const st = await db.get('SELECT status FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evS.id, target]);
+        const inList = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [evS.id, target]);
+        assert.deepEqual([st?.status, Number(inList.n)], ['pending', 1], '名额与名单一致：重置之后创建的名额有效');
+        console.log('✓ 创建预留名额与用户重置串行');
+      }
+
+      // 抽签重试：先识别重放再检查活动状态；排除规则不同不算同一个请求
+      {
+        const evI = await createGalaEvent(db, { title: `${PREFIX} 重试`, totalBudget: 0 });
+        await addGalaParticipants(db, { eventId: evI.id, userids: [uid(1), uid(2)] });
+        await addFiller(db, evI.id);
+        const args = { eventId: evI.id, segment: 'lottery', drawCount: 1, expectedRoundNo: 1 };
+        const first = await drawGalaRound(db, args);
+        await assert.rejects(
+          drawGalaRound(db, { ...args, excludePreviousWinners: false }),
+          (e) => e.code === 'round_no_changed' && e.next_round_no === 2,
+        );
+        await updateGalaEvent(db, { eventId: evI.id, status: 'ended' });
+        const again = await drawGalaRound(db, args);
+        assert.equal(again.replayed, true);
+        assert.equal(Number(again.round.id), Number(first.round.id));
+        await assert.rejects(drawGalaRound(db, { ...args, expectedRoundNo: 2 }), (e) => e.code === 'event_ended');
+        console.log('✓ 抽签重试：活动结束后仍能拿回已抽结果；排除规则不同则拒绝');
       }
     }
 
@@ -867,11 +907,11 @@ async function main() {
       const hid = r.body.data.id;
       // 活动范围内的写接口必须带回读到的数据版本
       const gv = (await call(operatorId, 'GET', `/gala/events/detail?id=${hid}`)).body.data.gala_version;
-      assert.match(String(gv), /^\d+$/);
+      assert.match(String(gv), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
       assert.equal((await call(operatorId, 'GET', '/gala/events')).body.data.find((e) => e.id === hid).gala_version, gv);
       r = await call(superId, 'POST', '/gala/pools/create', { event_id: hid, name: '无版本', budget: 1 });
       assert.deepEqual([r.status, r.body?.error], [400, 'invalid_gala_version']);
-      r = await call(superId, 'POST', '/gala/pools/create', { gala_version: `${Number(gv) + 1}`, event_id: hid, name: '旧版本', budget: 1 });
+      r = await call(superId, 'POST', '/gala/pools/create', { gala_version: '00000000-0000-4000-8000-000000000000', event_id: hid, name: '旧版本', budget: 1 });
       assert.deepEqual([r.status, r.body?.error], [409, 'gala_data_changed'], '版本与当前数据不符时拒绝写入');
       r = await call(operatorId, 'POST', '/gala/reserved/pools/create', { gala_version: gv, event_id: hid, name: 'x', budget: 10 });
       assert.equal(r.status, 403, '运营管理员不能创建预留奖池');
@@ -1050,6 +1090,7 @@ async function realRestoreChecks(cfg) {
       return { status: res.status, body: await res.json().catch(() => null) };
     };
     const generation = async () => String((await tdb.get('SELECT generation FROM gala_restore_state WHERE id = 1')).generation);
+    const galaVersion = async () => String((await tdb.get('SELECT version_token FROM gala_restore_state WHERE id = 1')).version_token);
     const ledgerSeq = async () => tdb.get('SELECT last_value, is_called FROM ledger_id_seq');
 
     let r = await call('GET', '/backup/export?mode=full');
@@ -1086,6 +1127,8 @@ async function realRestoreChecks(cfg) {
     assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
     assert.ok(importDoneAt >= releasedAt);
     assert.equal(await generation(), String(Number(genBefore) + 1), '重试后成功，代数只加一次');
+    assert.match(oldVersion, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.notEqual(await galaVersion(), oldVersion, '恢复后数据版本换成新的随机值（换库恢复也不会与旧页面撞上）');
     assert.equal(readdirSync(backupDir).length, filesBefore + 1, '重试只生成一个恢复点');
     const rp = JSON.parse(readFileSync(path.join(backupDir, r.body.recoveryPoint.filename), 'utf8'));
     const rpWinners = rp.data.gala_round_winners.filter((w) => Number(w.round_id) === Number(r1.round.id));
@@ -1114,6 +1157,7 @@ async function realRestoreChecks(cfg) {
     bad.data.gala_reserved_slots = [];
     const snapshot = async () => ({
       generation: await generation(),
+      version: await galaVersion(),
       seq: await ledgerSeq(),
       ledger: await tdb.all('SELECT id, userid, delta, ref_id FROM ledger ORDER BY id'),
       winners: await tdb.all('SELECT id, awarded_at, ledger_id FROM gala_round_winners ORDER BY id'),
@@ -1126,10 +1170,10 @@ async function realRestoreChecks(cfg) {
     assert.deepEqual(await snapshot(), before, '被拒绝的导入不改变数据、恢复代数和流水序号');
     // 列表与数据版本同一快照：名单、预留名额列表都带 gala_version
     const parts = (await call('GET', `/gala/participants?event_id=${ev.id}`)).body.data;
-    const genNow = await generation();
-    assert.ok(parts.length > 0 && parts.every((x) => x.gala_version === genNow));
+    const versionNow = await galaVersion();
+    assert.ok(parts.length > 0 && parts.every((x) => x.gala_version === versionNow));
     // 超出安全整数的数字 userid 在 JSON 解析时已被舍入：拒绝，不按舍入后的值匹配
-    r = await call('POST', '/gala/participants/remove', { gala_version: await generation(), event_id: ev.id, userid: 9007199254740993 });
+    r = await call('POST', '/gala/participants/remove', { gala_version: await galaVersion(), event_id: ev.id, userid: 9007199254740993 });
     assert.deepEqual([r.status, r.body?.error], [400, 'invalid_userid']);
     console.log('✓ 真实全量恢复：恢复点含最后一笔已到账奖励，旧凭据/旧版本作废，后置核对失败时一切不变；锁竞争重试只生效一次');
   } finally {

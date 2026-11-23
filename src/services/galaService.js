@@ -146,47 +146,53 @@ async function inSnapshot(db, fn) {
 // 全量恢复与年会写入的互斥：会写中奖记录或流水的年会事务（抽签、发放、记录发放失败、收尾）一开始就拿
 // 这把共享锁，恢复在锁任何表之前拿它的排他锁。两边都先拿同一把锁、再碰表和行，就不会互相等待成死锁。
 export const GALA_PAYOUT_LOCK = 'bob.gala.payout';
-// 用户重置与抽签的互斥：抽签（唯一写入中奖记录的地方）在锁活动行之前拿它的共享锁，用户重置拿排他锁。
+// 用户重置与抽签、创建预留名额的互斥：抽签（唯一写入中奖记录的地方）和创建名额在锁活动行之前拿它的共享锁，
+// 用户重置拿排他锁。
 // 不按活动行加锁，是因为重置开始后才创建的活动不在它的行锁范围内；一把全局锁同时覆盖已有和新建的活动。
 export const GALA_RESET_LOCK = 'bob.gala.reset';
-// 恢复代数：gala_restore_state 单行计数器，全量恢复在排他锁内、自己的事务里加一（不进备份；恢复失败回滚则不变）。
-// 一次发放开始时记下代数，之后每个发放事务在共享锁内重读，代数变了说明期间成功恢复过，整次发放作废。
+// 恢复代数：gala_restore_state 单行。generation 计数（运维排查用），version_token 是数据版本：
+// 建库时随机生成，每次成功的全量恢复在排他锁内、自己的事务里换一个新的随机值（不进备份；恢复失败回滚则不变）。
+// 用随机值而不是计数：换到另一个库再恢复时，计数可能恰好和旧页面持有的相同，随机值不会。
+// 一次发放开始时记下版本，之后每个发放事务在共享锁内重读，版本变了说明期间成功恢复过，整次发放作废。
 export async function bumpGalaRestoreGeneration(tx) {
   await tx.run(
-    `INSERT INTO gala_restore_state(id, generation) VALUES (1, 1)
-     ON CONFLICT (id) DO UPDATE SET generation = gala_restore_state.generation + 1`,
+    `INSERT INTO gala_restore_state(id, generation, version_token) VALUES (1, 1, gen_random_uuid()::text)
+     ON CONFLICT (id) DO UPDATE SET generation = gala_restore_state.generation + 1, version_token = gen_random_uuid()::text`,
     [],
   );
 }
 
-// 发放凭据：轮次 ID + 读到这一轮时的恢复代数（“代数.轮次ID”）。代数不进备份、每次成功的全量恢复都加一，
+const VERSION_RE_SRC = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const VERSION_RE = new RegExp(`^${VERSION_RE_SRC}$`);
+const GRANT_TOKEN_RE = new RegExp(`^(${VERSION_RE_SRC})\\.([1-9][0-9]{0,15})$`);
+
+// 发放凭据：数据版本 + 轮次 ID（“版本.轮次ID”）。版本不进备份、每次成功的全量恢复都换新随机值，
 // 所以覆盖恢复复用同一个轮次 ID 后，恢复前页面拿到的凭据必然失效：发放只付给操作者看到的那一轮。
-function grantTokenOf(generation, roundId) {
-  return `${generation}.${Number(roundId)}`;
+function grantTokenOf(version, roundId) {
+  return `${version}.${Number(roundId)}`;
 }
 
 function parseGrantToken(token, roundId) {
-  const m = /^(0|[1-9][0-9]{0,18})\.([1-9][0-9]{0,15})$/.exec(typeof token === 'string' ? token : '');
+  const m = GRANT_TOKEN_RE.exec(typeof token === 'string' ? token : '');
   if (!m || Number(m[2]) !== Number(roundId)) throw new GalaError('invalid_grant_token');
   return m[1];
 }
 
-// 数据版本 = 恢复代数（不进备份、每次成功的全量恢复加一）。读接口随数据返回，写接口原样带回。
+// 数据版本（见 bumpGalaRestoreGeneration）。读接口随数据返回，写接口原样带回。
 export function parseGalaVersion(value) {
-  const s = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
-  if (typeof s !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(s)) throw new GalaError('invalid_gala_version');
-  return s;
+  if (typeof value !== 'string' || !VERSION_RE.test(value)) throw new GalaError('invalid_gala_version');
+  return value;
 }
 
-async function readRestoreGeneration(tx) {
-  const row = await tx.get('SELECT generation FROM gala_restore_state WHERE id = 1');
-  return String(row?.generation ?? 0);
+async function readGalaVersion(tx) {
+  const row = await tx.get('SELECT version_token FROM gala_restore_state WHERE id = 1');
+  return String(row?.version_token ?? '');
 }
 
 async function enterGalaWrite(tx, generation, changedCode = 'round_changed') {
   await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
   if (generation === undefined) return null;
-  const current = await readRestoreGeneration(tx);
+  const current = await readGalaVersion(tx);
   if (generation !== null && current !== String(generation)) throw new GalaError(changedCode, 409);
   return current;
 }
@@ -285,6 +291,7 @@ function serializeRound(row, winners, { includeReserved, generation = null }) {
     pool_id: row.pool_id ? Number(row.pool_id) : null,
     amount_each: Number(row.amount_each || 0),
     draw_count: Number(row.draw_count),
+    exclude_previous_winners: Number(row.exclude_previous_winners ?? 1) === 1,
     status: state.status,
     created_by: row.created_by || '',
     created_name: row.created_name || '',
@@ -365,7 +372,7 @@ export async function listGalaEvents(db, { limit = 100, beforeId = null } = {}) 
     const rows = before
       ? await snap.all('SELECT * FROM gala_events WHERE id < ? ORDER BY id DESC LIMIT ?', [before, pageSize])
       : await snap.all('SELECT * FROM gala_events ORDER BY id DESC LIMIT ?', [pageSize]);
-    const version = await readRestoreGeneration(snap);
+    const version = await readGalaVersion(snap);
     return rows.map((r) => ({ ...serializeEvent(r), gala_version: version }));
   });
 }
@@ -405,7 +412,7 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     participant_count: Number(counts?.participants || 0),
     round_count: Number(counts?.rounds || 0),
     // 本活动所有写接口（改活动、奖池、名单、抽签、预留）都要原样带回，见 inTx。
-    gala_version: await readRestoreGeneration(db),
+    gala_version: await readGalaVersion(db),
   };
 }
 
@@ -554,13 +561,14 @@ export async function listGalaParticipants(db, { eventId, includeReserved = fals
   // 名单与数据版本在同一个快照里读：移出名单要带回这个版本。
   const { rows, version } = await inSnapshot(db, async (snap) => ({
     rows: await snap.all(
-      `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at,
+      // 预留状态只给超管，普通视图不做这次逐人子查询。
+      `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at${includeReserved ? `,
               EXISTS (SELECT 1 FROM gala_reserved_slots s
-                       WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved
+                       WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved` : ''}
          FROM gala_participants p WHERE p.event_id = ? ORDER BY p.id`,
       [id],
     ),
-    version: await readRestoreGeneration(snap),
+    version: await readGalaVersion(snap),
   }));
   return rows.map((r) => {
     const out = {
@@ -613,39 +621,41 @@ export async function drawGalaRound(db, {
     // 锁活动行：同一活动的抽签串行，轮次号与“已中奖排除”不会被并发抽签打乱。
     const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
-    if (event.status === 'ended') throw new GalaError('event_ended', 409);
-    if (!parseEnabledSegments(event.enabled_segments).includes(seg)) throw new GalaError('segment_disabled', 409);
-
-    let pool = null;
-    if (prizeType === 'coin') {
-      const pid = toPositiveId(poolId);
-      if (!pid) throw new GalaError('pool_required');
-      pool = await tx.get('SELECT * FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 0', [pid, id]);
-      if (!pool) throw new GalaError('pool_not_found', 404);
-    }
+    const requestedPoolId = prizeType === 'coin' ? toPositiveId(poolId) : null;
+    if (prizeType === 'coin' && !requestedPoolId) throw new GalaError('pool_required');
 
     const last = await tx.get(
       'SELECT COALESCE(MAX(round_no), 0) AS n FROM gala_rounds WHERE event_id = ? AND segment = ?',
       [id, seg],
     );
     const roundNo = Number(last?.n || 0) + 1;
+    // 先识别重试，再检查能不能新抽：抽签提交后活动被结束、环节被停用，重试仍应拿回已落库的那一轮。
     if (wantRoundNo !== null && wantRoundNo !== roundNo) {
       const done = wantRoundNo < roundNo
         ? await tx.get('SELECT * FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?', [id, seg, wantRoundNo])
         : null;
-      // 同一轮次号已用同样的参数抽过：视为重试，原样返回那一轮（不重新抽、不再占预算）。
+      // 同一轮次号已用完全相同的参数（含是否排除已中奖者）抽过：视为重试，原样返回那一轮（不重新抽、不再占预算）。
       if (done
         && Number(done.draw_count) === count
         && done.prize_type === prizeType
         && Number(done.amount_each) === amount
-        && (done.pool_id == null ? null : Number(done.pool_id)) === (pool ? Number(pool.id) : null)
+        && (done.pool_id == null ? null : Number(done.pool_id)) === requestedPoolId
+        && Number(done.exclude_previous_winners ?? 1) === (excludePreviousWinners ? 1 : 0)
         && (done.title ?? null) === (cleanText(title) || null)) {
         const winners = await tx.all('SELECT * FROM gala_round_winners WHERE round_id = ? ORDER BY display_order, id', [done.id]);
-        const generation = await readRestoreGeneration(tx);
+        const generation = await readGalaVersion(tx);
         return { round: done, winners, eligibleCount: null, generation, replayed: true };
       }
-      // 轮次号对不上（别人已抽了这一轮，或页面数据过旧）：不抽，让操作者刷新后确认。
+      // 轮次号对不上（别人已抽了这一轮、参数不同，或页面数据过旧）：不抽，让操作者刷新后确认。
       throw new GalaError('round_no_changed', 409, { next_round_no: roundNo });
+    }
+
+    if (event.status === 'ended') throw new GalaError('event_ended', 409);
+    if (!parseEnabledSegments(event.enabled_segments).includes(seg)) throw new GalaError('segment_disabled', 409);
+    let pool = null;
+    if (prizeType === 'coin') {
+      pool = await tx.get('SELECT * FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 0', [requestedPoolId, id]);
+      if (!pool) throw new GalaError('pool_not_found', 404);
     }
 
     // 公开准入：只用名单人数和本环节已中奖人数（所有管理员都看得到）判断，与是否有预留无关。
@@ -765,10 +775,10 @@ export async function drawGalaRound(db, {
     const order = pickRandom(winners.map((_, i) => i), winners.length, randomInt);
 
     const round = await tx.get(
-      `INSERT INTO gala_rounds(event_id, segment, round_no, title, prize_type, pool_id, amount_each, draw_count, created_by, created_name)
-       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      `INSERT INTO gala_rounds(event_id, segment, round_no, title, prize_type, pool_id, amount_each, draw_count, exclude_previous_winners, created_by, created_name)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       [id, seg, roundNo, cleanText(title) || null, prizeType, pool ? pool.id : null, amount, count,
-        actor.userid || null, actor.name || null],
+        excludePreviousWinners ? 1 : 0, actor.userid || null, actor.name || null],
     );
     const inserted = [];
     for (let pos = 0; pos < order.length; pos += 1) {
@@ -788,7 +798,7 @@ export async function drawGalaRound(db, {
       );
     }
     // 仍持有恢复互斥的共享锁，读到的代数就是这一轮所在数据的代数。
-    const generation = await readRestoreGeneration(tx);
+    const generation = await readGalaVersion(tx);
     return { round, winners: inserted, eligibleCount: eligibleRows.length, generation };
   }, expectedVersion);
 }
@@ -811,7 +821,7 @@ async function readGalaRounds(db, { id, before, pageSize, includeReserved }) {
     : await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, pageSize]);
   if (rounds.length === 0) return [];
   // 与轮次在同一个快照里读：恢复前的轮次只会配上恢复前的代数。
-  const generation = await readRestoreGeneration(db);
+  const generation = await readGalaVersion(db);
   const winners = await db.all(
     'SELECT * FROM gala_round_winners WHERE round_id = ANY(?::bigint[]) ORDER BY id',
     [rounds.map((r) => Number(r.id))],
@@ -1004,6 +1014,9 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   if (!pid) throw new GalaError('reserved_pool_required');
   // 锁活动行与抽签串行：避免抽签进行中插入的预留名额在该轮结束后才提交，变成永远用不到的悬挂名额。
   return await inTx(db, async (tx) => {
+    // 与用户重置串行（见 GALA_RESET_LOCK）：创建名额会同时把人加进名单，若夹在重置“删名单”和“取消名额”之间提交，
+    // 结果会是人还在名单、名额却被取消，与任何先后顺序都不符。
+    await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
     // 用户在同一事务里、取得恢复锁和活动锁之后再确认，并 FOR KEY SHARE 锁住直到名额写入：
@@ -1087,7 +1100,7 @@ export async function listGalaReservedSlots(db, { eventId }) {
         WHERE s.event_id = ? ORDER BY s.id DESC`,
       [id],
     );
-    const version = await readRestoreGeneration(snap);
+    const version = await readGalaVersion(snap);
     return rows.map((r) => ({ ...serializeSlot(r), gala_version: version }));
   });
 }

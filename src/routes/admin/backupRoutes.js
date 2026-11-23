@@ -31,7 +31,7 @@ const GALA_BACKUP_TABLES = [
   { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: JSON.stringify(Object.keys(GALA_SEGMENTS)) } },
   { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
   { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
-  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, status: 'drawn' } },
+  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'exclude_previous_winners', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, exclude_previous_winners: 1, status: 'drawn' } },
   { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0 } },
   { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
 ];
@@ -140,6 +140,11 @@ export function findGalaFundingErrors(backupData) {
       // 必须仍是安全整数（序列的 MAXVALUE 也设在这里），否则新建的活动/轮次无法通过接口操作。
       if (row?.id != null && safeInt(row.id) && Number(row.id) >= GALA_MAX_ROW_ID) {
         errors.push(`${t.name}#${row.id} 的 id 已到上限，恢复后无法再新建记录`);
+      }
+      // 中奖记录保留的流水 id 同理：恢复会把流水序列推到它之后（即使那条流水已被重置删除），
+      // 下一笔流水的 id 必须仍是安全整数。
+      if (row?.ledger_id != null && safeInt(row.ledger_id) && Number(row.ledger_id) >= GALA_MAX_ROW_ID) {
+        errors.push(`${t.name}#${row?.id} 的 ledger_id 已到上限，恢复后新流水的序号会超出安全范围`);
       }
     }
   }
@@ -2892,6 +2897,10 @@ export function registerAdminBackupRoutes(router) {
                           COALESCE((SELECT MAX(ledger_id) FROM gala_round_winners), 0)
                         ) + 1
                    INTO target;
+                 -- 下一笔流水的 id 必须仍是安全整数（接口与年会付款凭据都按 Number 处理），否则拒绝导入。
+                 IF target > 9007199254740991 THEN
+                   RAISE EXCEPTION '流水序号将超出安全整数范围（下一个为 %），已拒绝导入', target;
+                 END IF;
                  EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
                END $$`,
               [],

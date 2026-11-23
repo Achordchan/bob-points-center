@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   pool_id BIGINT REFERENCES gala_pools(id) ON DELETE RESTRICT,
   amount_each BIGINT NOT NULL DEFAULT 0,
   draw_count INTEGER NOT NULL,
+  -- 抽签时是否排除本环节已中奖者（1 排除）。抽签重试按它和其他参数判断是不是同一个请求。
+  exclude_previous_winners SMALLINT NOT NULL DEFAULT 1 CHECK (exclude_previous_winners IN (0, 1)),
   status TEXT NOT NULL DEFAULT 'drawn',
   created_by TEXT,
   created_name TEXT,
@@ -69,6 +71,7 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   CONSTRAINT chk_gala_rounds_status CHECK (status IN ('drawn', 'granted'))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_rounds_event ON gala_rounds(event_id, id DESC);
+ALTER TABLE gala_rounds ADD COLUMN IF NOT EXISTS exclude_previous_winners SMALLINT NOT NULL DEFAULT 1 CHECK (exclude_previous_winners IN (0, 1));
 
 -- 每轮中奖人。awarded_at 为发币幂等闸门：只有把它从 NULL 改成时间戳的那个事务才会写账本。
 CREATE TABLE IF NOT EXISTS gala_round_winners (
@@ -115,14 +118,20 @@ CREATE TABLE IF NOT EXISTS gala_reserved_slots (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   ON gala_reserved_slots(event_id, segment, round_no)
   WHERE status = 'pending';
+-- 按人查未取消名额（抽签候选排除、超管名单的预留标记、名额唯一性）。
+CREATE INDEX IF NOT EXISTS idx_gala_reserved_live_user
+  ON gala_reserved_slots(event_id, userid)
+  WHERE status <> 'cancelled';
 
--- 全量恢复代数：单行计数器，全量恢复在自己的事务里加一（失败回滚则不变）。不进备份，
--- 发放用它识别“开始之后发生过（成功的）恢复”。
+-- 全量恢复状态：单行。generation 计数，version_token 是数据版本（建库时随机生成，每次成功的全量恢复换新值，
+-- 失败回滚则不变）。不进备份；写接口和发放用 version_token 识别“读到数据之后发生过恢复”，换库也不会撞上旧值。
 CREATE TABLE IF NOT EXISTS gala_restore_state (
   id INTEGER PRIMARY KEY,
   generation BIGINT NOT NULL DEFAULT 0,
+  version_token TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   CONSTRAINT chk_gala_restore_state_singleton CHECK (id = 1)
 );
+ALTER TABLE gala_restore_state ADD COLUMN IF NOT EXISTS version_token TEXT NOT NULL DEFAULT gen_random_uuid()::text;
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
 
 -- 年会表 ID 不超过 JS 安全整数（接口按 Number 解析 ID）：到上限时插入失败，而不是生成接口无法引用的记录。

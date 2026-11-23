@@ -630,3 +630,18 @@ test('年会备份：轮次必须在可抽签的环节，ID 必须给新记录�
   nearMax.gala_round_winners[0].id = Number.MAX_SAFE_INTEGER - 1;
   assert.deepEqual(findGalaFundingErrors(nearMax), []);
 });
+
+test('年会备份：保留的流水 id（即使流水已被删除）也要给新流水留出安全范围', () => {
+  const snap = (ledgerId) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 100 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: 100, ledger_id: ledgerId }],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap(Number.MAX_SAFE_INTEGER - 1)), []);
+  const errors = findGalaFundingErrors(snap(Number.MAX_SAFE_INTEGER));
+  assert.ok(errors.some((e) => e.startsWith('gala_round_winners#1') && e.includes('ledger_id 已到上限')), errors.join('\n'));
+});
