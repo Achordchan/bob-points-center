@@ -714,6 +714,18 @@ async function main() {
         addGalaParticipants(db, { eventId: event.id, userids: [uid(1)], tableNo: true }),
         (e) => e.code === 'invalid_table_no',
       );
+      // userid 原样比较：前缀相同的另一个 userid 不会被误删，超长的直接拒绝
+      {
+        const longId = `${uid(1)}${'x'.repeat(200)}`;
+        await db.run('INSERT INTO users(userid, name) VALUES(?, ?) ON CONFLICT DO NOTHING', [longId, 'long']);
+        const evU = await createGalaEvent(db, { title: `${PREFIX} 长ID` });
+        await addGalaParticipants(db, { eventId: evU.id, userids: [uid(1), longId] });
+        await removeGalaParticipant(db, { eventId: evU.id, userid: longId });
+        const left = (await listGalaParticipants(db, { eventId: evU.id })).map((p) => p.userid);
+        assert.deepEqual(left, [uid(1)], '只删掉完全匹配的那个人');
+        await assert.rejects(removeGalaParticipant(db, { eventId: evU.id, userid: 'y'.repeat(600) }), (e) => e.code === 'invalid_userid');
+        await db.run('DELETE FROM users WHERE userid = ?', [longId]);
+      }
       console.log('✓ ID 与整数参数只接受数字或十进制字符串');
       // 活动列表按 id 倒序分页
       const e1 = await createGalaEvent(db, { title: `${PREFIX} 分页1` });
@@ -795,6 +807,12 @@ async function main() {
       assert.ok(r.body.data.length === 1 && r.body.data[0].id < hid);
       r = await call(operatorId, 'GET', '/gala/events?limit=abc');
       assert.deepEqual([r.status, r.body?.error], [400, 'invalid_limit']);
+      // 显式传了无效的奖品类型（空串、false、0）不会被当成无币轮
+      for (const bad of ['', false, 0]) {
+        // eslint-disable-next-line no-await-in-loop
+        r = await call(operatorId, 'POST', '/gala/rounds/draw', { event_id: hid, segment: 'lottery', draw_count: 1, prize_type: bad });
+        assert.deepEqual([r.status, r.body?.error], [400, 'invalid_prize_type'], JSON.stringify(bad));
+      }
       r = await call(superId, 'POST', '/gala/pools/create', { event_id: hid, name: '员工池', budget: 1000 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const hPool = r.body.data.id;

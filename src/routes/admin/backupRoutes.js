@@ -249,6 +249,7 @@ export function findGalaFundingErrors(backupData) {
   const reservedWinnerKeys = new Set(winnersList
     .filter((w) => Number(w?.is_reserved) === 1)
     .map((w) => `${Number(w?.round_id)}:${String(w?.userid)}`));
+  const anyWinnerKeys = new Set(winnersList.map((w) => `${Number(w?.round_id)}:${String(w?.userid)}`));
   // 已发奖励必须已计入奖池支出，否则恢复后奖池还能再发一遍。
   const awardedByPool = new Map();
   for (const w of winnersList) {
@@ -416,8 +417,12 @@ export function findGalaFundingErrors(backupData) {
       } else if (slot?.status === 'used') {
         // 已使用的名额占本轮一个位置。对应的预留中奖记录只会因用户重置被删掉，那时本轮一定空出一个位置；
         // 记录不在、位置却被别人占满，说明这一位被换成了普通中奖人，恢复后会从员工奖池发给错误的人。
-        const hasWinner = reservedWinnerKeys.has(`${Number(used.id)}:${String(slot?.userid)}`);
-        if (!hasWinner && (winnersPerRound.get(Number(used.id)) || 0) >= Number(used.draw_count || 0)) {
+        // 名额持有人在本轮以普通中奖记录出现，同样是被改了标记：恢复后会从员工奖池给预留对象发币。
+        const key = `${Number(used.id)}:${String(slot?.userid)}`;
+        const hasWinner = reservedWinnerKeys.has(key);
+        if (!hasWinner && anyWinnerKeys.has(key)) {
+          errors.push(`gala_reserved_slots#${slot?.id} 已使用，但持有人在轮次 ${used.id} 里是普通中奖记录`);
+        } else if (!hasWinner && (winnersPerRound.get(Number(used.id)) || 0) >= Number(used.draw_count || 0)) {
           errors.push(`gala_reserved_slots#${slot?.id} 已使用，但轮次 ${used.id} 里没有它的中奖记录且名额已被占满`);
         }
       }
@@ -2787,6 +2792,19 @@ export function registerAdminBackupRoutes(router) {
             );
             if (mismatched.length) {
               throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
+            }
+            // 合并后的整库再核对一次“待发中奖记录已有形似发放流水”：两者可能分别来自目标库和备份，
+            // 单看备份文件发现不了，留下来会让之后的发放再付一次。
+            const paidPending = await tx.all(
+              `SELECT w.id, l.id AS ledger_row FROM gala_round_winners w
+                 JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
+                WHERE w.awarded_at IS NULL AND l.delta > 0
+                  AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                ORDER BY w.id LIMIT 20`,
+              [],
+            );
+            if (paidPending.length) {
+              throw new Error(`年会中奖记录尚未发放，库里却已有它的发放流水（${paidPending.map((r) => `#${r.id}←ledger#${r.ledger_row}`).join(', ')}），已拒绝导入`);
             }
           }
         }

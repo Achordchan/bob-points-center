@@ -148,7 +148,8 @@ export function registerAdminGalaRoutes(router) {
       segment: b.segment,
       title: b.title,
       drawCount: b.draw_count,
-      prizeType: b.prize_type || 'none',
+      // 只有没传时才默认无币轮；传了空串、false、0 等无效值交给服务层报 invalid_prize_type。
+      prizeType: b.prize_type === undefined || b.prize_type === null ? 'none' : b.prize_type,
       poolId: b.pool_id,
       amountEach: b.amount_each,
       excludePreviousWinners: b.exclude_previous_winners !== false,

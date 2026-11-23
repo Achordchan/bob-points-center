@@ -496,3 +496,18 @@ test('外部发币不能使用年会发放的引用号前缀', async () => {
   }
   for (const ref of [undefined, null, 'ORDER_1', 'GALA1']) assert.doesNotThrow(() => assertExternalRefIdAllowed(ref));
 });
+
+test('年会备份：已使用名额的持有人不能以普通中奖记录出现在本轮', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
+    // 两人轮只剩一条记录：持有人 k 被记成了普通中奖人
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 10, pool_id: 1, awarded_at: null }],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 1 }],
+    ledger: [],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('普通中奖记录')), errors.join('\n'));
+});

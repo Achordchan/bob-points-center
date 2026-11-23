@@ -99,6 +99,15 @@ function cleanText(value, max = MAX_TITLE_LENGTH) {
   return String(value).trim().slice(0, max);
 }
 
+// userid 原样比较（只去掉首尾空白），不截断：截断后可能匹配到前缀相同的另一个人。超长的直接拒绝。
+const MAX_USERID_LENGTH = 512;
+function cleanUserid(value) {
+  if (value === null || value === undefined || (typeof value !== 'string' && typeof value !== 'number')) return '';
+  const uid = String(value).trim();
+  if (uid.length > MAX_USERID_LENGTH) throw new GalaError('invalid_userid');
+  return uid;
+}
+
 function requireSegment(segment) {
   const key = cleanText(segment, 32);
   if (!Object.hasOwn(GALA_SEGMENTS, key)) throw new GalaError('invalid_segment');
@@ -455,7 +464,7 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   if (tableNo !== null && tableNo !== undefined && tableNo !== '' && table === null) throw new GalaError('invalid_table_no');
   const list = allActiveDingtalk
     ? []
-    : [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanText(x, 128)).filter(Boolean))];
+    : [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanUserid(x)).filter(Boolean))];
   if (!allActiveDingtalk && list.length === 0) throw new GalaError('userids_required');
   if (list.length > 2000) throw new GalaError('too_many_userids');
   // 先锁活动行再写名单，与抽签、创建预留名额、移出名单的加锁顺序一致：
@@ -501,7 +510,7 @@ export async function removeGalaParticipant(db, { eventId, userid }) {
   // 与抽签串行：抽签持有活动行锁期间，名单不会在“公开人数检查”和“候选人查询”之间变化。
   return await inTx(db, async (tx) => {
     await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
-    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, cleanText(userid, 128)]);
+    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, cleanUserid(userid)]);
     return { removed: r.changes };
   });
 }
@@ -911,7 +920,7 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   if (!GALA_DRAW_SEGMENTS.has(seg)) throw new GalaError('segment_not_drawable');
   const no = toPositiveId(roundNo, PG_INT_MAX);
   if (!no) throw new GalaError('invalid_round_no');
-  const uid = cleanText(userid, 128);
+  const uid = cleanUserid(userid);
   const user = uid ? await db.get('SELECT userid FROM users WHERE userid = ?', [uid]) : null;
   if (!user) throw new GalaError('user_not_found', 404);
   // 名额不单独设金额：中奖时按本轮单价发放（无币轮不发币），从这里指定的预留奖池扣，所以奖池必填。

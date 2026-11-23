@@ -125,7 +125,6 @@ CREATE TABLE IF NOT EXISTS gala_restore_state (
   CONSTRAINT chk_gala_restore_state_singleton CHECK (id = 1)
 );
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
-DROP SEQUENCE IF EXISTS gala_restore_generation_seq;
 `;
 
 // public_granted_at 的回填规则（旧库补列、导入旧备份时共用）：执行过发放（整轮已完成、已有人到账或留有发放失败原因），
