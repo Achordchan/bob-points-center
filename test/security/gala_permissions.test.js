@@ -664,7 +664,7 @@ test('年会备份：开启排除已中奖者的一轮，中奖人不能在同�
   });
   const errors = findGalaFundingErrors(snap(1));
   assert.ok(errors.some((e) => e.startsWith('gala_round_winners#2') && e.includes('排除本环节已中奖者')), errors.join('\n'));
-  // 缺省视为开启
+  // 直接校验时缺省视为开启（导入前会先由 normalizeLegacyGalaRounds 推断补齐）
   const legacy = snap(1);
   delete legacy.gala_rounds[1].exclude_previous_winners;
   assert.ok(findGalaFundingErrors(legacy).some((e) => e.startsWith('gala_round_winners#2')));
@@ -722,4 +722,75 @@ test('含年会数据的全量备份格式：缺整组年会表不能当成旧�
   assert.equal(requiresGalaTables({ version: 2, tables: { users: 1, gala_events: 0 } }), true);
   assert.equal(requiresGalaTables({ version: 2, tables: { users: 1, ledger: 3 } }), false);
   assert.equal(requiresGalaTables({ version: 1 }), false);
+});
+
+test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁移同一口径），推断值写回行里', async () => {
+  const { normalizeLegacyGalaRounds } = await import('../../src/routes/admin/backupRoutes.js');
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 2, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 3, event_id: 1, segment: 'lottery', round_no: 3, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 4, event_id: 1, segment: 'giveaway', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null },
+      { id: 2, round_id: 2, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null },
+      { id: 3, round_id: 3, event_id: 1, userid: 'v', amount: 10, pool_id: 1, awarded_at: null },
+      { id: 4, round_id: 4, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null },
+    ],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  const legacy = snap();
+  assert.equal(normalizeLegacyGalaRounds(legacy), 4);
+  // 第 2 轮有人在第 1 轮中过奖：当时关闭了排除；其余轮次（含另一环节）推断为开启
+  assert.deepEqual(legacy.gala_rounds.map((r) => r.exclude_previous_winners), [1, 0, 1, 1]);
+  assert.deepEqual(findGalaFundingErrors(legacy), []);
+  // 备份里已有的值不覆盖
+  const explicit = snap();
+  for (const r of explicit.gala_rounds) r.exclude_previous_winners = 1;
+  assert.equal(normalizeLegacyGalaRounds(explicit), 0);
+  assert.ok(findGalaFundingErrors(explicit).some((e) => e.startsWith('gala_round_winners#2')));
+});
+
+test('年会备份：已用名额兑现后，持有人在同一活动任何环节都不能再有普通中奖记录', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'giveaway', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 3, event_id: 1, segment: 'giveaway', round_no: 2, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 10, pool_id: 1, is_reserved: 0, awarded_at: null },
+      { id: 2, round_id: 2, event_id: 1, userid: 'k', amount: 10, pool_id: 2, is_reserved: 1, awarded_at: null },
+      { id: 3, round_id: 3, event_id: 1, userid: 'k', amount: 10, pool_id: 1, is_reserved: 0, awarded_at: null },
+    ],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 2 }],
+    ledger: [],
+  });
+  const errors = findGalaFundingErrors(snap());
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('兑现之后')), errors.join('\n'));
+  // 兑现之前在别的环节中过普通奖是允许的（创建名额只检查本环节）
+  const ok = snap();
+  ok.gala_round_winners[2].userid = 'u';
+  assert.deepEqual(findGalaFundingErrors(ok), []);
+});
+
+test('年会备份格式号：只接受本版本认识的格式', async () => {
+  const { isUnsupportedGalaFormat, GALA_BACKUP_FORMAT } = await import('../../src/routes/admin/backupRoutes.js');
+  assert.equal(isUnsupportedGalaFormat({ version: 2 }), false);
+  assert.equal(isUnsupportedGalaFormat({ version: 2, galaFormat: GALA_BACKUP_FORMAT }), false);
+  assert.equal(isUnsupportedGalaFormat({ version: 2, galaFormat: GALA_BACKUP_FORMAT + 1 }), true);
+  assert.equal(isUnsupportedGalaFormat({ version: 2, galaFormat: '1' }), true);
+  const src = await import('node:fs').then((fs) => fs.readFileSync(new URL('../../src/routes/admin/backupRoutes.js', import.meta.url), 'utf8'));
+  // 在任何写库（获取连接/开事务）之前拒绝
+  const reject = src.indexOf('isUnsupportedGalaFormat(backup._meta)');
+  assert.ok(reject > 0 && reject < src.indexOf('const backupData = backup.data;'));
 });

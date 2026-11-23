@@ -71,23 +71,6 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   CONSTRAINT chk_gala_rounds_status CHECK (status IN ('drawn', 'granted'))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_rounds_event ON gala_rounds(event_id, id DESC);
--- 早期库补列：新轮次默认排除已中奖者；补列前已有的轮次若有“同环节更早轮次的中奖人再次中奖”的记录，
--- 说明当时关闭了排除，回填为 0，免得升级后导出的备份（含自动恢复点）被跨轮重复中奖校验拒绝。只在补列时执行一次。
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = current_schema() AND table_name = 'gala_rounds'
-                    AND column_name = 'exclude_previous_winners') THEN
-    ALTER TABLE gala_rounds ADD COLUMN exclude_previous_winners SMALLINT NOT NULL DEFAULT 1
-      CHECK (exclude_previous_winners IN (0, 1));
-    UPDATE gala_rounds r SET exclude_previous_winners = 0
-     WHERE EXISTS (
-       SELECT 1 FROM gala_round_winners w
-         JOIN gala_round_winners pw ON pw.event_id = w.event_id AND pw.userid = w.userid
-         JOIN gala_rounds pr ON pr.id = pw.round_id
-        WHERE w.round_id = r.id AND pr.event_id = r.event_id AND pr.segment = r.segment AND pr.round_no < r.round_no);
-  END IF;
-END $$;
 
 -- 每轮中奖人。awarded_at 为发币幂等闸门：只有把它从 NULL 改成时间戳的那个事务才会写账本。
 CREATE TABLE IF NOT EXISTS gala_round_winners (
@@ -142,6 +125,24 @@ CREATE INDEX IF NOT EXISTS idx_gala_reserved_user_pending ON gala_reserved_slots
 CREATE INDEX IF NOT EXISTS idx_gala_reserved_live_user
   ON gala_reserved_slots(event_id, userid)
   WHERE status <> 'cancelled';
+
+-- 早期库补列（放在中奖表建好之后：回填要读中奖记录，按顺序执行时中奖表必须已存在）：新轮次默认排除已中奖者；补列前已有的轮次若有“同环节更早轮次的中奖人再次中奖”的记录，
+-- 说明当时关闭了排除，回填为 0，免得升级后导出的备份（含自动恢复点）被跨轮重复中奖校验拒绝。只在补列时执行一次。
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema = current_schema() AND table_name = 'gala_rounds'
+                    AND column_name = 'exclude_previous_winners') THEN
+    ALTER TABLE gala_rounds ADD COLUMN exclude_previous_winners SMALLINT NOT NULL DEFAULT 1
+      CHECK (exclude_previous_winners IN (0, 1));
+    UPDATE gala_rounds r SET exclude_previous_winners = 0
+     WHERE EXISTS (
+       SELECT 1 FROM gala_round_winners w
+         JOIN gala_round_winners pw ON pw.event_id = w.event_id AND pw.userid = w.userid
+         JOIN gala_rounds pr ON pr.id = pw.round_id
+        WHERE w.round_id = r.id AND pr.event_id = r.event_id AND pr.segment = r.segment AND pr.round_no < r.round_no);
+  END IF;
+END $$;
 
 -- 全量恢复状态：单行。generation 计数，version_token 是数据版本（建库时随机生成，每次成功的全量恢复换新值，
 -- 失败回滚则不变）。不进备份；写接口和发放用 version_token 识别“读到数据之后发生过恢复”，换库也不会撞上旧值。

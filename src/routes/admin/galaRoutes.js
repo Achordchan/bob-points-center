@@ -43,7 +43,10 @@ function sendError(res, err) {
     return res.status(err.status || 400).json(body);
   }
   if (err?.code === '23505') return res.status(409).json({ error: 'conflict' });
-  return res.status(500).json({ error: String(err?.message || err) });
+  // 意外错误只在服务端记录原文：数据库报错里的表名、约束名等内部信息不返回给调用方。
+  // eslint-disable-next-line no-console
+  console.error('[gala] unexpected error', err);
+  return res.status(500).json({ error: 'internal_error' });
 }
 
 function handle(fn) {

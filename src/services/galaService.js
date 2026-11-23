@@ -654,6 +654,8 @@ export async function drawGalaRound(db, {
       [id, seg],
     );
     const roundNo = Number(last?.n || 0) + 1;
+    // 轮次号是 INTEGER：本环节已用到上限时不再给出下一轮号（重试已有轮次仍可识别），直接返回业务错误。
+    const exhausted = roundNo > PG_INT_MAX;
     // 先识别重试，再检查能不能新抽：抽签提交后活动被结束、环节被停用，重试仍应拿回已落库的那一轮。
     if (wantRoundNo !== null && wantRoundNo !== roundNo) {
       const done = wantRoundNo < roundNo
@@ -671,9 +673,11 @@ export async function drawGalaRound(db, {
         const generation = await readGalaVersion(tx);
         return { round: done, winners, eligibleCount: null, generation, replayed: true };
       }
+      if (exhausted) throw new GalaError('round_no_exhausted', 409);
       // 轮次号对不上（别人已抽了这一轮、参数不同，或页面数据过旧）：不抽，让操作者刷新后确认。
       throw new GalaError('round_no_changed', 409, { next_round_no: roundNo });
     }
+    if (exhausted) throw new GalaError('round_no_exhausted', 409);
 
     if (event.status === 'ended') throw new GalaError('event_ended', 409);
     if (!parseEnabledSegments(event.enabled_segments).includes(seg)) throw new GalaError('segment_disabled', 409);
