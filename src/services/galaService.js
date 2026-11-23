@@ -794,11 +794,13 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   return await inTx(db, async (tx) => {
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
+    // 抽签总是从该环节已抽的最大轮次 + 1 开始，轮次号不大于最大已抽轮次的名额永远用不到
+    // （例如恢复的数据里有第 1、3 轮，第 2 轮的名额不会被消费，却会一直把这个人排除在普通抽签之外）。
     const drawn = await tx.get(
-      'SELECT 1 AS x FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?',
-      [id, seg, no],
+      'SELECT COALESCE(MAX(round_no), 0) AS n FROM gala_rounds WHERE event_id = ? AND segment = ?',
+      [id, seg],
     );
-    if (drawn) throw new GalaError('round_already_drawn', 409);
+    if (no <= Number(drawn?.n || 0)) throw new GalaError('round_already_drawn', 409);
     const existing = await tx.get(
       `SELECT 1 AS x FROM gala_reserved_slots WHERE event_id = ? AND segment = ? AND round_no = ? AND status = 'pending'`,
       [id, seg, no],

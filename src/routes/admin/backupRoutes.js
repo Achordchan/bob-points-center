@@ -216,6 +216,31 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 小于已发奖励合计 ${total}`);
     }
   }
+  // 轮次的完成状态必须与待发记录一致：普通奖励未发完却有 public_granted_at，非超管会看到“已发放”；
+  // 有任何待发记录却是 granted，超管也会看到整轮完成。普通奖励发完、只剩预留奖励待发是合法状态。
+  const pendingCount = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at != null || !(Number(w?.amount) > 0)) continue;
+    const key = Number(w?.round_id);
+    const c = pendingCount.get(key) || { all: 0, pub: 0 };
+    c.all += 1;
+    if (Number(w?.is_reserved) !== 1) c.pub += 1;
+    pendingCount.set(key, c);
+  }
+  for (const r of rounds.values()) {
+    const status = r?.status ?? 'drawn';
+    if (!['drawn', 'granted'].includes(status)) {
+      errors.push(`gala_rounds#${r?.id} 的状态 ${status} 无效`);
+      continue;
+    }
+    const c = pendingCount.get(Number(r?.id)) || { all: 0, pub: 0 };
+    if (r?.public_granted_at != null && c.pub > 0) {
+      errors.push(`gala_rounds#${r?.id} 已标记公开发放完成，但还有 ${c.pub} 条普通奖励待发`);
+    }
+    if ((status === 'granted' || r?.granted_at != null) && c.all > 0) {
+      errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${c.all} 条奖励待发`);
+    }
+  }
   // 员工奖池的余额必须够付已有的待发普通奖励，否则恢复后这些奖励必定发放失败。
   const pendingByPool = new Map();
   for (const w of winnersList) {

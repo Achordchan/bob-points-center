@@ -324,4 +324,28 @@ test('年会备份：每轮中奖人数不超过抽签人数、已分配额不�
   const dangling = ok();
   dangling.gala_reserved_slots.push({ id: 9, event_id: 1, segment: 'game', round_no: 1, userid: 'k', amount: 0, status: 'used', used_round_id: null });
   assert.ok(findGalaFundingErrors(dangling).some((e) => e.startsWith('gala_reserved_slots#9') && e.includes('没有关联轮次')));
+
+  // 完成状态与待发记录矛盾
+  const pubDone = ok();
+  pubDone.gala_rounds[0].public_granted_at = 1;
+  assert.ok(findGalaFundingErrors(pubDone).some((e) => e.startsWith('gala_rounds#1') && e.includes('公开发放完成')));
+  const allDone = ok();
+  allDone.gala_rounds[0].status = 'granted';
+  assert.ok(findGalaFundingErrors(allDone).some((e) => e.startsWith('gala_rounds#1') && e.includes('整轮发放完成')));
+});
+
+test('年会备份：普通奖励已发完、只剩预留奖励待发时允许公开状态为已发放', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 20, spent: 10 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 2, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', public_granted_at: 5 }],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 9 },
+      { id: 2, round_id: 1, event_id: 1, userid: 'k', amount: 8, pool_id: 2, is_reserved: 1, awarded_at: null },
+    ],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
+    ledger: [],
+  };
+  assert.deepEqual(findGalaFundingErrors(snap), []);
 });

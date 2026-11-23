@@ -776,7 +776,9 @@ export async function initDb(input) {
     END IF;
   END $$`);
   await db.exec(`DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_gala_round_winners_reserved') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'chk_gala_round_winners_reserved'
+                      AND conrelid = 'gala_round_winners'::regclass) THEN
       ALTER TABLE gala_round_winners ADD CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1));
     END IF;
   END $$`);
