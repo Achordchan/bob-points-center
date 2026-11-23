@@ -21,7 +21,8 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
-import { GALA_DRAW_SEGMENTS, GALA_MAX_RESERVED_SLOTS, GALA_SEGMENTS } from '../../services/galaService.js';
+import { GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_SEGMENTS } from '../../services/galaService.js';
+import { GALA_PUBLIC_GRANT_BACKFILL_SQL } from '../../db/galaSchema.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
 const GALA_BACKUP_TABLES = [
@@ -115,6 +116,14 @@ export function findGalaFundingErrors(backupData) {
       }
     }
   }
+  // 抽签人数与轮次号按在线抽签的范围校验：已分配额 = 单价 × 抽签人数，负数或超大值会让账面倒扣或溢出；
+  // 轮次号写入 INTEGER 列。
+  const intIn = (v, min, max) => (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v)))
+    && Number.isSafeInteger(Number(v)) && Number(v) >= min && Number(v) <= max;
+  for (const r of asList(backupData?.gala_rounds)) {
+    if (!intIn(r?.draw_count, 1, GALA_MAX_DRAW_COUNT)) errors.push(`gala_rounds#${r?.id} 的 draw_count=${r?.draw_count} 不在 1~${GALA_MAX_DRAW_COUNT} 之间`);
+    if (!intIn(r?.round_no, 1, 2147483647)) errors.push(`gala_rounds#${r?.id} 的 round_no=${r?.round_no} 不是有效轮次号`);
+  }
   for (const table of ['gala_pools', 'gala_round_winners']) {
     for (const row of asList(backupData?.[table])) {
       if (row?.is_reserved != null && ![0, 1, '0', '1'].includes(row.is_reserved)) {
@@ -207,6 +216,19 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 小于已发奖励合计 ${total}`);
     }
   }
+  // 员工奖池的余额必须够付已有的待发普通奖励，否则恢复后这些奖励必定发放失败。
+  const pendingByPool = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at != null || Number(w?.is_reserved) === 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
+    const key = Number(w.pool_id);
+    pendingByPool.set(key, (pendingByPool.get(key) || 0) + Number(w.amount));
+  }
+  for (const [poolId, total] of pendingByPool) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool?.is_reserved) !== 1 && Number(pool.spent || 0) + total > Number(pool.budget || 0)) {
+      errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 加待发奖励 ${total} 超过预算 ${Number(pool.budget || 0)}`);
+    }
+  }
 
   for (const w of winnersList) {
     const round = rounds.get(Number(w?.round_id));
@@ -230,6 +252,10 @@ export function findGalaFundingErrors(backupData) {
     // 所以只要求 ledger_id 存在，不要求对应流水仍在备份里；完全没有凭据的“已发放”会让这笔奖励永远补发不了。
     if (w?.awarded_at != null && Number(w?.amount) > 0 && w?.ledger_id == null) {
       errors.push(`gala_round_winners#${w?.id} 标记已发放但没有 ledger_id，无法证明已付款`);
+    }
+    // 反过来：带付款凭据却没有 awarded_at，恢复后会被当成待发奖励再付一次（对应流水可能已被用户重置删除）。
+    if (w?.awarded_at == null && w?.ledger_id != null) {
+      errors.push(`gala_round_winners#${w?.id} 有付款凭据 ledger_id ${w.ledger_id} 却未标记发放，恢复后会重复发放`);
     }
     // 普通中奖记录的奖池与金额必须和所属轮次的配置一致；预留记录有自己的奖池和金额。
     if (!reserved) {
@@ -269,6 +295,9 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_reserved_slots#${slot?.id} 引用的奖池 ${slot.pool_id} 不是同一活动的预留奖池`);
     } else if ((slot?.status ?? 'pending') === 'pending' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
       errors.push(`gala_reserved_slots#${slot?.id} 待用名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
+    }
+    if (slot?.status === 'used' && slot?.used_round_id == null) {
+      errors.push(`gala_reserved_slots#${slot?.id} 已使用却没有关联轮次`);
     }
     if (slot?.used_round_id != null) {
       const used = rounds.get(Number(slot.used_round_id));
@@ -2572,6 +2601,15 @@ export function registerAdminBackupRoutes(router) {
                 }
               }
               report[table.name] = count;
+            }
+            // 旧格式备份的轮次没有 public_granted_at：按与旧库补列相同的规则回填，
+            // 否则已发放的历史轮次在非超管视图里会一直显示“已抽签”。
+            const legacyRoundIds = (requireArray('gala_rounds') || [])
+              .filter((r) => r && !Object.hasOwn(r, 'public_granted_at'))
+              .map((r) => Number(r.id))
+              .filter((n) => n > 0);
+            if (legacyRoundIds.length) {
+              await tx.run(`${GALA_PUBLIC_GRANT_BACKFILL_SQL} AND r.id = ANY(?::bigint[])`, [legacyRoundIds]);
             }
             // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
             // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。

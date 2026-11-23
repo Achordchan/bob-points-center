@@ -67,7 +67,7 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
 test('年会备份资金关系校验：未发放奖励必须挂在同一活动、类型一致的奖池上', () => {
   const base = {
     gala_events: [{ id: 10, total_budget: 0 }, { id: 20, total_budget: 0 }],
-    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 500, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
+    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 500, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 100 }],
     gala_participants: [{ id: 1, event_id: 10 }],
     gala_rounds: [{ id: 5, event_id: 10, segment: 'lottery', round_no: 1, draw_count: 10, pool_id: 1, prize_type: 'coin', amount_each: 50 }, { id: 6, event_id: 10, segment: 'game', round_no: 1, draw_count: 1, pool_id: null, prize_type: 'none', amount_each: 0 }],
     gala_round_winners: [
@@ -301,4 +301,27 @@ test('年会备份：每轮中奖人数不超过抽签人数、已分配额不�
     many.gala_reserved_slots.push({ id: i, event_id: 1, segment: 'game', round_no: i, userid: `k${i}`, amount: 0, status: 'pending' });
   }
   assert.ok(findGalaFundingErrors(many).some((e) => e.startsWith('gala_events#1') && e.includes('预留名额')));
+  for (const bad of [-1, 0, 101, 1.5, true, '2x']) {
+    const snap = ok();
+    snap.gala_rounds[0].draw_count = bad;
+    assert.ok(findGalaFundingErrors(snap).some((e) => e.includes('draw_count')), String(bad));
+  }
+  const badNo = ok();
+  badNo.gala_rounds[0].round_no = 2147483648;
+  assert.ok(findGalaFundingErrors(badNo).some((e) => e.includes('round_no')));
+
+  // 有付款凭据却没有 awarded_at：恢复后会被再付一次
+  const reopened = ok();
+  reopened.gala_round_winners[0].ledger_id = 77;
+  assert.ok(findGalaFundingErrors(reopened).some((e) => e.startsWith('gala_round_winners#1') && e.includes('重复发放')));
+
+  // 员工奖池余额不够付待发奖励
+  const short = ok();
+  short.gala_pools[0].spent = 15;
+  assert.ok(findGalaFundingErrors(short).some((e) => e.startsWith('gala_pools#1') && e.includes('待发奖励')));
+
+  // 已使用的名额必须关联轮次
+  const dangling = ok();
+  dangling.gala_reserved_slots.push({ id: 9, event_id: 1, segment: 'game', round_no: 1, userid: 'k', amount: 0, status: 'used', used_round_id: null });
+  assert.ok(findGalaFundingErrors(dangling).some((e) => e.startsWith('gala_reserved_slots#9') && e.includes('没有关联轮次')));
 });

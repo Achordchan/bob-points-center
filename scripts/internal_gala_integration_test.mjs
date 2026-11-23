@@ -492,6 +492,27 @@ async function main() {
       console.log('✓ 抽签人数上限是公开规则，与预留无关，且不会抽走除预留对象外的所有人');
     }
 
+    // 移出名单与抽签串行：名单恰好满足“抽签人数 + 余量”时并发移出第一个人，
+    // 要么移出在前（抽签按新名单拒绝），要么抽签在前（第一个人照常被抽中，FIRST 总是先取他）
+    for (let i = 0; i < 8; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const ev = await createGalaEvent(db, { title: `${PREFIX} 移出并发${i}`, totalBudget: 0 });
+      // eslint-disable-next-line no-await-in-loop
+      await addGalaParticipants(db, { eventId: ev.id, userids: Array.from({ length: GALA_DRAW_HEADROOM + 2 }, (_, k) => uid(k + 1)) });
+      // eslint-disable-next-line no-await-in-loop
+      const [dr, rm] = await Promise.allSettled([
+        drawGalaRound(db, { eventId: ev.id, segment: 'lottery', drawCount: 2, randomInt: FIRST }),
+        removeGalaParticipant(db, { eventId: ev.id, userid: uid(1) }),
+      ]);
+      assert.equal(rm.status, 'fulfilled');
+      if (dr.status === 'fulfilled') {
+        assert.ok(dr.value.winners.some((w) => w.userid === uid(1)), '抽签成功说明它在移出之前执行，应抽中第一个人');
+      } else {
+        assert.equal(dr.reason?.code, 'not_enough_participants', String(dr.reason?.code || dr.reason));
+      }
+    }
+    console.log('✓ 移出名单与抽签串行，准入检查与实际候选人一致');
+
     // 预留名额遵守本环节排除规则、每场活动有上限；单人发币轮的员工预算准入与预留无关
     {
       const ev = await createGalaEvent(db, { title: `${PREFIX} 预留规则`, totalBudget: 0 });

@@ -114,3 +114,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   ON gala_reserved_slots(event_id, segment, round_no)
   WHERE status = 'pending';
 `;
+
+// public_granted_at 的回填规则（旧库补列、导入旧备份时共用）：执行过发放（整轮已完成或已有人到账），
+// 且没有待发的普通中奖记录。表别名必须是 r。
+export const GALA_PUBLIC_GRANT_BACKFILL_SQL = `UPDATE gala_rounds r
+   SET public_granted_at = COALESCE(r.granted_at, EXTRACT(EPOCH FROM now())::BIGINT)
+ WHERE r.public_granted_at IS NULL
+   AND (r.granted_at IS NOT NULL
+        OR EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NOT NULL))
+   AND NOT EXISTS (SELECT 1 FROM gala_round_winners w
+                    WHERE w.round_id = r.id AND w.is_reserved = 0 AND w.awarded_at IS NULL AND w.amount > 0)`;

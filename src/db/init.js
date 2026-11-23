@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
-import { galaSchemaSql } from './galaSchema.js';
+import { GALA_PUBLIC_GRANT_BACKFILL_SQL, galaSchemaSql } from './galaSchema.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -772,11 +772,7 @@ export async function initDb(input) {
        WHERE table_schema = current_schema() AND table_name = 'gala_rounds' AND column_name = 'public_granted_at'
     ) THEN
       ALTER TABLE gala_rounds ADD COLUMN public_granted_at BIGINT;
-      UPDATE gala_rounds r SET public_granted_at = COALESCE(r.granted_at, EXTRACT(EPOCH FROM now())::BIGINT)
-       WHERE (r.granted_at IS NOT NULL
-              OR EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NOT NULL))
-         AND NOT EXISTS (SELECT 1 FROM gala_round_winners w
-                          WHERE w.round_id = r.id AND w.is_reserved = 0 AND w.awarded_at IS NULL AND w.amount > 0);
+      ${GALA_PUBLIC_GRANT_BACKFILL_SQL};
     END IF;
   END $$`);
   await db.exec(`DO $$ BEGIN

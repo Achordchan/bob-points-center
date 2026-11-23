@@ -46,6 +46,21 @@ const components = {
       properties: { ok: { type: 'boolean' } },
       required: ['ok'],
     },
+    GalaErrorResponse: {
+      type: 'object',
+      additionalProperties: false,
+      description: '年会接口的业务错误。部分 409 错误附带公开的数值字段，方便前端提示。',
+      properties: {
+        error: { type: 'string' },
+        remaining: { type: 'integer', description: 'pool_budget_insufficient：员工奖池按已分配额计算的剩余额度' },
+        required: { type: 'integer', description: 'pool_budget_insufficient：本轮需要的额度（单价 × 抽签人数）' },
+        allocated: { type: 'integer', description: 'budget_below_allocated：奖池预算不能低于的已分配额' },
+        spent: { type: 'integer', description: 'budget_below_spent：预留奖池实际支出（仅超级管理员接口）' },
+        pools_total: { type: 'integer' },
+        max_draw_count: { type: 'integer', description: 'not_enough_participants：按公开规则本轮最多可抽人数' },
+      },
+      required: ['error'],
+    },
     OkDataObjectResponse: {
       type: 'object',
       additionalProperties: false,

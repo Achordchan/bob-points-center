@@ -54,6 +54,7 @@ function normalizeEnabledSegments(input) {
 
 const EVENT_STATUSES = new Set(['draft', 'live', 'ended']);
 const MAX_DRAW_COUNT = 100;
+export const GALA_MAX_DRAW_COUNT = MAX_DRAW_COUNT;
 const PG_INT_MAX = 2147483647;
 // 每场活动最多保留的预留名额（待用 + 已用）。
 export const GALA_MAX_RESERVED_SLOTS = 3;
@@ -424,8 +425,12 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
 export async function removeGalaParticipant(db, { eventId, userid }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const r = await db.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, cleanText(userid, 128)]);
-  return { removed: r.changes };
+  // 与抽签串行：抽签持有活动行锁期间，名单不会在“公开人数检查”和“候选人查询”之间变化。
+  return await inTx(db, async (tx) => {
+    await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
+    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, cleanText(userid, 128)]);
+    return { removed: r.changes };
+  });
 }
 
 export async function listGalaParticipants(db, { eventId, includeReserved = false }) {
