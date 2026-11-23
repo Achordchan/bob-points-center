@@ -25,6 +25,7 @@ import {
   GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_RESTORE_GENERATION_SEQ, GALA_SEGMENTS,
 } from '../../services/galaService.js';
 import { GALA_PUBLIC_GRANT_BACKFILL_SQL } from '../../db/galaSchema.js';
+import { galaPayoutLedgerSql, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
 const GALA_BACKUP_TABLES = [
@@ -56,13 +57,13 @@ export function findGalaFundingErrors(backupData) {
   const ledgerById = new Map(ledgerRows.map((r) => [Number(r?.id), r]));
   const ledgerByWinner = new Map();
   for (const row of ledgerRows) {
-    const m = /^GALA_W(\d+)$/.exec(String(row?.ref_id || ''));
-    if (!m) continue;
+    // 与流水查询同一判定：只有 ref_id、原因、入账方向都符合的才算年会发放，转账对方恰好叫 GALA_W… 的不算。
+    const wid = galaPayoutWinnerId(row);
+    if (wid == null) continue;
     if (!hasGala) {
       errors.push(`ledger#${row?.id} 含年会发放流水 ${row.ref_id}，但备份缺少年会数据`);
       continue;
     }
-    const wid = Number(m[1]);
     if (ledgerByWinner.has(wid)) {
       errors.push(`ledger#${row?.id} 与 ledger#${ledgerByWinner.get(wid).id} 重复指向 ${row.ref_id}`);
       continue;
@@ -84,7 +85,7 @@ export function findGalaFundingErrors(backupData) {
   for (const w of winnersList) {
     if (w?.ledger_id == null) continue;
     const linked = ledgerById.get(Number(w.ledger_id));
-    if (linked && String(linked.ref_id || '') !== `GALA_W${w.id}`) {
+    if (linked && galaPayoutWinnerId(linked) !== Number(w.id)) {
       errors.push(`gala_round_winners#${w.id} 的 ledger_id ${w.ledger_id} 指向的不是它自己的发放流水`);
     }
   }
@@ -324,7 +325,16 @@ export function findGalaFundingErrors(backupData) {
     if (w?.awarded_at == null && w?.ledger_id != null) {
       errors.push(`gala_round_winners#${w?.id} 有付款凭据 ledger_id ${w.ledger_id} 却未标记发放，恢复后会重复发放`);
     }
-    // 普通中奖记录的奖池与金额必须和所属轮次的配置一致；预留记录有自己的奖池和金额。
+    // 预留记录的金额与本轮普通奖励一致（发币轮为单价、无币轮为 0），奖池是预留奖池（金额为 0 时不挂奖池）：
+    // 金额不同会让预留对象的余额变化与其他中奖人不同。
+    if (reserved) {
+      const expectAmount = round.prize_type === 'coin' ? Number(round.amount_each || 0) : 0;
+      if (Number(w?.amount || 0) !== expectAmount || (expectAmount === 0 && w?.pool_id != null)) {
+        errors.push(`gala_round_winners#${w?.id} 是预留中奖记录，金额或奖池与轮次 ${round.id} 的本轮奖励不一致`);
+        continue;
+      }
+    }
+    // 普通中奖记录的奖池与金额必须和所属轮次的配置一致。
     if (!reserved) {
       const coin = round.prize_type === 'coin';
       const expectPool = coin ? Number(round.pool_id) : null;
@@ -362,7 +372,10 @@ export function findGalaFundingErrors(backupData) {
     }
     if (slot?.pool_id != null && !poolOk(slot.pool_id, slot.event_id, true)) {
       errors.push(`gala_reserved_slots#${slot?.id} 引用的奖池 ${slot.pool_id} 不是同一活动的预留奖池`);
-    } else if ((slot?.status ?? 'pending') !== 'cancelled' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
+    } else if (pending && slot?.pool_id == null) {
+      // 待用名额中奖时按本轮单价从预留奖池付款，必须指定预留奖池。
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额缺少同一活动的预留奖池`);
+    } else if (slot?.status === 'used' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
       errors.push(`gala_reserved_slots#${slot?.id} 的名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
     }
     if (slot?.status === 'used' && slot?.used_round_id == null) {
@@ -445,6 +458,19 @@ export function registerAdminBackupRoutes(router) {
     'admin_user_roles',
     'system_settings',
   ];
+
+  // 全量恢复拿不到表锁时整体重试（见导入处说明）。只有加锁这一步抛出的 restoreLockBusy 会重试，
+  // 它发生在恢复写入任何数据之前，重试不会重复执行副作用。
+  async function runWithRestoreLockRetry(db, fn, { attempts = 60 } = {}) {
+    for (let i = 1; ; i += 1) {
+      try {
+        return await runInTransaction(db, fn);
+      } catch (err) {
+        if (!err?.restoreLockBusy || i >= attempts) throw err;
+        await new Promise((resolve) => { setTimeout(resolve, Math.min(50 * i, 500)); });
+      }
+    }
+  }
 
   async function dumpTable(db, tableName) {
     try {
@@ -1277,16 +1303,26 @@ export function registerAdminBackupRoutes(router) {
     const importedRoleIdMap = new Map();
 
     try {
-      const report = await runInTransaction(db, async (tx) => {
+      const report = await runWithRestoreLockRetry(db, async (tx) => {
         await lockAdminAccountProtection(tx);
-        // 全量恢复与发币、入账互斥。先拿年会写入锁的排他模式：年会抽签/发放事务都在碰任何表之前拿它的共享模式，
-        // 两边加锁顺序一致，不会出现“恢复锁了流水表等中奖记录、发放改了中奖记录等流水表”的死锁。
-        // 再推进恢复代数（发放据此发现期间发生过恢复而整次作废），然后锁住流水表和中奖记录表
-        // （阻塞并发 INSERT/UPDATE，不阻塞读），恢复期间没有新流水分配 ID，后面推进流水序列时不会回拨。
+        // 全量恢复与所有写入互斥，且恢复自己永远不会在持有表锁时等待别人，因而不可能参与死锁：
+        // 1. 先拿年会写入锁的排他模式（年会事务在碰任何表之前拿它的共享模式），此时恢复还没持有任何表锁；
+        // 2. 推进恢复代数，进行中的年会发放据此发现期间发生过恢复而整次作废；
+        // 3. 一次性以 EXCLUSIVE 模式锁住全量恢复要写的所有表（只放行普通读），等锁不超过 500ms
+        //    （短于数据库的死锁检测间隔）。拿不到说明有入账、清理等事务正持有行锁：整个恢复事务回滚、稍后重试，
+        //    让对方先完成，而不是持着一部分表去等它。拿到之后再没有别的事务能在这些表上持有或申请行锁，
+        //    恢复后续的删除、写入都不会等待；恢复期间也不会有新流水分配 ID，推进流水序列时不会回拨。
         if (backupMode === 'full') {
           await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
           await tx.get(`SELECT nextval('${GALA_RESTORE_GENERATION_SEQ}') AS generation`, []);
-          await tx.exec('LOCK TABLE ledger, gala_round_winners IN SHARE ROW EXCLUSIVE MODE');
+          await tx.exec("SET LOCAL lock_timeout = '500ms'");
+          try {
+            await tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`);
+          } catch (err) {
+            if (err?.code === '55P03') throw Object.assign(new Error('restore_tables_busy'), { restoreLockBusy: true, cause: err });
+            throw err;
+          }
+          await tx.exec('SET LOCAL lock_timeout = DEFAULT');
         }
         const report = {};
         let failedTable = null;
@@ -2717,7 +2753,7 @@ export function registerAdminBackupRoutes(router) {
             // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录。
             const mismatched = await tx.all(
               `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
-                WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
+                WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text) OR NOT ${galaPayoutLedgerSql('l')}
                 ORDER BY w.id LIMIT 20`,
               [],
             );

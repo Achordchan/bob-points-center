@@ -209,7 +209,6 @@ export function registerAdminGalaRoutes(router) {
       roundNo: b.round_no,
       userid: b.userid,
       poolId: b.pool_id,
-      amount: b.amount,
       note: b.note,
       actor: actorOf(req),
     });

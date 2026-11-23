@@ -833,7 +833,7 @@ test('批次清理在事务锁后选目标，授权先提交的管理员不进�
     const block = adminSource.slice(adminSource.indexOf(`router.post('${route}'`)).split('\n  router.')[0];
     assert.match(block, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
   }
-  assert.match(backupRoutesSource, /const report = await runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
+  assert.match(backupRoutesSource, /const report = await (?:runInTransaction|runWithRestoreLockRetry)\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);
   const settingsSource = readFileSync(fileURLToPath(new URL('../../src/routes/admin/settingsRoutes.js', import.meta.url)), 'utf8');
   const saveSettings = settingsSource.slice(settingsSource.indexOf("router.post('/settings/external-login',")).split('\n  router.')[0];
   assert.match(saveSettings, /runInTransaction\(db, async \(tx\) => \{\s*await lockAdminAccountProtection\(tx\)/);

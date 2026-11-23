@@ -1,6 +1,8 @@
 import { Router } from 'express';
 
-import { getBalance, listLedgerRecords, transferBob } from '../services/ledgerService.js';
+import {
+  GALA_PAYOUT_REF_PREFIX, getBalance, listLedgerRecords, transferBob,
+} from '../services/ledgerService.js';
 import { extractBobToken, requireBobToken } from '../middleware/requireBobToken.js';
 import { verifyBobToken } from '../services/bobTokenService.js';
 import { requireWebSession } from '../middleware/requireWebSession.js';
@@ -226,6 +228,10 @@ export function ledgerRouter() {
 
     if (!userid) {
       return res.status(400).json({ error: 'missing userid' });
+    }
+    // GALA_W 前缀留给年会发放（备份恢复与流水查询据此识别），第三方不能使用。
+    if (body.refId != null && String(body.refId).toUpperCase().startsWith(GALA_PAYOUT_REF_PREFIX)) {
+      return res.status(400).json({ error: 'reserved refId prefix' });
     }
 
     try {

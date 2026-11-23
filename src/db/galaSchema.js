@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS gala_round_winners (
 CREATE INDEX IF NOT EXISTS idx_gala_round_winners_event_user ON gala_round_winners(event_id, userid);
 
 -- 预留名额：指定某人在某环节第 N 轮中奖。仅超级管理员可读写，占本轮一个名额（抽 N 人时普通抽 N-1 人）。
+-- 奖励与本轮普通中奖人一致（发币轮按单价、无币轮为 0），从 pool_id 指定的预留奖池扣；amount 在名额被使用时记下实际金额。
 CREATE TABLE IF NOT EXISTS gala_reserved_slots (
   id BIGSERIAL PRIMARY KEY,
   event_id BIGINT NOT NULL REFERENCES gala_events(id) ON DELETE CASCADE,

@@ -42,7 +42,7 @@ import {
   parseCookies,
   verifySessionToken,
 } from '../../services/adminSession.js';
-import { ensureAccount, listLedgerRecords } from '../../services/ledgerService.js';
+import { ensureAccount, galaPayoutLedgerSql, listLedgerRecords } from '../../services/ledgerService.js';
 import { deleteRedeemCdks, generateRedeemCdks, listCdkEnabledProducts, listRedeemCdks } from '../../services/cdkService.js';
 import { deleteUsersCompletely, purgeUserBusinessData } from '../../services/userDataPurgeService.js';
 import { adminSessionSigningSecret, cookieOptions, withSessionVersion, isSessionVersionValidLive } from '../../utils/sessionCrypto.js';
@@ -346,7 +346,7 @@ export async function inferLedgerOperation(db, row, direction) {
      LEFT JOIN users u ON u.userid = l.userid
      WHERE l.created_at BETWEEN ? AND ?
        AND ${positive ? 'l.delta > 0' : "l.delta < 0 AND l.reason = 'admin_deduct'"}
-       AND COALESCE(l.ref_id, '') NOT LIKE 'GALA_W%'
+       AND NOT ${galaPayoutLedgerSql('l')}
      ORDER BY l.id ASC
      LIMIT 50`,
     [createdAt - 5, createdAt + 2],

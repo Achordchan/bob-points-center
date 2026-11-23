@@ -4,16 +4,17 @@
 // - 抽签只在服务端发生（crypto.randomInt），结果先落库再展示，大屏刷新不会改变结果。
 // - 发币以 gala_round_winners.awarded_at 为幂等闸门：同一中奖记录无论点多少次“发币”，只写一次账本。
 // - 每笔发币在同一事务里条件扣减奖池 spent（spent + amount <= budget），超预算整笔回滚。
-// - 预留名额占本轮一个名额（抽 N 人时普通抽 N-1 人），奖励只能来自预留奖池，不占员工预算；
+// - 预留名额占本轮一个名额（抽 N 人时普通抽 N-1 人），奖励与本轮普通中奖人相同（发币轮按单价、无币轮不发币），
+//   钱只从预留奖池出，不占员工预算；金额一致，余额变化也一致，看余额认不出预留对象；
 //   被预留的人不参与本活动的正常抽签。预留信息只对超级管理员返回，非超管视图里不出现任何能认出
-//   预留对象的逐人信息（金额、发放状态、失败名单、排除后的候选人数）。
+//   预留对象的逐人信息（奖池、发放状态、失败名单、排除后的候选人数、年会发放流水）。
 //   员工奖池对非超管只公开“已分配额”（每轮 单价 × 抽签人数，与是否含预留无关），不公开实际支出；
 //   抽签准入只看公开量（名单人数、已中奖人数、已分配额），返回结果不随是否有预留而变化。
 //   已知边界：预留对象在其预留轮次之前不会在普通抽签中中奖，这是“预留”本身的统计特征，无法消除；
 //   每场活动预留名额有上限，抽签后至少留出 GALA_DRAW_HEADROOM 名未中签候选人，
 //   保证任何一次抽签都不会“恰好抽走除预留对象外的所有人”。
 import crypto from 'node:crypto';
-import { grantBob } from './ledgerService.js';
+import { GALA_PAYOUT_REASON_PREFIX, grantBob } from './ledgerService.js';
 
 // 年会环节目录。每场活动可在后台启停（enabled_segments），停用的环节不能抽签，大屏与手机端也不展示。
 export const GALA_SEGMENTS = {
@@ -606,6 +607,26 @@ export async function drawGalaRound(db, {
       );
       if (won) voidNote = '（本环节已中过奖，按排除规则自动作废）';
     }
+    // 预留对象拿到的奖励与本轮普通中奖人完全一致（发币轮按单价、无币轮不发币），只是钱从预留奖池出：
+    // 金额一样，余额变化也就一样，看余额认不出谁是预留对象。预留奖池付不起本轮单价时名额作废、
+    // 本轮按普通抽签进行，而不是让预留对象中奖却到不了账（同样会因余额没变而暴露）。
+    let reservedPoolId = null;
+    if (pendingSlot && !voidNote && amount > 0) {
+      const rp = pendingSlot.pool_id == null ? null : await tx.get(
+        `SELECT p.id, p.budget, p.spent,
+                COALESCE((SELECT SUM(w.amount) FROM gala_round_winners w
+                           WHERE w.pool_id = p.id AND w.awarded_at IS NULL), 0) AS pending
+           FROM gala_pools p
+          WHERE p.id = ? AND p.event_id = ? AND p.is_reserved = 1
+          FOR SHARE`,
+        [pendingSlot.pool_id, id],
+      );
+      if (!rp || Number(rp.budget) - Number(rp.spent) - Number(rp.pending) < amount) {
+        voidNote = '（预留奖池余额不足以支付本轮单价，自动作废）';
+      } else {
+        reservedPoolId = Number(rp.id);
+      }
+    }
     if (voidNote) {
       await tx.run(
         `UPDATE gala_reserved_slots SET status = 'cancelled', note = COALESCE(note, '') || ?, updated_at = unixepoch() WHERE id = ?`,
@@ -631,8 +652,8 @@ export async function drawGalaRound(db, {
         userid: slot.userid,
         // 与普通中奖人一样取名单快照里的名字，避免只有预留对象显示得和名单不一样。
         name: slot.participant_name || slot.userid,
-        poolId: slot.pool_id ? Number(slot.pool_id) : null,
-        amount: Number(slot.amount || 0),
+        poolId: reservedPoolId,
+        amount,
         reserved: 1,
       });
     }
@@ -657,8 +678,9 @@ export async function drawGalaRound(db, {
     }
     if (slot) {
       await tx.run(
-        `UPDATE gala_reserved_slots SET status = 'used', used_round_id = ?, updated_at = unixepoch() WHERE id = ?`,
-        [round.id, slot.id],
+        // 已使用的名额记下实际发放的奖池与金额（与预留中奖记录一致），备份校验据此逐笔对应。
+        `UPDATE gala_reserved_slots SET status = 'used', used_round_id = ?, pool_id = ?, amount = ?, updated_at = unixepoch() WHERE id = ?`,
+        [round.id, reservedPoolId, amount, slot.id],
       );
     }
     return { round, winners: inserted, eligibleCount: eligibleRows.length };
@@ -768,7 +790,7 @@ export async function grantGalaRound(db, { roundId }) {
   if (!round) throw new GalaError('round_not_found', 404);
   const label = GALA_SEGMENTS[round.segment] || round.segment;
   // 流水原因固定带环节名称，方便按环节对账；自定义标题附在后面。
-  const reason = `年会奖励·${label}${round.title ? `（${round.title}）` : ''}·第${round.round_no}轮`;
+  const reason = `${GALA_PAYOUT_REASON_PREFIX}${label}${round.title ? `（${round.title}）` : ''}·第${round.round_no}轮`;
   const granted = [];
   const failed = [];
   for (const w of winners) {
@@ -848,7 +870,7 @@ export function serializeGrantResult(result, { includeReserved = false } = {}) {
 
 // ---------------------------------------------------------------- 预留名额（仅超级管理员）
 
-export async function createGalaReservedSlot(db, { eventId, segment, roundNo, userid, poolId, amount, note, actor = {} }) {
+export async function createGalaReservedSlot(db, { eventId, segment, roundNo, userid, poolId, note, actor = {} }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
   const seg = requireSegment(segment);
@@ -858,20 +880,17 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
   const uid = cleanText(userid, 128);
   const user = uid ? await db.get('SELECT userid FROM users WHERE userid = ?', [uid]) : null;
   if (!user) throw new GalaError('user_not_found', 404);
-  const value = toNonNegativeInt(amount ?? 0);
-  if (value === null) throw new GalaError('invalid_amount');
-  const pid = value > 0 ? toPositiveId(poolId) : null;
-  if (value > 0 && !pid) throw new GalaError('reserved_pool_required');
+  // 名额不单独设金额：中奖时按本轮单价发放（无币轮不发币），从这里指定的预留奖池扣，所以奖池必填。
+  const pid = toPositiveId(poolId);
+  if (!pid) throw new GalaError('reserved_pool_required');
   // 锁活动行与抽签串行：避免抽签进行中插入的预留名额在该轮结束后才提交，变成永远用不到的悬挂名额。
   return await inTx(db, async (tx) => {
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
     // 奖池在同一事务里、锁住活动之后再核对（并共享锁住，直到名额写入）：事务外读到的奖池可能已被恢复替换成
     // 别的活动或员工奖池，名额写进去要到发放时才失败。
-    if (pid) {
-      const pool = await tx.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1 FOR SHARE', [pid, id]);
-      if (!pool) throw new GalaError('reserved_pool_required');
-    }
+    const pool = await tx.get('SELECT id FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = 1 FOR SHARE', [pid, id]);
+    if (!pool) throw new GalaError('reserved_pool_required');
     // 抽签总是从该环节已抽的最大轮次 + 1 开始，轮次号不大于最大已抽轮次的名额永远用不到
     // （例如恢复的数据里有第 1、3 轮，第 2 轮的名额不会被消费，却会一直把这个人排除在普通抽签之外）。
     const drawn = await tx.get(
@@ -903,7 +922,7 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
     const row = await tx.get(
       `INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, amount, note, created_by)
        VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-      [id, seg, no, uid, pid, value, cleanText(note, 200) || null, actor.userid || null],
+      [id, seg, no, uid, pid, 0, cleanText(note, 200) || null, actor.userid || null],
     );
     // 预留对象作为普通参与者真实写入名单：中奖时一定在名单上，名单的增删、计数对所有人都一致，
     // 看不出谁是预留对象。普通抽签照样排除有未取消名额的人。

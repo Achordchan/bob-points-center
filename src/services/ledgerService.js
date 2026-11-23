@@ -53,6 +53,26 @@ function withDisplayReason(row = {}) {
   };
 }
 
+// 年会发放流水的唯一判定（恢复校验、流水查询、审计推断共用）：ref_id 恰为 GALA_W<中奖记录 ID>、
+// 原因以“年会奖励·”开头、且是入账。单看 ref_id 前缀不够：ref_id 也可能是转账对方的 userid。
+// 第三方发币接口不允许使用 GALA_W 前缀的 ref_id，新数据不会出现冒充。
+export const GALA_PAYOUT_REF_PREFIX = 'GALA_W';
+export const GALA_PAYOUT_REASON_PREFIX = '年会奖励·';
+
+export function galaPayoutWinnerId(row) {
+  const m = /^GALA_W([1-9][0-9]*)$/.exec(String(row?.ref_id ?? ''));
+  if (!m) return null;
+  if (!String(row?.reason ?? '').startsWith(GALA_PAYOUT_REASON_PREFIX)) return null;
+  if (!(Number(row?.delta) > 0)) return null;
+  return Number(m[1]);
+}
+
+export function galaPayoutLedgerSql(alias = 'l') {
+  return `(COALESCE(${alias}.ref_id, '') ~ '^GALA_W[1-9][0-9]*$'
+    AND starts_with(COALESCE(${alias}.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+    AND ${alias}.delta > 0)`;
+}
+
 export async function ensureAccount(db, { userid, name, createUser = false }) {
   const uid = userid === null || userid === undefined ? '' : String(userid).trim();
   if (!uid) {
@@ -208,7 +228,7 @@ export async function listLedgerRecords(db, { userid, page = 1, pageSize = 20, n
      LEFT JOIN users peer ON peer.userid = l.ref_id
      LEFT JOIN redeems r ON r.exchange_id = l.ref_id
      WHERE l.userid = ?
-       ${hideGalaAwards ? "AND COALESCE(l.ref_id, '') NOT LIKE 'GALA\\_W%'" : ''}
+       ${hideGalaAwards ? `AND NOT ${galaPayoutLedgerSql('l')}` : ''}
      ORDER BY l.created_at DESC, l.id DESC
      LIMIT ? OFFSET ?`,
     [String(userid), ps, offset],
