@@ -604,6 +604,9 @@ const JS_TRIM_CHARS = '\t\n\u000b\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202
 const UNTRIMMED_USERID_RE = `^[${JS_TRIM_CHARS}]|[${JS_TRIM_CHARS}]$`;
 // 在册档案里能原样按 cleanUserid 规则操作的 userid：非空、不超长（同按字符计）、首尾无空白（数据库里的文本不会含 NUL 或孤立代理）。
 const OPERABLE_USERID_SQL = `char_length(u.userid) BETWEEN 1 AND ${MAX_USERID_LENGTH} AND u.userid !~ ?`;
+// 同一规则套在名单行上：抽签只从能原样操作的 userid 里抽（旧版本或残缺备份留下的 " u1" 之类不参与），
+// 否则中奖后发币、移出名单都会按另一个 ID 落到别人身上。
+const OPERABLE_PARTICIPANT_SQL = OPERABLE_USERID_SQL.replaceAll('u.userid', 'p.userid');
 
 async function addAllActive(db, id, table) {
   // 全员导入与按名单导入、移出名单用同一套标识规则：不能原样操作的存量 ID（首尾空白、超长）不导入，
@@ -812,11 +815,11 @@ export async function drawGalaRound(db, {
     // 公开准入：只用名单人数和本环节已中奖人数（所有管理员都看得到）判断，与是否有预留无关。
     const publicRow = await tx.get(
       `SELECT COUNT(*) AS n FROM gala_participants p
-        WHERE p.event_id = ?
+        WHERE p.event_id = ? AND ${OPERABLE_PARTICIPANT_SQL}
           ${excludePreviousWinners ? `AND NOT EXISTS (
             SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
              WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}`,
-      excludePreviousWinners ? [id, seg] : [id],
+      excludePreviousWinners ? [id, UNTRIMMED_USERID_RE, seg] : [id, UNTRIMMED_USERID_RE],
     );
     const publicEligible = Number(publicRow?.n || 0);
     if (count > publicEligible - GALA_DRAW_HEADROOM) {
@@ -847,6 +850,8 @@ export async function drawGalaRound(db, {
     let slot = pendingSlot;
     let voidNote = null;
     if (pendingSlot && !pendingSlot.enrolled) voidNote = '（抽签时已不在参与名单，自动作废）';
+    // 预留对象的标识不能原样操作（旧数据里的首尾空白、超长 ID）时同样作废：普通候选人也排除这类 ID。
+    if (pendingSlot && !voidNote && !isOperableGalaUserid(pendingSlot.userid)) voidNote = '（预留对象的标识无法原样使用，自动作废）';
     // 预留对象同样遵守“本环节已中奖者不再参与”：否则同一人会在开启排除时再中一次，
     // 也会因此和普通参与者区分开。
     if (pendingSlot && !voidNote && excludePreviousWinners) {
@@ -890,14 +895,14 @@ export async function drawGalaRound(db, {
     // 大名单（导入全部在册员工）时不必每轮把所有人的 userid、姓名排序后传回，也不复制整份名单。
     const eligibleFilter = `
          FROM gala_participants p
-        WHERE p.event_id = ?
+        WHERE p.event_id = ? AND ${OPERABLE_PARTICIPANT_SQL}
           AND NOT EXISTS (
             SELECT 1 FROM gala_reserved_slots r
              WHERE r.event_id = p.event_id AND r.userid = p.userid AND r.status <> 'cancelled')
           ${excludePreviousWinners ? `AND NOT EXISTS (
             SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
              WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}`;
-    const eligibleParams = excludePreviousWinners ? [id, seg] : [id];
+    const eligibleParams = excludePreviousWinners ? [id, UNTRIMMED_USERID_RE, seg] : [id, UNTRIMMED_USERID_RE];
     const eligibleCount = Number((await tx.get(`SELECT COUNT(*) AS n ${eligibleFilter}`, eligibleParams))?.n || 0);
     const positions = samplePositions(eligibleCount, slot ? count - 1 : count, randomInt);
     const hitRows = positions.length === 0 ? [] : await tx.all(
@@ -1025,6 +1030,9 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
       [winnerId, round.id],
     );
     if (!claimed) return { skipped: true };
+    // 付款前按原样再校验一次收款人：抽签已排除不能原样操作的 ID，但旧版本或残缺备份里可能已有这样的待发记录。
+    // 这里报错回滚（记录保持待发、错误可见），而不是裁剪后发给另一个 ID。
+    if (!isOperableGalaUserid(claimed.userid)) throw new GalaError('invalid_winner_userid', 409);
     const amount = Number(claimed.amount);
     // 每一笔正数奖励都必须从同一活动、且类型一致的奖池扣减：普通中奖扣员工奖池，预留名额扣预留奖池。
     // 抽签与预留名额只会产生这种记录，这里再兜底一次，防止残缺或被篡改的备份导入后在预算之外发币，

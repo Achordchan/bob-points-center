@@ -170,16 +170,26 @@ export function prepareGalaRoundFlags(backupData, meta) {
 }
 
 // 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
-// 只看备份内部：merge 拒绝任何年会 ID 冲突、overwrite 会先清空年会表，所以每条子记录引用的
+// 只看备份内部：年会表只随覆盖导入（会先清空年会表；合并导入跳过年会表），所以每条子记录引用的
 // 活动/轮次/奖池都必须在同一份备份里，不能落到目标库里已有的无关记录上。
-// 没有 ledger_id 关联时，一条形似 GALA_W<id> 的流水能否是这条（未发放）中奖记录的付款：收款人、金额一致，且不早于中奖记录产生。
-// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同、或早于抽签的，按历史同名流水处理。
-// 缺少时间字段时按“可能是”处理（宁可拒绝也不重复发放）。与导入后合并库上的 paidPending 查询保持同一判定。
+// 没有 ledger_id 关联时，一条形似 GALA_W<id> 的流水能否是这条（未发放）中奖记录的付款：收款人、金额一致即视为可能。
+// 升级前外部发币允许任意引用号，历史流水可能恰好同名；收款人或金额不同的，按历史同名流水处理。
+// 不按时间先后排除：数据库时钟回拨、或恢复到时钟稍慢的主库后发币，真实付款也可能“早于”中奖记录，
+// 宁可拒绝也不重复发放。与导入后整库上的 paidPending 查询保持同一判定。
 // 有 ledger_id 关联的已发放记录不用它判断（见下方逐笔核对）。
 function couldPayWinner(row, w) {
-  if (String(row?.userid) !== String(w?.userid) || Number(row?.delta) !== Number(w?.amount)) return false;
-  if (row?.created_at != null && w?.created_at != null && Number(row.created_at) < Number(w.created_at)) return false;
-  return true;
+  return String(row?.userid) === String(w?.userid) && Number(row?.delta) === Number(w?.amount);
+}
+
+// 覆盖前生成的恢复点能否通过导入时的年会校验：在年会表、流水、账户的副本上跑同一套整理与校验
+// （prepareGalaRoundFlags → completeFinishedCoinRounds → findGalaFundingErrors），不改动快照本身。
+export function findRecoveryPointGalaErrors(snapshotData) {
+  const names = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'];
+  const copy = structuredClone(Object.fromEntries(names.map((n) => [n, Array.isArray(snapshotData?.[n]) ? snapshotData[n] : []])));
+  const flagErrors = prepareGalaRoundFlags(copy, { galaFormat: GALA_BACKUP_FORMAT });
+  if (flagErrors.length) return flagErrors;
+  completeFinishedCoinRounds(copy);
+  return findGalaFundingErrors(copy);
 }
 
 export function findGalaFundingErrors(backupData) {
@@ -219,12 +229,18 @@ export function findGalaFundingErrors(backupData) {
     if (w.ledger_id != null && Number(w.ledger_id) === Number(row.id)) {
       // 中奖记录的 ledger_id 是发放事务里写下的关联，引用号、收款人、金额也对得上，就是这笔付款。
       // 不再按时间先后否定：数据库时钟回拨、或恢复到时钟稍慢的新主库后立即发币，都会产生“早于中奖记录”的真实付款。
-      // 合并时凭据挂到目标库旧流水的情况另有检查（备份里没有的流水，目标库里也不能有）。
       if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
         errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
       }
     } else if (w.awarded_at == null && couldPayWinner(row, w)) {
       errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
+    }
+  }
+  // 零金额中奖（无币轮）从不发放：awarded_at、ledger_id 都必须为空。带着发放时间或付款凭据的零金额记录
+  // 会把一条流水（或已删除的流水号）错认作这条记录的付款，挡住真实付款的核对或补发。
+  for (const w of winnersList) {
+    if (Number(w?.amount) === 0 && (w?.awarded_at != null || w?.ledger_id != null)) {
+      errors.push(`gala_round_winners#${w?.id} 是零金额中奖记录，却带有发放时间或付款凭据（awarded_at/ledger_id 必须为空）`);
     }
   }
   // 一条流水只能支付一笔奖励：即使流水已被用户重置删除，两条中奖记录也不能共用同一个付款凭据。
@@ -246,7 +262,7 @@ export function findGalaFundingErrors(backupData) {
     }
   }
   // 已发放、付款流水也在备份里的奖励，收款人的账户必须同在这份备份里：导入按备份覆盖账户余额，
-  // 同一次导出的余额本就含这笔奖励。缺了账户时（例如只挑了年会表和流水的部分备份做合并），
+  // 同一次导出的余额本就含这笔奖励。缺了账户时（例如被删减过的备份），
   // 目标库的余额不会因为导入这条流水而增加，awarded_at 却已挡住补发，等于流水显示已付、钱没到账。
   // 无法确认余额是否含这笔奖励，就拒绝导入，而不是盲目补加。
   const accountUsers = new Set(asList(backupData?.accounts).map((a) => String(a?.userid)));
@@ -1162,20 +1178,21 @@ export function registerAdminBackupRoutes(router) {
     // 否则会恢复出有中奖记录却无奖池/活动、或有发放流水却无幂等记录的残缺账目。
     // 新版全量格式（_meta.galaFormat，或 _meta.tables 里列了年会表）确知包含年会数据：整组缺失同样拒绝，
     // 不能当成旧备份去覆盖清空在线的中奖记录和付款凭据。
-    if (backupMode === 'full') {
+    // 合并导入不导入年会表（年会数据只随全量覆盖恢复，见下方导入处），备份里的年会数据不需要校验。
+    if (backupMode === 'full' && mode === 'overwrite') {
       const present = GALA_BACKUP_TABLES.filter((t) => backupData[t.name] != null).map((t) => t.name);
       if ((present.length > 0 || requiresGalaTables(backup?._meta)) && present.length < GALA_BACKUP_TABLES.length) {
         const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
       }
-      // 当前格式的导入（覆盖与合并都算）：各表行数必须与导出时记在 _meta.tables 里的一致（见 findGalaRowCountErrors）。
+      // 当前格式的覆盖导入：各表行数必须与导出时记在 _meta.tables 里的一致（见 findGalaRowCountErrors）。
       // 被截短的数组（例如名单变成 []、中奖记录变成 []）在没有其他引用时校验发现不了：覆盖会恢复出残缺的活动，
-      // 合并时随后的完成状态补齐还会把原本待发的发币轮当成已发完。当前格式只有整库导出，没有按活动的部分备份。
+      // 随后的完成状态补齐还会把原本待发的发币轮当成已发完。当前格式只有整库导出，没有按活动的部分备份。
       {
-        const countErrors = findGalaRowCountErrors(backupData, backup?._meta, mode === 'overwrite'
-          ? { required: [...new Set([...FULL_TABLES, ...GALA_BACKUP_TABLES.map((t) => t.name)])] }
-          : undefined);
+        const countErrors = findGalaRowCountErrors(backupData, backup?._meta, {
+          required: [...new Set([...FULL_TABLES, ...GALA_BACKUP_TABLES.map((t) => t.name)])],
+        });
         if (countErrors.length) {
           await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
           return res.status(400).json({
@@ -1748,12 +1765,26 @@ export function registerAdminBackupRoutes(router) {
           await busy(() => tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`));
           await tx.exec('SET LOCAL lock_timeout = DEFAULT');
           // 表已全部锁住：此刻的数据就是覆盖前最后的已提交状态，在这里生成恢复点。
+          let snapshotData;
           try {
-            const snapshotData = {};
+            snapshotData = {};
             for (const tableName of FULL_TABLES) {
               // eslint-disable-next-line no-await-in-loop
               snapshotData[tableName] = redactBackupSecrets(tableName, await dumpTable(tx, tableName), { keepSecrets: true });
             }
+          } catch (err) {
+            throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
+          }
+          // 覆盖会清空在线数据，之后唯一的退路就是这个恢复点：它必须能通过同样的年会校验重新导入。
+          // 在线库里若有旧版本留下的异常年会数据（例如首尾带空白的 userid、带付款凭据的零金额记录），
+          // 恢复点导不回来，覆盖后就无法撤销，所以先拒绝覆盖并列出要先处理的记录。
+          if (mode === 'overwrite') {
+            const recoveryErrors = findRecoveryPointGalaErrors(snapshotData);
+            if (recoveryErrors.length) {
+              throw Object.assign(new Error('recovery_point_not_importable'), { recoveryPointInvalid: true, errors: recoveryErrors });
+            }
+          }
+          try {
             saveRecoveryPoint(FULL_TABLES, snapshotData);
           } catch (err) {
             throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
@@ -2419,8 +2450,8 @@ export function registerAdminBackupRoutes(router) {
           // accounts
           {
             const rows = requireArray('accounts') || [];
-            // 合并按备份覆盖账户余额。目标库里已经到账的年会奖励不在这份备份里（年会 ID 冲突会被拒绝），
-            // 备份的余额也就不含它：覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发。
+            // 合并按备份覆盖账户余额。目标库里已经到账的年会奖励不一定在这份备份里（合并不导入年会表），
+            // 备份的余额也就可能不含它：覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发。
             // 无法确认两份余额能否合并，凡是覆盖到目标库已有年会到账的账户都拒绝。此时备份里的年会数据还没写入，
             // 查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
@@ -3147,44 +3178,18 @@ export function registerAdminBackupRoutes(router) {
             report.auction_bids = count;
           }
 
-          // 年会（父表在前）。merge 模式任何 ID 冲突都拒绝：中奖记录的 awarded_at 是发币幂等闸门，
-          // 挂到目标库不相关的轮次或奖池上会造成重复发币或奖池账目错乱。
+          // 年会（父表在前）。只随全量覆盖恢复：合并导入不导入年会表，目标库的年会数据保持原样。
+          // 中奖记录的 awarded_at 是发币幂等闸门、ledger_id 是付款凭据，跨库合并无法确认它们和目标库的流水、余额对得上。
           {
             const hasGala = GALA_BACKUP_TABLES.some((t) => requireArray(t.name) !== null);
-            if (hasGala && mode !== 'overwrite') {
-              for (const table of GALA_BACKUP_TABLES) {
-                const ids = [...new Set((requireArray(table.name) || []).map((r) => Number(r?.id)).filter((n) => Number.isFinite(n) && n > 0))];
-                if (!ids.length) continue;
-                // eslint-disable-next-line no-await-in-loop
-                // 单个数组参数，避免 ID 很多时超出 PostgreSQL 每条语句 65535 个绑定参数的上限。
-                const rows = await tx.all(`SELECT id FROM ${table.name} WHERE id = ANY(?::bigint[]) ORDER BY id LIMIT 20`, [ids]);
-                if (rows.length) {
-                  throw new Error(`合并导入存在年会数据 ID 冲突（${table.name}: ${rows.map((r) => r.id).join(', ')}），已拒绝导入`);
-                }
-              }
-            }
-            // 合并时，备份里中奖记录的付款凭据若指向备份里没有的流水（用户重置后流水已删、只留凭据），
-            // 它在目标库里必须同样不存在：否则会挂到目标库里一条无关、或同名的旧流水上，恢复后显示已付款，
-            // 旧流水留着而余额早已清零。备份流水此时已写入，再查到的只能是目标库原有的流水。
-            if (hasGala && mode !== 'overwrite') {
-              const backupLedgerIds = new Set((requireArray('ledger') || []).map((r) => Number(r?.id)));
-              const dangling = [...new Set((requireArray('gala_round_winners') || [])
-                .map((w) => (w?.ledger_id == null ? NaN : Number(w.ledger_id)))
-                .filter((n) => Number.isSafeInteger(n) && n > 0 && !backupLedgerIds.has(n)))];
-              if (dangling.length) {
-                const hit = await tx.all('SELECT id FROM ledger WHERE id = ANY(?::bigint[]) ORDER BY id LIMIT 20', [dangling]);
-                if (hit.length) {
-                  throw new Error(`合并导入的中奖记录引用了备份里没有、目标库里却已存在的流水（ledger#${hit.map((r) => r.id).join(', ledger#')}），无法确认是它的付款，已拒绝导入`);
-                }
-              }
-            }
+            if (hasGala && mode !== 'overwrite') report.gala_skipped = GALA_BACKUP_TABLES.map((t) => t.name);
             if (hasGala && mode === 'overwrite') {
               for (const table of [...GALA_BACKUP_TABLES].reverse()) {
                 // eslint-disable-next-line no-await-in-loop
                 await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
               }
             }
-            for (const table of GALA_BACKUP_TABLES) {
+            for (const table of (mode === 'overwrite' ? GALA_BACKUP_TABLES : [])) {
               const rows = requireArray(table.name) || [];
               let count = 0;
               const placeholders = table.columns.map((_, i) => `$${i + 1}`).join(',');
@@ -3210,14 +3215,12 @@ export function registerAdminBackupRoutes(router) {
                 }
               }
               // 覆盖已清空年会表：即使这张表备份里没有行，也要把序列重置回起点，否则旧库里接近上限的序列
-              // 会让恢复后的第一次新建（例如抽签写中奖记录）因序列耗尽失败。合并没导入行时保留原序列。
-              if (rows.length || mode === 'overwrite') {
-                try {
-                  // eslint-disable-next-line no-await-in-loop
-                  await bumpSerial(tx, table.name);
-                } catch (err) {
-                  markAndThrow(table.name, null, err);
-                }
+              // 会让恢复后的第一次新建（例如抽签写中奖记录）因序列耗尽失败。
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await bumpSerial(tx, table.name);
+              } catch (err) {
+                markAndThrow(table.name, null, err);
               }
               report[table.name] = count;
             }
@@ -3243,8 +3246,8 @@ export function registerAdminBackupRoutes(router) {
                  JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
                 WHERE w.awarded_at IS NULL AND l.delta > 0
                   AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
-                  -- 与备份预检 couldPayWinner 同一判定：收款人、金额不同或早于抽签的历史同名流水不算付款
-                  AND l.userid = w.userid AND l.delta = w.amount AND l.created_at >= w.created_at
+                  -- 与备份预检 couldPayWinner 同一判定：收款人、金额不同的历史同名流水不算付款；不按时间排除（时钟可能回拨）
+                  AND l.userid = w.userid AND l.delta = w.amount
                 ORDER BY w.id LIMIT 20`,
               [],
             );
@@ -3326,6 +3329,15 @@ export function registerAdminBackupRoutes(router) {
       });
     } catch (err) {
       if (err?.recoveryPointFailed) return await recoveryPointFailed(err.cause || err);
+      if (err?.recoveryPointInvalid) {
+        const errors = err.errors.slice(0, 20);
+        await failHistory('失败', { reason: 'recovery_point_not_importable', errors, backupMode, mode });
+        return res.status(409).json({
+          error: `在线库的年会数据有异常，覆盖前生成的恢复点无法重新导入，已中止覆盖（在线数据未改动）：${errors.slice(0, 5).join('；')}`,
+          errors,
+          backupMode,
+        });
+      }
       // 恢复点已在事务内写好（之后的导入步骤失败）：照常登记，便于下载还原；登记失败不掩盖原始错误。
       await flushRecoveryHistory().catch((histErr) => console.error('[backup] recovery point history append failed', histErr));
       const message = String(err?.message || err);

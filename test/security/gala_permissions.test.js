@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matchPathPermission } from '../../src/services/adminPermissionService.js';
 import { GALA_MAX_RESERVED_SLOTS, pickRandom, serializeGrantResult } from '../../src/services/galaService.js';
-import { completeFinishedCoinRounds, findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
+import { GALA_BACKUP_TABLES, completeFinishedCoinRounds, findGalaFundingErrors, findRecoveryPointGalaErrors } from '../../src/routes/admin/backupRoutes.js';
 
 // 与导入流程相同：先补齐“奖励已全部到账”的发币轮，再做资金校验。
 function importCheck(data) {
@@ -67,7 +67,10 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
   }
   assert.match(source, /for \(const table of GALA_BACKUP_TABLES\) optionalFullTables\.add\(table\.name\)/);
   assert.match(source, /年会数据必须整组导入/);
-  assert.match(source, /合并导入存在年会数据 ID 冲突/);
+  // 合并导入不导入年会表：年会数据只随全量覆盖恢复
+  assert.match(source, /report\.gala_skipped = GALA_BACKUP_TABLES\.map/);
+  assert.match(source, /for \(const table of \(mode === 'overwrite' \? GALA_BACKUP_TABLES : \[\]\)\)/);
+  assert.match(source, /if \(backupMode === 'full' && mode === 'overwrite'\) \{\n      const present = GALA_BACKUP_TABLES/);
 });
 
 test('年会备份资金关系校验：未发放奖励必须挂在同一活动、类型一致的奖池上', () => {
@@ -151,7 +154,8 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
   // 只有 GALA_W11 指向备份里一条未发放的中奖记录（恢复后会重复发放）；GALA_W12 没有对应中奖记录，按普通流水处理
   assert.equal(errors.length, 1, errors.join('\n'));
   assert.ok(errors[0].startsWith('ledger#1'));
-  // 升级前外部发币写入的历史同名流水：收款人不同、金额不同或早于抽签，都不可能是这笔奖励，不算重复发放
+  // 升级前外部发币写入的历史同名流水：收款人不同或金额不同，不可能是这笔奖励，不算重复发放。
+  // 不按时间排除：时钟回拨后真实付款也可能早于中奖记录，宁可拒绝。
   const hist = (patch) => {
     const h = structuredClone(snap);
     h.ledger = [{ id: 1, ref_id: 'GALA_W11', userid: 'a', delta: 10, reason: '年会奖励·历史', created_at: 500 }];
@@ -162,7 +166,7 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
   assert.equal(hist({}).length, 1, '收款人、金额一致且晚于抽签：仍按重复发放拒绝');
   assert.deepEqual(hist({ userid: 'b' }), []);
   assert.deepEqual(hist({ delta: 11 }), []);
-  assert.deepEqual(hist({ created_at: 99 }), []);
+  assert.equal(hist({ created_at: 99 }).length, 1, '早于中奖记录的同名同额流水仍按可能已付款拒绝');
   // 没有年会表的旧备份里，形似年会发放的入账（早期第三方接口可写入）按普通流水处理，备份照常可恢复
   const legacy = { ledger: [{ id: 1, ref_id: 'GALA_W11', delta: 10, reason: '年会奖励·测试' }] };
   assert.deepEqual(findGalaFundingErrors(legacy), []);
@@ -1164,4 +1168,48 @@ test('移出名单：按名单记录 id 或 userid 二选一', async () => {
     // eslint-disable-next-line no-await-in-loop
     await assert.rejects(removeGalaParticipant(null, { eventId: 1, participantId }), (e) => e.code === 'invalid_participant_id', JSON.stringify(participantId));
   }
+});
+
+test('年会备份校验：零金额中奖记录不能带发放时间或付款凭据', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'game', round_no: 1, draw_count: 1, pool_id: null, prize_type: 'none', amount_each: 0 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 0, pool_id: null, awarded_at: null, ledger_id: null }],
+    gala_reserved_slots: [],
+    ledger: [],
+    accounts: [],
+  };
+  assert.deepEqual(findGalaFundingErrors(snap), []);
+  for (const patch of [{ awarded_at: 100 }, { ledger_id: 7 }, { awarded_at: 100, ledger_id: 7 }]) {
+    const bad = structuredClone(snap);
+    Object.assign(bad.gala_round_winners[0], patch);
+    const errors = findGalaFundingErrors(bad);
+    assert.ok(errors.some((e) => e.includes('零金额中奖记录')), JSON.stringify(patch) + errors.join('\n'));
+  }
+});
+
+test('覆盖前校验恢复点：在线库里的异常年会数据让恢复点无法导入时拒绝覆盖', () => {
+  const live = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [],
+    gala_participants: [{ id: 1, event_id: 1, userid: 'u1' }],
+    gala_rounds: [],
+    gala_round_winners: [],
+    gala_reserved_slots: [],
+    ledger: [],
+    accounts: [],
+  };
+  // 数据库导出（SELECT *）每行都带全部列
+  for (const t of GALA_BACKUP_TABLES) {
+    for (const row of live[t.name]) for (const c of t.columns) if (!Object.hasOwn(row, c)) row[c] = null;
+  }
+  assert.deepEqual(findRecoveryPointGalaErrors(live), []);
+  const legacy = structuredClone(live);
+  legacy.gala_participants.push({ ...legacy.gala_participants[0], id: 2, userid: ' u1' });
+  const errors = findRecoveryPointGalaErrors(legacy);
+  assert.ok(errors.some((e) => e.startsWith('gala_participants#2')), errors.join('\n'));
+  // 校验在副本上进行，不改动快照本身
+  assert.equal(legacy.gala_participants.length, 2);
 });

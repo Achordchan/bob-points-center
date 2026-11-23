@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS gala_round_winners (
   CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_round_winners_event_user ON gala_round_winners(event_id, userid);
--- 一条流水只能支付一笔奖励：ledger_id（包括用户重置后流水已删、凭据仍保留的）全局唯一，合并导入撞上已有记录也会被拒绝。
+-- 一条流水只能支付一笔奖励：ledger_id（包括用户重置后流水已删、凭据仍保留的）全局唯一，导入数据里重复的凭据也会被拒绝。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gala_round_winners_ledger ON gala_round_winners(ledger_id) WHERE ledger_id IS NOT NULL;
 
 -- 预留名额：指定某人在某环节第 N 轮中奖。仅超级管理员可读写，占本轮一个名额（抽 N 人时普通抽 N-1 人）。

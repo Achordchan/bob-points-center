@@ -5,6 +5,7 @@ import 'dotenv/config';
 import { Client } from 'pg';
 import assert from 'node:assert/strict';
 import os from 'node:os';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { loadConfig } from '../src/config.js';
@@ -48,6 +49,8 @@ const uid = (i) => `${PREFIX}_${String(i).padStart(3, '0')}`;
 // 配合 FIRST（总是取第一个候选人），抽中的仍是名单里最先加入的那几个人，断言保持确定。
 const fillerIds = Array.from({ length: GALA_DRAW_HEADROOM }, (_, i) => `${PREFIX}_f${i + 1}`);
 const FIRST = () => 0;
+// 一次性数据库名：固定前缀 + 随机后缀，不依赖开发库名（长度、特殊字符都与之无关），并按标识符转义。
+const quoteIdent = (name) => `"${String(name).replaceAll('"', '""')}"`;
 const addFiller = (db, eventId) => addGalaParticipants(db, { eventId, userids: fillerIds });
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
@@ -124,12 +127,12 @@ async function main() {
   await assertDevelopmentMarker(cfg);
   // 全部用例在一次性数据库里跑：其中不少会故意制造不一致的账目（把奖池支出改满、伪造流水等）。
   // 放在共享开发库里，测试进程被中途终止时清理不会执行，留下的数据会让之后导出的全量备份无法恢复。
-  // 一次性库在结束时整库删除；进程被杀时最多留下一个以 _gala_it_ 结尾的空闲库，不影响开发库本身。
-  const itName = `${cfg.db.database}_gala_it_${process.pid}`;
+  // 一次性库在结束时整库删除；进程被杀时最多留下一个 bob_gala_it_ 开头的空闲库，不影响开发库本身。
+  const itName = `bob_gala_it_${randomBytes(6).toString('hex')}`;
   const admin = new Client({ host: cfg.db.host, port: cfg.db.port, database: cfg.db.database, user: cfg.db.user, password: cfg.db.password });
   await admin.connect();
   try {
-    await admin.query(`CREATE DATABASE "${itName}"`);
+    await admin.query(`CREATE DATABASE ${quoteIdent(itName)}`);
   } catch (err) {
     await admin.end();
     if (err?.code === '42501') {
@@ -862,6 +865,47 @@ async function main() {
       console.log('✓ 存量异常标识可按名单记录 id 精确移出');
     }
 
+    // 抽签只从能原样操作的标识里抽：存量的首尾空白 ID 不计入准入人数、不会被抽中；指向它的预留名额作废；
+    // 已有的这类待发中奖记录付款前报错（记录保持待发、奖池不动），不会裁剪后付给另一个人
+    {
+      const legacy = ` ${uid(4)}`;
+      await db.run("INSERT INTO users(userid, name) VALUES(?, 'legacy')", [legacy]);
+      try {
+        const evX = await createGalaEvent(db, { title: `${PREFIX} 异常标识抽签`, totalBudget: 0 });
+        const pX = await createGalaPool(db, { eventId: evX.id, name: '员工池', budget: 1000 });
+        const rX = await createGalaPool(db, { eventId: evX.id, name: '预留池', budget: 1000, reserved: true });
+        await addGalaParticipants(db, { eventId: evX.id, userids: [uid(4)] });
+        await db.run("INSERT INTO gala_participants(event_id, userid, name_snapshot, source) VALUES(?, ?, 'legacy', 'admin')", [evX.id, legacy]);
+        await addFiller(db, evX.id);
+        const slot = await db.get(
+          "INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, status) VALUES(?, 'lottery', 1, ?, ?, 'pending') RETURNING id",
+          [evX.id, legacy, rX.id],
+        );
+        await assert.rejects(
+          drawGalaRound(db, { eventId: evX.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pX.id, amountEach: 5 }),
+          (e) => e.code === 'not_enough_participants' && e.max_draw_count === 1,
+          '异常标识不计入公开准入人数',
+        );
+        const dX = await drawGalaRound(db, { eventId: evX.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pX.id, amountEach: 5, randomInt: FIRST });
+        assert.deepEqual(dX.winners.map((w) => w.userid), [uid(4)]);
+        const slotRow = await db.get('SELECT status, note FROM gala_reserved_slots WHERE id = ?', [slot.id]);
+        assert.equal(slotRow.status, 'cancelled');
+        assert.ok(String(slotRow.note).includes('标识无法原样使用'), slotRow.note);
+        // 旧版本留下的待发记录：收款人是异常标识
+        await db.run('UPDATE gala_round_winners SET userid = ? WHERE round_id = ?', [legacy, dX.round.id]);
+        const gX = await grantRound(db, dX.round.id);
+        assert.deepEqual(gX.granted, []);
+        assert.deepEqual(gX.failed.map((f) => f.error), ['invalid_winner_userid']);
+        const wX = await db.get('SELECT awarded_at, ledger_id, award_error FROM gala_round_winners WHERE round_id = ?', [dX.round.id]);
+        assert.deepEqual([wX.awarded_at, wX.ledger_id, wX.award_error], [null, null, 'invalid_winner_userid']);
+        assert.equal(Number((await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pX.id])).spent), 0);
+        assert.equal(await db.get('SELECT 1 AS x FROM ledger WHERE userid IN (?, ?) AND ref_id = ?', [legacy, uid(4), `GALA_W${dX.winners[0].id}`]), undefined);
+      } finally {
+        await db.run('DELETE FROM users WHERE userid = ?', [legacy]);
+      }
+      console.log('✓ 抽签排除异常标识，指向它的预留名额作废，异常的待发记录付款前报错');
+    }
+
     // 调用方自己的事务（默认 READ COMMITTED）里读年会列表：先等恢复的排他锁释放，多条读取不会跨过一次恢复
     {
       const holder = new Client({ host: itDb.host, port: itDb.port, database: itDb.database, user: itDb.user, password: itDb.password });
@@ -1387,7 +1431,7 @@ async function main() {
     // 会以未处理的 error 事件让进程崩溃。测试池在关闭前挂上空处理器。
     db?.pool?.on('error', () => {});
     if (db) await db.close();
-    await admin.query(`DROP DATABASE IF EXISTS "${itName}" WITH (FORCE)`).catch(() => null);
+    await admin.query(`DROP DATABASE IF EXISTS ${quoteIdent(itName)} WITH (FORCE)`).catch(() => null);
     await admin.end();
   }
 }
@@ -1470,11 +1514,11 @@ async function generationChecks(db, users) {
 // 真实全量恢复路径：在一次性数据库里走导入路由（全表锁、锁超时重试、序列重置、导入后核对、恢复点），
 // 不碰共享开发库的数据。没有建库权限时跳过并说明。
 async function realRestoreChecks(cfg) {
-  const tmpName = `${cfg.db.database}_gala_rt_${process.pid}`;
+  const tmpName = `bob_gala_rt_${randomBytes(6).toString('hex')}`;
   const admin = new Client({ host: cfg.db.host, port: cfg.db.port, database: cfg.db.database, user: cfg.db.user, password: cfg.db.password });
   await admin.connect();
   try {
-    await admin.query(`CREATE DATABASE "${tmpName}"`);
+    await admin.query(`CREATE DATABASE ${quoteIdent(tmpName)}`);
   } catch (err) {
     await admin.end();
     // 只有明确没有建库权限（42501）时跳过；名称冲突、存储故障等其他错误让测试失败，而不是假装通过。
@@ -1638,63 +1682,22 @@ async function realRestoreChecks(cfg) {
     assert.deepEqual([r.status, r.body?.error], [400, 'invalid_userid']);
     console.log('✓ 真实全量恢复：恢复点含最后一笔已到账奖励，旧凭据/旧版本作废，后置核对失败时一切不变；锁竞争重试只生效一次');
 
-    // 2b) 合并库核对付款凭据的时间：目标库里一条早于中奖记录的同名流水，不能被备份里的中奖记录认作付款
+    // 2b) 合并导入跳过年会表：备份里的年会数据一行都不写入，目标库的年会数据保持原样，回执列出跳过的表
     {
-      const old = await tdb.get(
-        `INSERT INTO ledger(userid, delta, reason, ref_id, created_at) VALUES(?, 7, '年会奖励·抽奖·第1轮', 'GALA_W990002', ?) RETURNING id`,
-        [users[1], now - 1000],
-      );
-      const early = structuredClone(bad);
-      early.data.ledger = [];
-      early.data.gala_events = [{ ...bad.data.gala_events[0], id: 990002, title: 'RT 早于' }];
-      early.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990002, event_id: 990002, budget: 7, spent: 7 }];
-      early.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990002, event_id: 990002, pool_id: 990002, amount_each: 7 }];
-      early.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990002, round_id: 990002, event_id: 990002, userid: users[1], pool_id: 990002, amount: 7, ledger_id: Number(old.id), created_at: now }];
-      recount(early);
-      const before2 = await snapshot();
-      r = await call('POST', '/backup/import', { backup: early, mode: 'merge' });
-      assert.notEqual(r.status, 200);
-      assert.ok(JSON.stringify(r.body).includes('目标库里却已存在'), JSON.stringify(r.body).slice(0, 300));
-      assert.deepEqual(await snapshot(), before2);
-      await tdb.run('DELETE FROM ledger WHERE id = ?', [old.id]);
-    }
-    // 2b-) 备份来自用户重置之后（中奖记录保留凭据、流水已删），目标库恰有一条字段完全匹配的旧流水：同样拒绝，
-    //      不能把悬空的凭据挂到目标库的流水上（恢复后显示已付款、余额却已清零）
-    {
-      const match = await tdb.get(
-        `INSERT INTO ledger(userid, delta, reason, ref_id, created_at) VALUES(?, 7, '年会奖励·抽奖·第1轮', 'GALA_W990004', ?) RETURNING id`,
-        [users[1], now + 100],
-      );
-      const dangling = structuredClone(bad);
-      dangling.data.ledger = [];
-      dangling.data.accounts = [];
-      dangling.data.gala_events = [{ ...bad.data.gala_events[0], id: 990004, title: 'RT 悬空' }];
-      dangling.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990004, event_id: 990004, budget: 7, spent: 7 }];
-      dangling.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990004, event_id: 990004, pool_id: 990004, amount_each: 7 }];
-      dangling.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990004, round_id: 990004, event_id: 990004, userid: users[1], pool_id: 990004, amount: 7, ledger_id: Number(match.id), created_at: now }];
-      recount(dangling);
-      const before8 = await snapshot();
-      r = await call('POST', '/backup/import', { backup: dangling, mode: 'merge' });
-      assert.notEqual(r.status, 200);
-      assert.ok(JSON.stringify(r.body).includes('目标库里却已存在'), JSON.stringify(r.body).slice(0, 300));
-      assert.deepEqual(await snapshot(), before8);
-      await tdb.run('DELETE FROM ledger WHERE id = ?', [match.id]);
-    }
-    // 2b') 合并带入已发放奖励和它的付款流水、却没带收款人账户：余额不会增加而补发已被挡住，拒绝导入
-    {
-      const noAcc = structuredClone(bad);
-      noAcc.data.ledger = [{ id: 7900000000000003, userid: users[0], delta: 10, reason: '年会奖励·抽奖·第1轮', ref_id: 'GALA_W990003', created_at: now + 5 }];
-      noAcc.data.gala_events = [{ ...bad.data.gala_events[0], id: 990003, title: 'RT 无账户' }];
-      noAcc.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990003, event_id: 990003 }];
-      noAcc.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990003, event_id: 990003, pool_id: 990003 }];
-      noAcc.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990003, round_id: 990003, event_id: 990003, pool_id: 990003, ledger_id: 7900000000000003, created_at: now }];
-      noAcc.data.accounts = [];
-      recount(noAcc);
-      const before4 = await snapshot();
-      r = await call('POST', '/backup/import', { backup: noAcc, mode: 'merge' });
-      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
-      assert.ok(JSON.stringify(r.body).includes('缺少收款人'), JSON.stringify(r.body).slice(0, 300));
-      assert.deepEqual(await snapshot(), before4);
+      const skip = structuredClone(bad);
+      skip.data.ledger = [];
+      skip.data.accounts = [];
+      recount(skip);
+      const galaRows = async () => ({
+        events: await tdb.all('SELECT id FROM gala_events ORDER BY id'),
+        pools: await tdb.all('SELECT id, budget, spent FROM gala_pools ORDER BY id'),
+        winners: await tdb.all('SELECT id, awarded_at, ledger_id FROM gala_round_winners ORDER BY id'),
+      });
+      const beforeSkip = await galaRows();
+      r = await call('POST', '/backup/import', { backup: skip, mode: 'merge' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(r.body.report.gala_skipped, ['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']);
+      assert.deepEqual(await galaRows(), beforeSkip);
     }
     // 2b'') 合并会覆盖目标库里已有年会奖励到账的账户余额（备份不含那次活动，余额也不含那笔奖励）：拒绝
     {
@@ -1768,17 +1771,26 @@ async function realRestoreChecks(cfg) {
       assert.ok(JSON.stringify(r.body).includes('accounts'));
       assert.deepEqual(await snapshot(), before5);
     }
-    // 2d) 合并导入同样核对行数：中奖记录被截成空数组时拒绝，不会把待发的发币轮补成已完成
+    // 2e) 在线库里有旧版本留下的异常年会数据（首尾带空白的名单 userid）：覆盖前生成的恢复点无法重新导入，
+    //     覆盖会变成不可撤销，所以拒绝覆盖，在线数据不变、不留下恢复点
     {
-      const trunc = structuredClone(bad);
-      trunc.data.gala_round_winners = [];
-      const before4 = await snapshot();
-      r = await call('POST', '/backup/import', { backup: trunc, mode: 'merge' });
-      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
-      assert.ok(JSON.stringify(r.body).includes('gala_round_winners'));
-      assert.deepEqual(await snapshot(), before4);
+      const legacy = ` ${users[0]}`;
+      await tdb.run('INSERT INTO users(userid, name) VALUES(?, ?)', [legacy, 'legacy']);
+      const lp = await tdb.get(
+        "INSERT INTO gala_participants(event_id, userid, name_snapshot, source) VALUES(?, ?, 'legacy', 'admin') RETURNING id",
+        [ev.id, legacy],
+      );
+      const filesBefore = readdirSync(backupDir).length;
+      const beforeE = await snapshot();
+      r = await call('POST', '/backup/import', { backup: b0, mode: 'overwrite' });
+      assert.equal(r.status, 409, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes(`gala_participants#${lp.id}`), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), beforeE);
+      assert.equal(readdirSync(backupDir).length, filesBefore, '不写入无法导入的恢复点');
+      await tdb.run('DELETE FROM gala_participants WHERE id = ?', [lp.id]);
+      await tdb.run('DELETE FROM users WHERE userid = ?', [legacy]);
     }
-    console.log('✓ 合并库拒绝早于中奖记录的付款凭据；覆盖与合并导入都核对年会表行数');
+    console.log('✓ 合并导入跳过年会表；覆盖导入核对年会表行数，恢复点无法重新导入时拒绝覆盖');
 
     // 3) 不认识的年会格式号：写库前拒绝，数据与代数不变
     {
@@ -1923,7 +1935,7 @@ async function realRestoreChecks(cfg) {
     if (prevBackupDir === undefined) delete process.env.BOB_BACKUP_DIR;
     else process.env.BOB_BACKUP_DIR = prevBackupDir;
     rmSync(backupDir, { recursive: true, force: true });
-    await admin.query(`DROP DATABASE IF EXISTS "${tmpName}" WITH (FORCE)`).catch(() => null);
+    await admin.query(`DROP DATABASE IF EXISTS ${quoteIdent(tmpName)} WITH (FORCE)`).catch(() => null);
     await admin.end();
   }
 }
