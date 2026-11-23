@@ -2609,18 +2609,28 @@ export function registerAdminBackupRoutes(router) {
               if (relinked.length) {
                 throw new Error(`合并导入会把已重置用户的年会付款流水重新挂回中奖记录（${relinked.map((r) => `#${r.id}→ledger#${r.ledger_id}`).join(', ')}），余额无法随之核对，已拒绝导入`);
               }
-              // 备份里中奖记录引用的付款流水：年会表不随合并导入，这些流水在目标库就失去了与中奖记录的关联，
-              // 而对非超管和第三方查询隐藏年会入账正是靠这个关联（galaPayoutLedgerSql），导入后会被当成普通流水公开。
-              // 目标库已有同 ID 流水的会被跳过（ON CONFLICT DO NOTHING），不受影响；其余拒绝导入。
+              // 年会付款流水不能单独合并：年会表不随合并导入，这些流水在目标库会失去与中奖记录的关联，
+              // 而对非超管和第三方查询隐藏年会入账正是靠这个关联（galaPayoutLedgerSql），导入后会被当成普通流水公开；
+              // 余额若随之覆盖，还会包含一笔目标库没有中奖凭据的奖励。
+              // 识别不依赖备份里的中奖记录（它可能缺失或被截短）：按年会付款的命名约定（GALA_W<id>、年会奖励·、入账）
+              // 识别，再加上备份中奖记录 ledger_id 引用到的流水。目标库已有完全相同的一行（同 ID、收款人、金额、引用号、原因）
+              // 的才放行（会被 ON CONFLICT 跳过，目标库原有的关联不变）；同 ID 的无关流水不算，拒绝整个导入。
               const linkedIds = new Set((requireArray('gala_round_winners') || [])
                 .map((w) => (w?.ledger_id == null ? NaN : Number(w.ledger_id)))
                 .filter((n) => Number.isSafeInteger(n) && n > 0));
-              const payoutIds = ids.filter((n) => linkedIds.has(n));
-              if (payoutIds.length) {
-                const present = new Set((await tx.all('SELECT id FROM ledger WHERE id = ANY(?::bigint[])', [payoutIds])).map((r) => Number(r.id)));
-                const orphaned = payoutIds.filter((n) => !present.has(n)).slice(0, 20);
-                if (orphaned.length) {
-                  throw new Error(`合并导入不导入年会表，备份里的年会付款流水（ledger#${orphaned.join(', ledger#')}）会失去与中奖记录的关联、对非超管公开，已拒绝导入；年会数据请用覆盖导入恢复`);
+              const payoutRows = rows.filter((r) => galaPayoutWinnerId(r) != null || linkedIds.has(Number(r?.id)));
+              if (payoutRows.length) {
+                const targetRows = new Map((await tx.all(
+                  'SELECT id, userid, delta, ref_id, reason FROM ledger WHERE id = ANY(?::bigint[])',
+                  [[...new Set(payoutRows.map((r) => Number(r.id)).filter((n) => Number.isSafeInteger(n) && n > 0))]],
+                )).map((r) => [Number(r.id), r]));
+                const same = (a, b) => String(a ?? '') === String(b ?? '');
+                const unmatched = payoutRows.filter((r) => {
+                  const t = targetRows.get(Number(r?.id));
+                  return !t || !same(t.userid, r.userid) || !same(t.delta, r.delta) || !same(t.ref_id, r.ref_id) || !same(t.reason, r.reason ?? '');
+                }).slice(0, 20);
+                if (unmatched.length) {
+                  throw new Error(`合并导入不导入年会表，备份里的年会付款流水（ledger#${unmatched.map((r) => r?.id).join(', ledger#')}）在目标库没有完全相同的记录，导入后会失去与中奖记录的关联、对非超管公开，已拒绝导入；年会数据请用覆盖导入恢复`);
                 }
               }
             }

@@ -1068,7 +1068,13 @@ async function awardWinner(db, { winnerId, round, reason, generation }) {
       reason,
       refId: `GALA_W${claimed.id}`,
     });
-    await tx.run('UPDATE gala_round_winners SET ledger_id = ? WHERE id = ?', [granted.ledgerId, claimed.id]);
+    // 付款凭据必须是安全整数（接口、备份校验都按 Number 处理）。升级前的库若流水 ID 已超出安全范围
+    // （见 galaSchema：此时不收紧流水序列），这笔付款整笔回滚，记录保持待发，而不是写下一个会被舍入的凭据。
+    const ledgerId = granted.ledgerId;
+    if (!/^[1-9][0-9]{0,15}$/.test(String(ledgerId ?? '')) || !Number.isSafeInteger(Number(ledgerId))) {
+      throw new GalaError('ledger_id_unsafe', 409);
+    }
+    await tx.run('UPDATE gala_round_winners SET ledger_id = ? WHERE id = ?', [ledgerId, claimed.id]);
     // 这是本轮最后一笔待发的正数奖励时，与到账同一事务标记整轮完成（与发放收尾、用户重置同一口径）。
     // 否则进程在到账提交后、收尾之前退出，余额和流水都已更新，轮次却一直显示未发完，导出的备份也带着这个状态。
     await tx.run(

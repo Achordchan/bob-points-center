@@ -464,6 +464,37 @@ async function main() {
         const seqmax = await db.get("SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass");
         assert.equal(String(seqmax.seqmax), '9007199254740991', '流水序列上限为安全整数');
         console.log('✓ 用户重置清掉最后一笔待发后整轮标记完成；流水序列有安全上限');
+
+        // 升级前的库：流水序列已超过安全整数。启动迁移不收紧流水序列（服务照常启动），
+        // 年会发放拿到不安全的流水 ID 时整笔回滚，记录保持待发、余额不变
+        {
+          const seqName = (await db.get("SELECT pg_get_serial_sequence('ledger', 'id') AS s")).s;
+          const saved = await db.get(`SELECT last_value, is_called FROM ${seqName}`);
+          await db.exec(`ALTER SEQUENCE ${seqName} NO MAXVALUE`);
+          await db.exec(`SELECT setval('${seqName}', 9007199254741000)`);
+          try {
+            const rerun = await initDb({ db: itDb });
+            await rerun.close();
+            const mx = await db.get("SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass");
+            assert.equal(String(mx.seqmax), '9223372036854775807', '已超出时保留流水序列原范围');
+            const evU = await createGalaEvent(db, { title: `${PREFIX} 超界流水`, totalBudget: 0 });
+            const pU = await createGalaPool(db, { eventId: evU.id, name: '超界池', budget: 100 });
+            await addGalaParticipants(db, { eventId: evU.id, userids: [uid(1)] });
+            await addFiller(db, evU.id);
+            const dU = await drawGalaRound(db, { eventId: evU.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pU.id, amountEach: 3, randomInt: FIRST });
+            const before = await balanceOf(db, uid(1));
+            const gU = await grantRound(db, dU.round.id);
+            assert.deepEqual(gU.failed.map((f) => f.error), ['ledger_id_unsafe']);
+            assert.equal(await balanceOf(db, uid(1)), before);
+            const wU = await db.get('SELECT awarded_at, ledger_id FROM gala_round_winners WHERE round_id = ?', [dU.round.id]);
+            assert.deepEqual([wU.awarded_at, wU.ledger_id], [null, null]);
+            assert.equal(Number((await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pU.id])).spent), 0);
+          } finally {
+            await db.exec(`SELECT setval('${seqName}', ${Number(saved.last_value)}, ${saved.is_called ? 'true' : 'false'})`);
+            await db.exec(`ALTER SEQUENCE ${seqName} MAXVALUE 9007199254740991`);
+          }
+          console.log('✓ 升级前流水序列已超出安全整数：启动不失败，年会发放拒绝不安全的付款凭据');
+        }
       }
 
       // 发放失败回写与用户重置并发：两边都按「轮次 → 中奖记录」加锁，不会死锁
@@ -1688,7 +1719,8 @@ async function realRestoreChecks(cfg) {
     const before = await snapshot();
     r = await call('POST', '/backup/import', { backup: bad, mode: 'merge' });
     assert.notEqual(r.status, 200);
-    assert.ok(JSON.stringify(r.body).includes('已有它的发放流水'), JSON.stringify(r.body).slice(0, 300));
+    // 合并不导入年会表：备份里形似年会付款的流水在目标库没有完全相同的一行，先被拒绝（不会挂到待发记录上）
+    assert.ok(JSON.stringify(r.body).includes('没有完全相同的记录'), JSON.stringify(r.body).slice(0, 300));
     assert.deepEqual(await snapshot(), before, '被拒绝的导入不改变数据、恢复代数和流水序号');
     // 列表与数据版本同一快照：名单、预留名额列表都带 gala_version
     const parts = (await call('GET', `/gala/participants?event_id=${ev.id}`)).body.data;
@@ -1785,6 +1817,27 @@ async function realRestoreChecks(cfg) {
       recount(kept);
       r = await call('POST', '/backup/import', { backup: kept, mode: 'merge' });
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      // 中奖记录被截掉（或整张表缺失）：仍按命名约定识别出付款流水，拒绝
+      const noWinners = structuredClone(orphan);
+      noWinners.data.gala_round_winners = [];
+      recount(noWinners);
+      r = await call('POST', '/backup/import', { backup: noWinners, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('没有完全相同的记录'), JSON.stringify(r.body).slice(0, 300));
+      // 目标库同 ID 的是一条无关流水：ID 碰撞不算同一笔付款，拒绝
+      const unrelated = await tdb.get(
+        "INSERT INTO ledger(userid, delta, reason, ref_id, created_at) VALUES(?, 1, '测试普通流水', 'RT_PLAIN', ?) RETURNING id",
+        [users[3], now],
+      );
+      const collide = structuredClone(noWinners);
+      collide.data.ledger = [{ ...orphan.data.ledger[0], id: Number(unrelated.id) }];
+      recount(collide);
+      const beforeC = await snapshot();
+      r = await call('POST', '/backup/import', { backup: collide, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('没有完全相同的记录'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), beforeC);
+      await tdb.run('DELETE FROM ledger WHERE id = ?', [unrelated.id]);
     }
     // 2b''') 用户重置后：合并该用户重置后的账户可以通过；但带回原付款流水（重新挂回中奖记录的凭据）要拒绝
     {

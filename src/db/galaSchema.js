@@ -172,11 +172,21 @@ INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO
 
 -- 年会表 ID 不超过 JS 安全整数（接口按 Number 解析 ID）：到上限时插入失败，而不是生成接口无法引用的记录。
 -- 流水表同样设上限：年会付款凭据（中奖记录的 ledger_id、GALA_W 引用）和备份校验都按安全整数处理流水 ID。
+-- 升级前的库里流水序列或已有流水 ID 可能已超过这个上限（旧版本的全量恢复按原值导入并推进序列）：
+-- 这时不收紧流水序列，保持原范围让服务照常启动；年会发放在付款凭据处兜底（流水 ID 不是安全整数时整笔回滚）。
 DO $$
-DECLARE t TEXT;
+DECLARE
+  t TEXT;
+  ledger_seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots', 'ledger'] LOOP
+  FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'] LOOP
     EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', pg_get_serial_sequence(t, 'id'));
   END LOOP;
+  IF COALESCE(pg_sequence_last_value(ledger_seq), 0) <= 9007199254740991
+     AND COALESCE((SELECT MAX(id) FROM ledger), 0) <= 9007199254740991 THEN
+    EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', ledger_seq);
+  ELSE
+    RAISE WARNING 'ledger ids already exceed 9007199254740991; keeping the ledger sequence range (gala payouts refuse unsafe ledger ids)';
+  END IF;
 END $$;
 `;
