@@ -189,4 +189,18 @@ BEGIN
     RAISE WARNING 'ledger ids already exceed 9007199254740991; keeping the ledger sequence range (gala payouts refuse unsafe ledger ids)';
   END IF;
 END $$;
+
+-- 升级前第三方发币可以写入 GALA_W<n> 形式的引用号：把中奖记录序列推进到这些引用号之后（只升不降），
+-- 新抽出的中奖记录 ID 不会与历史流水同名（否则那条流水像是它的付款，之后的备份无法恢复）。
+-- 之后第三方接口不再接受 GALA_W 引用号；全量恢复后同样推进（见 backupRoutes）。
+DO $$
+DECLARE
+  w_seq regclass := pg_get_serial_sequence('gala_round_winners', 'id')::regclass;
+  legacy_ref NUMERIC := (SELECT MAX(substring(ref_id FROM 7)::numeric) FROM ledger WHERE ref_id ~ '^GALA_W[1-9][0-9]{0,18}$');
+  cur NUMERIC := GREATEST(COALESCE(pg_sequence_last_value(w_seq), 0), COALESCE((SELECT MAX(id) FROM gala_round_winners), 0));
+BEGIN
+  IF legacy_ref IS NOT NULL AND legacy_ref > cur THEN
+    PERFORM setval(w_seq, LEAST(legacy_ref, 9007199254740991)::bigint, true);
+  END IF;
+END $$;
 `;

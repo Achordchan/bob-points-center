@@ -495,6 +495,28 @@ async function main() {
           }
           console.log('✓ 升级前流水序列已超出安全整数：启动不失败，年会发放拒绝不安全的付款凭据');
         }
+
+        // 升级前第三方发币写入的 GALA_W<n> 历史流水：启动迁移把中奖记录序列推进到 n 之后，新中奖记录不会同名
+        {
+          const maxW = Number((await db.get('SELECT COALESCE(MAX(id), 0) AS m FROM gala_round_winners')).m);
+          const legacyN = maxW + 50;
+          const lr = await db.get(
+            "INSERT INTO ledger(userid, delta, reason, ref_id) VALUES(?, 3, '年会奖励·第三方历史', ?) RETURNING id",
+            [uid(1), `GALA_W${legacyN}`],
+          );
+          try {
+            await db.exec(galaSchemaSql);
+            const evL = await createGalaEvent(db, { title: `${PREFIX} 历史引用号`, totalBudget: 0 });
+            const pL = await createGalaPool(db, { eventId: evL.id, name: '历史池', budget: 100 });
+            await addGalaParticipants(db, { eventId: evL.id, userids: [uid(1)] });
+            await addFiller(db, evL.id);
+            const dL = await drawGalaRound(db, { eventId: evL.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pL.id, amountEach: 3, randomInt: FIRST });
+            assert.ok(Number(dL.winners[0].id) > legacyN, `新中奖记录 ID ${dL.winners[0].id} 应在历史引用号 ${legacyN} 之后`);
+          } finally {
+            await db.run('DELETE FROM ledger WHERE id = ?', [lr.id]);
+          }
+          console.log('✓ 启动迁移把中奖记录序列推进到历史 GALA_W 引用号之后');
+        }
       }
 
       // 发放失败回写与用户重置并发：两边都按「轮次 → 中奖记录」加锁，不会死锁
@@ -1624,6 +1646,11 @@ async function realRestoreChecks(cfg) {
       await tdb.exec(galaSchemaSql);
       const st = await tdb.all('SELECT id, status, granted_at FROM gala_rounds WHERE id = ANY(?::bigint[]) ORDER BY id', [[done.round.id, open.round.id].map(Number)]);
       assert.deepEqual(st.map((x) => [x.status, x.granted_at == null ? null : Number(x.granted_at)]), [['granted', lastPaid], ['drawn', null]]);
+      // 按依赖顺序删除夹具（子表先于奖池和活动），不依赖级联顺序
+      for (const t of ['gala_reserved_slots', 'gala_round_winners', 'gala_rounds', 'gala_participants', 'gala_pools']) {
+        // eslint-disable-next-line no-await-in-loop
+        await tdb.run(`DELETE FROM ${t} WHERE event_id = ?`, [evG.id]);
+      }
       await tdb.run('DELETE FROM gala_events WHERE id = ?', [evG.id]);
     }
 
@@ -1926,7 +1953,18 @@ async function realRestoreChecks(cfg) {
       await tdb.run('DELETE FROM gala_participants WHERE id = ?', [lp.id]);
       await tdb.run('DELETE FROM users WHERE userid = ?', [legacy]);
     }
-    console.log('✓ 合并导入跳过年会表；覆盖导入核对年会表行数，恢复点无法重新导入时拒绝覆盖');
+    // 2f) 当前格式的合并同样核对年会表、流水、账户的行数：中奖记录被截短会让付款流水和含奖励的余额漏检
+    {
+      const trunc = structuredClone(b0);
+      assert.ok(trunc.data.gala_round_winners.length > 0);
+      trunc.data.gala_round_winners = [];
+      const beforeT = await snapshot();
+      r = await call('POST', '/backup/import', { backup: trunc, mode: 'merge' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('gala_round_winners'));
+      assert.deepEqual(await snapshot(), beforeT);
+    }
+    console.log('✓ 合并导入跳过年会表但核对行数；覆盖导入核对年会表行数，恢复点无法重新导入时拒绝覆盖');
 
     // 3) 不认识的年会格式号：写库前拒绝，数据与代数不变
     {
@@ -2041,16 +2079,17 @@ async function realRestoreChecks(cfg) {
       assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
       assert.ok(JSON.stringify(r.body).includes('userid'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before9);
-      // 流水 id 超出序列上限（显式 INSERT 不受序列约束）：写库前拒绝，不会让恢复后所有新流水都失败
+      // 超出安全整数的 JSON 数字流水 id（解析时已被舍入，可能撞上别的流水）：写库前拒绝。
+      // 十进制字符串形式的大号 id（升级前的库导出）按原值恢复，见用例 7。
       const bigLedger = structuredClone(again);
-      bigLedger.data.ledger.push({ id: '9007199254740993', userid: bigLedger.data.ledger[0].userid, delta: 1, reason: 'x', ref_id: null, created_at: 1 });
+      bigLedger.data.ledger.push({ id: 9007199254740993, userid: bigLedger.data.ledger[0].userid, delta: 1, reason: 'x', ref_id: null, created_at: 1 });
       bigLedger._meta.tables.ledger = bigLedger.data.ledger.length;
       const before10 = await snapshot();
       r = await call('POST', '/backup/import', { backup: bigLedger, mode: 'overwrite' });
       assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
       assert.ok(JSON.stringify(r.body).includes('ledger'), JSON.stringify(r.body).slice(0, 300));
       assert.deepEqual(await snapshot(), before10);
-      console.log('✓ 在线分配出的最后一个 ID 可以导出再恢复；恢复的名单 userid 按在线规则校验；越界流水 id 拒绝');
+      console.log('✓ 在线分配出的最后一个 ID 可以导出再恢复；恢复的名单 userid 按在线规则校验；被舍入的流水 id 拒绝');
     }
     // 6) 覆盖导入的备份里某张年会表为空：表被清空，序列也要重置；接近上限的旧序列不能留到恢复后
     {
@@ -2061,8 +2100,31 @@ async function realRestoreChecks(cfg) {
       r = await call('POST', '/backup/import', { backup: emptyGala, mode: 'overwrite' });
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
       const next = await tdb.get("SELECT nextval(pg_get_serial_sequence('gala_round_winners', 'id')) AS n");
-      assert.ok(Number(next.n) < 10, `覆盖空表后序列应回到起点，实际 ${next.n}`);
-      console.log('✓ 覆盖导入时空的年会表也重置序列');
+      // 流水里仍有 GALA_W<n> 引用（中奖记录已清空，等同历史引用号）：序列回到这些引用号之后，而不是停在旧的上限附近
+      const refs = emptyGala.data.ledger.map((l) => /^GALA_W([1-9][0-9]*)$/.exec(String(l.ref_id || ''))?.[1]).filter(Boolean).map(Number);
+      const expectNext = (refs.length ? Math.max(...refs) : 0) + 1;
+      assert.equal(Number(next.n), expectNext, `覆盖空表后序列应回到历史引用号之后，实际 ${next.n}`);
+      console.log('✓ 覆盖导入时空的年会表也重置序列，并推进到历史 GALA_W 引用号之后');
+    }
+    // 7) 升级前的库里有超过安全整数的流水 id：导出为十进制字符串，覆盖恢复按原值写回，流水序列放开到 BIGINT 原范围，
+    //    之后新流水照常分配（不会停在“已用尽”）
+    {
+      const big = structuredClone(b0);
+      big.data.ledger.push({ id: '9007199254741000', userid: users[0], delta: 1, reason: '升级前大号流水', ref_id: 'RT_BIG', created_at: Math.floor(Date.now() / 1000) });
+      big._meta.tables.ledger = big.data.ledger.length;
+      // 超出安全整数的 JSON 数字（已被舍入）仍然拒绝
+      const lossy = structuredClone(big);
+      lossy.data.ledger[lossy.data.ledger.length - 1].id = 9007199254741001;
+      r = await call('POST', '/backup/import', { backup: lossy, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      r = await call('POST', '/backup/import', { backup: big, mode: 'overwrite' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(await tdb.get('SELECT 1 AS x FROM ledger WHERE id = ?::bigint', ['9007199254741000']), '大号流水按原值恢复');
+      const mx = await tdb.get("SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass");
+      assert.equal(String(mx.seqmax), '9223372036854775807');
+      const fresh = await tdb.get("INSERT INTO ledger(userid, delta, reason) VALUES(?, 1, 'after') RETURNING id", [users[0]]);
+      assert.equal(String(fresh.id), '9007199254741001');
+      console.log('✓ 升级前超过安全整数的流水 id 按原值恢复，之后新流水照常分配');
     }
   } finally {
     if (server) server.close();

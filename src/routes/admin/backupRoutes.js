@@ -177,6 +177,32 @@ export function prepareGalaRoundFlags(backupData, meta) {
 // 不按时间先后排除：数据库时钟回拨、或恢复到时钟稍慢的主库后发币，真实付款也可能“早于”中奖记录，
 // 宁可拒绝也不重复发放。与导入后整库上的 paidPending 查询保持同一判定。
 // 有 ledger_id 关联的已发放记录不用它判断（见下方逐笔核对）。
+// 升级前第三方发币可以写入 GALA_W<n> 形式的引用号。中奖记录 ID 若之后恰好分到 n，这条历史流水就像是它的付款，
+// 备份校验会因此拒绝恢复。恢复后把中奖记录序列推进到所有 GALA_W 引用号之后（只升不降），新中奖记录不会撞上历史引用号；
+// 启动迁移做同样的推进（见 galaSchema）。用 ALTER SEQUENCE … RESTART，随事务回滚。
+const WINNER_SEQ_PAST_LEGACY_REFS_SQL = `DO $$
+DECLARE
+  seq regclass := pg_get_serial_sequence('gala_round_winners', 'id')::regclass;
+  mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('gala_round_winners', 'id')::regclass);
+  ref NUMERIC := (SELECT MAX(substring(ref_id FROM 7)::numeric) FROM ledger WHERE ref_id ~ '^GALA_W[1-9][0-9]{0,18}$');
+  cur NUMERIC := COALESCE((SELECT MAX(id)::numeric FROM gala_round_winners), 0);
+BEGIN
+  IF ref IS NULL OR ref <= cur THEN RETURN; END IF;
+  IF ref + 1 > mx THEN
+    EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+    PERFORM nextval(seq);
+  ELSE
+    EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, ref + 1);
+  END IF;
+END $$`;
+
+const BIGINT_MAX = 9223372036854775807n;
+function isExactLedgerId(v) {
+  if (typeof v === 'number') return Number.isSafeInteger(v) && v > 0;
+  if (typeof v !== 'string' || !/^[1-9][0-9]{0,18}$/.test(v)) return false;
+  return BigInt(v) <= BIGINT_MAX;
+}
+
 function couldPayWinner(row, w) {
   return String(row?.userid) === String(w?.userid) && Number(row?.delta) === Number(w?.amount);
 }
@@ -1186,7 +1212,20 @@ export function registerAdminBackupRoutes(router) {
     // 否则会恢复出有中奖记录却无奖池/活动、或有发放流水却无幂等记录的残缺账目。
     // 新版全量格式（_meta.galaFormat，或 _meta.tables 里列了年会表）确知包含年会数据：整组缺失同样拒绝，
     // 不能当成旧备份去覆盖清空在线的中奖记录和付款凭据。
-    // 合并导入不导入年会表（年会数据只随全量覆盖恢复，见下方导入处），备份里的年会数据不需要校验。
+    // 合并导入不导入年会表（年会数据只随全量覆盖恢复，见下方导入处），年会数据本身不做资金校验；
+    // 但合并靠备份里的中奖记录和流水识别年会付款与收款人（见流水、账户处的检查），当前格式的备份
+    // 这几张表必须完整：行数与导出记录一致（被截短的中奖记录或流水会让付款流水、含奖励的余额漏检）。
+    if (backupMode === 'full' && mode !== 'overwrite' && backup?._meta?.galaFormat != null) {
+      const countErrors = findGalaRowCountErrors(backupData, backup?._meta);
+      if (countErrors.length) {
+        await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
+        return res.status(400).json({
+          error: `年会数据行数与导出记录不一致，已拒绝导入：${countErrors.slice(0, 5).join('；')}`,
+          errors: countErrors,
+          backupMode,
+        });
+      }
+    }
     if (backupMode === 'full' && mode === 'overwrite') {
       const present = GALA_BACKUP_TABLES.filter((t) => backupData[t.name] != null).map((t) => t.name);
       if ((present.length > 0 || requiresGalaTables(backup?._meta)) && present.length < GALA_BACKUP_TABLES.length) {
@@ -1575,10 +1614,10 @@ export function registerAdminBackupRoutes(router) {
         ledger.forEach((row, index) => {
           if (!row?.id || !row?.userid) {
             pushPreflight('ledger', index, '缺少 id/userid');
-          } else if (!/^[1-9][0-9]{0,15}$/.test(String(row.id)) || !Number.isSafeInteger(Number(row.id))) {
-            // 流水序列的上限是最大安全整数（在线分配不出更大的 id）。显式 INSERT 不受序列上限约束，
-            // 越界的 id 一旦写入，恢复后序列只能停在“已用尽”，之后所有新流水都会失败；写库前拒绝。
-            pushPreflight('ledger', index, `id=${row.id} 不是 1 到最大安全整数之间的整数`);
+          } else if (!isExactLedgerId(row.id)) {
+            // 流水 id 必须原样可写：数字只接受安全整数（更大的 JSON 数字解析时已被舍入，可能撞上别的流水）；
+            // 升级前的库可能已有超过安全整数的 BIGINT 流水 id，导出时是十进制字符串，按原值恢复（见流水导入处的序列处理）。
+            pushPreflight('ledger', index, `id=${row.id} 不是可原样恢复的正整数（数字须在安全整数内，更大的 id 须是十进制字符串且不超过 BIGINT）`);
           }
         });
 
@@ -2669,6 +2708,12 @@ export function registerAdminBackupRoutes(router) {
               }
             }
             try {
+              // 备份里有超过安全整数的流水 id（升级前的库，见 galaSchema）：与启动迁移同一口径，流水序列放开到 BIGINT 原范围，
+              // 否则序列被推进到这些 id 之后只能停在“已用尽”，之后所有新流水都会失败。年会发放另在付款凭据处拒绝不安全的 id。
+              // ALTER SEQUENCE 随事务回滚。
+              if (rows.some((r) => r?.id != null && BigInt(String(r.id)) > 9007199254740991n)) {
+                await tx.exec(`DO $$ BEGIN EXECUTE format('ALTER SEQUENCE %s NO MAXVALUE', pg_get_serial_sequence('ledger', 'id')); END $$`, []);
+              }
               await bumpSerial(tx, 'ledger');
             } catch (err) {
               markAndThrow('ledger', null, err);
@@ -3265,6 +3310,8 @@ export function registerAdminBackupRoutes(router) {
               try {
                 // eslint-disable-next-line no-await-in-loop
                 await bumpSerial(tx, table.name);
+                // eslint-disable-next-line no-await-in-loop
+                if (table.name === 'gala_round_winners') await tx.exec(WINNER_SEQ_PAST_LEGACY_REFS_SQL, []);
               } catch (err) {
                 markAndThrow(table.name, null, err);
               }
