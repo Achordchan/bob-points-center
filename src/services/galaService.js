@@ -634,6 +634,8 @@ export async function drawGalaRound(db, {
   if (!['none', 'coin'].includes(prizeType)) throw new GalaError('invalid_prize_type');
   const amount = prizeType === 'coin' ? toNonNegativeInt(amountEach) : 0;
   if (prizeType === 'coin' && (!amount || amount <= 0)) throw new GalaError('invalid_amount_each');
+  // 整轮金额（单价 × 人数）必须是安全整数，否则预算比较和返回的 required 都会被舍入。
+  if (!Number.isSafeInteger(amount * count)) throw new GalaError('draw_total_too_large');
   // expectedRoundNo：这次请求要抽的轮次号（本环节最新一轮 + 1）。管理端接口必传，让重试幂等：
   // 抽签已提交但响应丢了时，用同样参数重试会拿回已抽出的那一轮，而不是再抽一轮、再占一份预算。
   const wantRoundNo = expectedRoundNo === undefined ? null : toPositiveId(expectedRoundNo);

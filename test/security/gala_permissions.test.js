@@ -664,7 +664,7 @@ test('年会备份：开启排除已中奖者的一轮，中奖人不能在同�
   });
   const errors = findGalaFundingErrors(snap(1));
   assert.ok(errors.some((e) => e.startsWith('gala_round_winners#2') && e.includes('排除本环节已中奖者')), errors.join('\n'));
-  // 直接校验时缺省视为开启（导入前会先由 normalizeLegacyGalaRounds 推断补齐）
+  // 直接校验时缺省视为开启（导入前会先由 prepareGalaRoundFlags 处理：旧格式推断补齐，当前格式缺失则拒绝）
   const legacy = snap(1);
   delete legacy.gala_rounds[1].exclude_previous_winners;
   assert.ok(findGalaFundingErrors(legacy).some((e) => e.startsWith('gala_round_winners#2')));
@@ -724,8 +724,8 @@ test('含年会数据的全量备份格式：缺整组年会表不能当成旧�
   assert.equal(requiresGalaTables({ version: 1 }), false);
 });
 
-test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁移同一口径），推断值写回行里', async () => {
-  const { normalizeLegacyGalaRounds } = await import('../../src/routes/admin/backupRoutes.js');
+test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁移同一口径），推断值写回行里；当前格式缺失则拒绝', async () => {
+  const { prepareGalaRoundFlags } = await import('../../src/routes/admin/backupRoutes.js');
   const snap = () => ({
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
@@ -746,15 +746,50 @@ test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁�
     ledger: [],
   });
   const legacy = snap();
-  assert.equal(normalizeLegacyGalaRounds(legacy), 4);
+  assert.deepEqual(prepareGalaRoundFlags(legacy, { version: 2 }), []);
   // 第 2 轮有人在第 1 轮中过奖：当时关闭了排除；其余轮次（含另一环节）推断为开启
   assert.deepEqual(legacy.gala_rounds.map((r) => r.exclude_previous_winners), [1, 0, 1, 1]);
   assert.deepEqual(findGalaFundingErrors(legacy), []);
   // 备份里已有的值不覆盖
   const explicit = snap();
   for (const r of explicit.gala_rounds) r.exclude_previous_winners = 1;
-  assert.equal(normalizeLegacyGalaRounds(explicit), 0);
+  assert.deepEqual(prepareGalaRoundFlags(explicit, { version: 2 }), []);
   assert.ok(findGalaFundingErrors(explicit).some((e) => e.startsWith('gala_round_winners#2')));
+  // 当前格式：缺失不推断，直接拒绝（损坏的备份不能借推断放过重复中奖）
+  const current = snap();
+  const errs = prepareGalaRoundFlags(current, { version: 2, galaFormat: 1 });
+  assert.equal(errs.length, 4);
+  assert.ok(current.gala_rounds.every((r) => r.exclude_previous_winners === undefined));
+  // 取值非法
+  const badVal = snap();
+  for (const r of badVal.gala_rounds) r.exclude_previous_winners = 1;
+  badVal.gala_rounds[0].exclude_previous_winners = 2;
+  assert.ok(prepareGalaRoundFlags(badVal, { version: 2 }).some((e) => e.startsWith('gala_rounds#1')));
+  // 轮次号缺失或非数字：不会卡死，跳过推断，由引用校验拒绝
+  const badNo = snap();
+  badNo.gala_rounds[1].round_no = 'x';
+  delete badNo.gala_rounds[2].round_no;
+  assert.deepEqual(prepareGalaRoundFlags(badNo, { version: 2 }), []);
+  assert.equal(badNo.gala_rounds[1].exclude_previous_winners, undefined);
+  assert.ok(findGalaFundingErrors(badNo).some((e) => e.startsWith('gala_rounds#2') && e.includes('round_no')));
+});
+
+test('年会备份：活动的环节开关必须是认识的环节键组成的 JSON 数组', () => {
+  const snap = (segments) => ({
+    gala_events: [{ id: 1, total_budget: 0, enabled_segments: segments }],
+    gala_pools: [],
+    gala_participants: [],
+    gala_rounds: [],
+    gala_round_winners: [],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap(undefined)), []);
+  assert.deepEqual(findGalaFundingErrors(snap('["lottery","checkin"]')), []);
+  assert.deepEqual(findGalaFundingErrors(snap('[]')), []);
+  for (const bad of ['not json', '{"a":1}', '["lottery","nope"]', '[1]', ['lottery']]) {
+    assert.ok(findGalaFundingErrors(snap(bad)).some((e) => e.includes('enabled_segments')), String(bad));
+  }
 });
 
 test('年会备份：已用名额兑现后，持有人在同一活动任何环节都不能再有普通中奖记录', () => {
@@ -793,4 +828,12 @@ test('年会备份格式号：只接受本版本认识的格式', async () => {
   // 在任何写库（获取连接/开事务）之前拒绝
   const reject = src.indexOf('isUnsupportedGalaFormat(backup._meta)');
   assert.ok(reject > 0 && reject < src.indexOf('const backupData = backup.data;'));
+});
+
+test('抽签：单价 × 人数超出安全整数时直接拒绝，不返回被舍入的金额', async () => {
+  const { drawGalaRound } = await import('../../src/services/galaService.js');
+  await assert.rejects(
+    drawGalaRound(null, { eventId: 1, segment: 'lottery', drawCount: 3, prizeType: 'coin', poolId: 1, amountEach: Number.MAX_SAFE_INTEGER, expectedRoundNo: 1 }),
+    (e) => e.code === 'draw_total_too_large' && e.status === 400,
+  );
 });

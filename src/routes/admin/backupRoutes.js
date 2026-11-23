@@ -49,46 +49,56 @@ export function requiresGalaTables(meta) {
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
 }
 
-// 补全旧格式备份里缺少的 exclude_previous_winners（该列晚于年会表引入）：与升级迁移同一口径，
-// 某轮有人在同一活动同一环节更早的轮次里已中过奖，说明那一轮当时关闭了排除开关，记为 0；否则记为 1。
-// 原地写回行对象，后续校验与写库看到的是同一个推断值，恢复后的轮次也不会被误标为“开启排除”。
-export function normalizeLegacyGalaRounds(backupData) {
-  const rounds = Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [];
-  const missing = rounds.filter((r) => r && typeof r === 'object' && r.exclude_previous_winners == null);
-  if (!missing.length) return 0;
-  const winners = Array.isArray(backupData?.gala_round_winners) ? backupData.gala_round_winners : [];
+// 准备轮次的 exclude_previous_winners（该列晚于年会表引入），返回错误描述列表：
+// - 当前格式（_meta.galaFormat）导出时一定带这一列：缺失或取值不是 0/1 都是损坏的备份，拒绝，不推断。
+//   否则缺失的值会被推断成 0，跨轮重复中奖校验反而放过本该拒绝的数据。
+// - 旧格式备份：缺失时与升级迁移同一口径推断。某轮有人在同一活动同一环节更早的轮次里已中过奖，
+//   说明那一轮当时关闭了排除开关，记为 0；否则记为 1。推断值原地写回行对象，后续校验与写库用同一个值。
+//   轮次号无效的行不参与推断（随后的引用校验会拒绝）；按轮次号分组，同号的异常数据互不视为“更早”。
+export function prepareGalaRoundFlags(backupData, meta) {
+  const errors = [];
+  const rounds = (Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [])
+    .filter((r) => r && typeof r === 'object');
+  for (const r of rounds) {
+    const v = r.exclude_previous_winners;
+    if (v != null && ![0, 1, '0', '1'].includes(v)) {
+      errors.push(`gala_rounds#${r.id} 的 exclude_previous_winners=${v} 只能是 0 或 1`);
+    } else if (v == null && meta?.galaFormat != null) {
+      errors.push(`gala_rounds#${r.id} 缺少 exclude_previous_winners（当前格式的备份必须带这一列）`);
+    }
+  }
+  if (errors.length || meta?.galaFormat != null) return errors;
+  if (!rounds.some((r) => r.exclude_previous_winners == null)) return errors;
   const winnersByRound = new Map();
-  for (const w of winners) {
+  for (const w of Array.isArray(backupData?.gala_round_winners) ? backupData.gala_round_winners : []) {
     const key = Number(w?.round_id);
     if (!winnersByRound.has(key)) winnersByRound.set(key, []);
     winnersByRound.get(key).push(String(w?.userid));
   }
+  // 活动+环节 → 轮次号 → 该号下的轮次
   const bySegment = new Map();
   for (const r of rounds) {
-    if (!r || typeof r !== 'object') continue;
+    const no = Number(r.round_no);
+    if (!Number.isSafeInteger(no) || no < 1) continue;
     const key = `${Number(r.event_id)}:${r.segment}`;
-    if (!bySegment.has(key)) bySegment.set(key, []);
-    bySegment.get(key).push(r);
+    if (!bySegment.has(key)) bySegment.set(key, new Map());
+    const byNo = bySegment.get(key);
+    if (!byNo.has(no)) byNo.set(no, []);
+    byNo.get(no).push(r);
   }
-  for (const list of bySegment.values()) {
-    list.sort((a, b) => Number(a.round_no) - Number(b.round_no));
+  for (const byNo of bySegment.values()) {
     const earlier = new Set();
-    let i = 0;
-    while (i < list.length) {
-      // 同一轮次号（异常数据）视为同一批，互不作为“更早”的轮次。
-      let j = i;
-      while (j < list.length && Number(list[j].round_no) === Number(list[i].round_no)) j += 1;
-      const batch = list.slice(i, j);
+    for (const no of [...byNo.keys()].sort((a, b) => a - b)) {
+      const batch = byNo.get(no);
       for (const r of batch) {
         if (r.exclude_previous_winners != null) continue;
         const ws = winnersByRound.get(Number(r.id)) || [];
         r.exclude_previous_winners = ws.some((u) => earlier.has(u)) ? 0 : 1;
       }
       for (const r of batch) for (const u of winnersByRound.get(Number(r.id)) || []) earlier.add(u);
-      i = j;
     }
   }
-  return missing.length;
+  return errors;
 }
 
 // 校验备份中年会数据的引用与资金关系，返回错误描述列表（为空表示通过）。
@@ -210,6 +220,19 @@ export function findGalaFundingErrors(backupData) {
   for (const r of asList(backupData?.gala_rounds)) {
     if (!intIn(r?.draw_count, 1, GALA_MAX_DRAW_COUNT)) errors.push(`gala_rounds#${r?.id} 的 draw_count=${r?.draw_count} 不在 1~${GALA_MAX_DRAW_COUNT} 之间`);
     if (!intIn(r?.round_no, 1, 2147483647)) errors.push(`gala_rounds#${r?.id} 的 round_no=${r?.round_no} 不是有效轮次号`);
+  }
+  // 环节开关原样写入 TEXT 列，读取时解析失败会被当成“全部停用”：必须是认识的环节键组成的 JSON 数组。
+  for (const e of asList(backupData?.gala_events)) {
+    if (e?.enabled_segments == null) continue;
+    let list = null;
+    try {
+      list = typeof e.enabled_segments === 'string' ? JSON.parse(e.enabled_segments) : null;
+    } catch {
+      list = null;
+    }
+    if (!Array.isArray(list) || list.some((k) => typeof k !== 'string' || !Object.hasOwn(GALA_SEGMENTS, k))) {
+      errors.push(`gala_events#${e?.id} 的 enabled_segments 不是有效的环节列表`);
+    }
   }
   for (const table of ['gala_pools', 'gala_round_winners']) {
     for (const row of asList(backupData?.[table])) {
@@ -1048,8 +1071,18 @@ export function registerAdminBackupRoutes(router) {
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
       }
-      // 旧格式备份没有轮次的排除开关：先按中奖记录推断并写回，校验与写库都用推断值。
-      normalizeLegacyGalaRounds(backupData);
+      // 轮次的排除开关：当前格式必须带齐，旧格式按中奖记录推断并写回（见 prepareGalaRoundFlags）。
+      {
+        const flagErrors = prepareGalaRoundFlags(backupData, backup?._meta);
+        if (flagErrors.length) {
+          await failHistory('失败', { reason: 'invalid_gala_round_flags', errors: flagErrors.slice(0, 20), backupMode });
+          return res.status(400).json({
+            error: `年会轮次数据不完整，已拒绝导入：${flagErrors.slice(0, 5).join('；')}`,
+            errors: flagErrors.slice(0, 20),
+            backupMode,
+          });
+        }
+      }
       // 引用与资金关系校验（见 findGalaFundingErrors）：子记录必须引用备份内同一活动的父记录，
       // 未发放的正数奖励必须挂在类型一致的奖池上，员工奖池不超活动总预算，发放流水与幂等闸门一致。
       {

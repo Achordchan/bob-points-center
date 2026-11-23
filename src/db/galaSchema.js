@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS gala_rounds (
   CONSTRAINT chk_gala_rounds_status CHECK (status IN ('drawn', 'granted'))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_rounds_event ON gala_rounds(event_id, id DESC);
+-- 按奖池统计已分配额（allocatedByPool）：发币抽签持有活动行锁时只扫本奖池的轮次。
+CREATE INDEX IF NOT EXISTS idx_gala_rounds_pool ON gala_rounds(pool_id) WHERE pool_id IS NOT NULL;
 
 -- 每轮中奖人。awarded_at 为发币幂等闸门：只有把它从 NULL 改成时间戳的那个事务才会写账本。
 CREATE TABLE IF NOT EXISTS gala_round_winners (

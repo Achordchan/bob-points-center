@@ -1323,6 +1323,14 @@ async function realRestoreChecks(cfg) {
     }
     // 4) 早于排除开关列的旧备份：按中奖记录推断（关闭排除产生重复中奖的那一轮为 0），覆盖恢复成功且恢复出推断值
     {
+      // 当前格式却缺列：损坏的备份，拒绝而不是推断
+      const broken = structuredClone(b0);
+      for (const row of broken.data.gala_rounds) delete row.exclude_previous_winners;
+      const snap1 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: broken, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('exclude_previous_winners'));
+      assert.deepEqual(await snapshot(), snap1);
       const legacy = structuredClone(b0);
       delete legacy._meta.galaFormat;
       for (const row of legacy.data.gala_rounds) delete row.exclude_previous_winners;
@@ -1332,7 +1340,7 @@ async function realRestoreChecks(cfg) {
       const flags = await tdb.all('SELECT exclude_previous_winners AS f FROM gala_rounds WHERE event_id = ? ORDER BY round_no', [evU.id]);
       assert.deepEqual(flags.map((x) => Number(x.f)), [1, 0, 1], '旧备份恢复后关闭过排除的轮次仍记为不排除');
     }
-    console.log('✓ 旧格式备份推断排除开关；不认识的年会格式号拒绝');
+    console.log('✓ 旧格式备份推断排除开关；当前格式缺列、不认识的年会格式号拒绝');
   } finally {
     if (server) server.close();
     if (tdb) await tdb.close();
