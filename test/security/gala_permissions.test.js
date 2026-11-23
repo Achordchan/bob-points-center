@@ -64,20 +64,23 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
   assert.match(source, /合并导入存在年会数据 ID 冲突/);
 });
 
-test('年会备份资金关系校验：未发放奖励必须挂在同一活动的奖池上', () => {
+test('年会备份资金关系校验：未发放奖励必须挂在同一活动、类型一致的奖池上', () => {
   const base = {
-    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0 }, { id: 2, event_id: 10, is_reserved: 1 }, { id: 3, event_id: 20, is_reserved: 0 }],
-    gala_rounds: [{ id: 5, event_id: 10 }],
+    gala_events: [{ id: 10, total_budget: 0 }, { id: 20, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 100 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
+    gala_participants: [{ id: 1, event_id: 10 }],
+    gala_rounds: [{ id: 5, event_id: 10, pool_id: 1 }],
     gala_round_winners: [
       { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
       { id: 2, round_id: 5, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
-      { id: 3, round_id: 5, event_id: 10, amount: 50, pool_id: null, awarded_at: 1700000000 },
+      { id: 3, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: 1700000000 },
       { id: 7, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 1, awarded_at: null },
     ],
     gala_reserved_slots: [
       { id: 1, event_id: 10, amount: 20, pool_id: 2, status: 'pending' },
-      { id: 2, event_id: 10, amount: 20, pool_id: null, status: 'used' },
+      { id: 2, event_id: 10, amount: 20, pool_id: 2, status: 'used', used_round_id: 5 },
     ],
+    ledger: [{ id: 900, ref_id: 'GALA_W3' }, { id: 901, ref_id: 'ADMIN_X' }],
   };
   assert.deepEqual(findGalaFundingErrors(base), []);
   const bad = structuredClone(base);
@@ -88,8 +91,58 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_round_winners.push({ id: 9, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 0, awarded_at: null });
   bad.gala_reserved_slots.push({ id: 3, event_id: 10, amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
-  assert.equal(errors.length, 6, errors.join('\n'));
-  for (const tag of ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3']) {
-    assert.ok(errors.some((e) => e.startsWith(tag)), tag);
-  }
+  const tags = ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
+  assert.equal(errors.length, tags.length, errors.join('\n'));
+  for (const tag of tags) assert.ok(errors.some((e) => e.startsWith(tag)), tag);
+});
+
+test('年会备份引用校验：子记录引用的活动必须在备份中', () => {
+  const snap = {
+    gala_events: [],
+    gala_pools: [{ id: 77, event_id: 3, is_reserved: 0, budget: 10 }],
+    gala_participants: [],
+    gala_rounds: [],
+    gala_round_winners: [],
+    gala_reserved_slots: [{ id: 5, event_id: 3, amount: 0, status: 'used', used_round_id: 42 }],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.ok(errors.some((e) => e.startsWith('gala_pools#77')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#5') && e.includes('活动')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#5') && e.includes('轮次')), errors.join('\n'));
+});
+
+test('年会备份预算校验：员工奖池合计不能超过活动总预算，预留奖池不计入', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 100 }, { id: 2, total_budget: 0 }],
+    gala_pools: [
+      { id: 1, event_id: 1, is_reserved: 0, budget: 80 },
+      { id: 2, event_id: 1, is_reserved: 0, budget: 80 },
+      { id: 3, event_id: 1, is_reserved: 1, budget: 999 },
+      { id: 4, event_id: 2, is_reserved: 0, budget: 5000 },
+    ],
+    gala_participants: [], gala_rounds: [], gala_round_winners: [], gala_reserved_slots: [],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.deepEqual(errors.length, 1, errors.join('\n'));
+  assert.ok(errors[0].startsWith('gala_events#1'));
+  snap.gala_pools[1].budget = 20;
+  assert.deepEqual(findGalaFundingErrors(snap), []);
+});
+
+test('年会备份流水校验：已有发放流水的中奖记录必须已标记发放', () => {
+  const snap = {
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1 }],
+    gala_round_winners: [{ id: 11, round_id: 1, event_id: 1, amount: 10, pool_id: 1, awarded_at: null }],
+    gala_reserved_slots: [],
+    ledger: [{ id: 1, ref_id: 'GALA_W11' }, { id: 2, ref_id: 'GALA_W12' }],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.equal(errors.length, 2, errors.join('\n'));
+  // 没有任何年会表、流水里却有年会发放：不是真正的旧备份
+  const legacy = { ledger: [{ id: 1, ref_id: 'GALA_W11' }] };
+  assert.equal(findGalaFundingErrors(legacy).length, 1);
+  assert.deepEqual(findGalaFundingErrors({ ledger: [{ id: 1, ref_id: 'ADMIN_1' }] }), []);
 });

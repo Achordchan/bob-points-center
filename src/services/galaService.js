@@ -127,25 +127,43 @@ function serializePool(row) {
   };
 }
 
+// 非超管视图不带任何逐人的发放信息（金额、是否已发、失败原因、奖池）。预留名额的金额、奖池、
+// 发放结果都可能与同轮其他人不同，只要逐人展示就能被认出来；员工侧只需要知道谁中了。
 function serializeWinner(row, { includeReserved }) {
   const out = {
     id: Number(row.id),
     userid: row.userid,
     name: row.name_snapshot || row.userid,
     display_order: Number(row.display_order || 0),
-    amount: Number(row.amount || 0),
-    awarded: row.awarded_at ? 1 : 0,
-    awarded_at: row.awarded_at ? Number(row.awarded_at) : null,
-    award_error: row.award_error || '',
   };
   if (includeReserved) {
+    out.amount = Number(row.amount || 0);
+    out.awarded = row.awarded_at ? 1 : 0;
+    out.awarded_at = row.awarded_at ? Number(row.awarded_at) : null;
+    out.award_error = row.award_error || '';
     out.is_reserved = Number(row.is_reserved) === 1 ? 1 : 0;
     out.pool_id = row.pool_id ? Number(row.pool_id) : null;
   }
   return out;
 }
 
+// 非超管看到的轮次状态只由普通中奖记录决定，预留名额发放成功与否不影响它。
+function publicRoundStatus(row, winners) {
+  const visible = (winners || []).filter((w) => Number(w.is_reserved) !== 1 && Number(w.amount) > 0);
+  if (visible.length === 0) {
+    return { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null };
+  }
+  const pending = visible.filter((w) => !w.awarded_at);
+  if (pending.length > 0) return { status: 'drawn', granted_at: null };
+  const grantedAt = Math.max(...visible.map((w) => Number(w.awarded_at)));
+  return { status: 'granted', granted_at: grantedAt };
+}
+
 function serializeRound(row, winners, { includeReserved }) {
+  const sorted = (winners || []).slice().sort((a, b) => Number(a.display_order) - Number(b.display_order));
+  const state = includeReserved
+    ? { status: row.status, granted_at: row.granted_at ? Number(row.granted_at) : null }
+    : publicRoundStatus(row, sorted);
   return {
     id: Number(row.id),
     event_id: Number(row.event_id),
@@ -156,16 +174,14 @@ function serializeRound(row, winners, { includeReserved }) {
     prize_type: row.prize_type,
     pool_id: row.pool_id ? Number(row.pool_id) : null,
     amount_each: Number(row.amount_each || 0),
-    draw_count: Number(row.draw_count),
-    status: row.status,
+    // 非超管看到的抽取人数就是名单人数，避免“请求 N 人、出来 N+1 人”暴露本轮有预留名额。
+    draw_count: includeReserved ? Number(row.draw_count) : sorted.length,
+    status: state.status,
     created_by: row.created_by || '',
     created_name: row.created_name || '',
     created_at: Number(row.created_at),
-    granted_at: row.granted_at ? Number(row.granted_at) : null,
-    winners: (winners || [])
-      .slice()
-      .sort((a, b) => Number(a.display_order) - Number(b.display_order))
-      .map((w) => serializeWinner(w, { includeReserved })),
+    granted_at: state.granted_at,
+    winners: sorted.map((w) => serializeWinner(w, { includeReserved })),
   };
 }
 
@@ -584,23 +600,50 @@ export async function grantGalaRound(db, { roundId }) {
   const granted = [];
   const failed = [];
   for (const w of winners) {
+    const reserved = Number(w.is_reserved) === 1 ? 1 : 0;
     try {
       const r = await awardWinner(db, { winnerId: w.id, reason });
-      if (!r.skipped) granted.push({ userid: r.userid, amount: r.amount, balance: r.balance });
+      if (!r.skipped) granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
     } catch (err) {
       const code = String(err?.code || err?.message || err);
-      failed.push({ userid: w.userid, error: code });
+      failed.push({ userid: w.userid, error: code, is_reserved: reserved });
       await db.run('UPDATE gala_round_winners SET award_error = ? WHERE id = ? AND awarded_at IS NULL', [code, w.id]);
     }
   }
   const pending = await db.get(
-    'SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0',
+    `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_reserved = 0) AS public_n
+       FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0`,
     [id],
   );
   if (Number(pending?.n || 0) === 0 && round.status !== 'granted') {
     await db.run(`UPDATE gala_rounds SET status = 'granted', granted_at = unixepoch() WHERE id = ? AND status = 'drawn'`, [id]);
   }
-  return { round_id: id, granted, failed, pending: Number(pending?.n || 0) };
+  return {
+    round_id: id,
+    granted,
+    failed,
+    pending: Number(pending?.n || 0),
+    pendingPublic: Number(pending?.public_n || 0),
+  };
+}
+
+// 发放结果对外只给发放回执，不含账户余额（余额属于用户资料，需要单独的查看权限）。
+// 非超管只看到普通中奖人的失败明细和待发数量，不列出成功名单：
+// 成功名单与中奖名单一对比，就能认出没出现在任何一边的预留对象。
+export function serializeGrantResult(result, { includeReserved = false } = {}) {
+  if (includeReserved) {
+    return {
+      round_id: result.round_id,
+      granted: result.granted.map((g) => ({ userid: g.userid, amount: g.amount, is_reserved: g.is_reserved })),
+      failed: result.failed.map((f) => ({ userid: f.userid, error: f.error, is_reserved: f.is_reserved })),
+      pending: result.pending,
+    };
+  }
+  return {
+    round_id: result.round_id,
+    failed: result.failed.filter((f) => f.is_reserved !== 1).map((f) => ({ userid: f.userid, error: f.error })),
+    pending: result.pendingPublic,
+  };
 }
 
 // ---------------------------------------------------------------- 预留名额（仅超级管理员）

@@ -2,6 +2,7 @@
 // 仅允许本地开发数据库：需设置 BOB_INTERNAL_TEST_DB=1 与 BOB_GALA_TEST_DATABASE_CONFIRM=<库名>，
 // 且数据库必须带 bob.environment=development GUC 标记。跑完自动清理测试数据。
 import 'dotenv/config';
+import { Client } from 'pg';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
 import { initDb } from '../src/db/index.js';
@@ -27,17 +28,41 @@ const PREFIX = `TEST_GALA_${Date.now()}`;
 const USERS = 30;
 const uid = (i) => `${PREFIX}_${String(i).padStart(3, '0')}`;
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
 function assertSafeTarget(cfg) {
   if (process.env.BOB_INTERNAL_TEST_DB !== '1') {
     throw new Error('拒绝执行：请先设置 BOB_INTERNAL_TEST_DB=1，确认这是内部集成测试。');
   }
-  const host = String(cfg?.db?.host || '').toLowerCase();
-  if (!/(127\.0\.0\.1|localhost)/.test(host)) {
+  const host = String(cfg?.db?.host || '').trim().toLowerCase();
+  if (!LOOPBACK_HOSTS.has(host)) {
     throw new Error(`拒绝执行：集成测试只允许本机测试库，当前 host=${cfg?.db?.host || '-'}`);
   }
   const dbName = String(cfg?.db?.database || '').toLowerCase();
   if (process.env.BOB_GALA_TEST_DATABASE_CONFIRM !== dbName) {
     throw new Error(`拒绝执行：请设置 BOB_GALA_TEST_DATABASE_CONFIRM=${dbName}，二次确认写入目标数据库。`);
+  }
+}
+
+// 在任何写入（含 initDb 的 DDL）之前，用只读事务的独立连接确认目标库带有开发标记。
+async function assertDevelopmentMarker(cfg) {
+  const client = new Client({
+    host: cfg.db.host,
+    port: cfg.db.port,
+    database: cfg.db.database,
+    user: cfg.db.user,
+    password: cfg.db.password,
+  });
+  await client.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    const { rows } = await client.query("SELECT current_setting('bob.environment', true) AS env");
+    await client.query('ROLLBACK');
+    if (String(rows[0]?.env || '').toLowerCase() !== 'development') {
+      throw new Error('拒绝执行：目标库缺少 bob.environment=development 标记');
+    }
+  } finally {
+    await client.end();
   }
 }
 
@@ -58,10 +83,10 @@ async function balanceOf(db, userid) {
 async function main() {
   const cfg = loadConfig();
   assertSafeTarget(cfg);
+  await assertDevelopmentMarker(cfg);
+  // 只有确认是本机开发库之后才初始化（会执行 DDL），清理也只在这之后才可能运行。
   const db = await initDb();
   try {
-    const env = await db.get("SELECT current_setting('bob.environment', true) AS env");
-    assert.equal(String(env?.env || '').toLowerCase(), 'development', '目标库缺少 bob.environment=development 标记');
     await initDb(); // DDL 幂等重跑
     console.log('✓ DDL 幂等');
 
@@ -270,7 +295,7 @@ async function main() {
       await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pC.id)} WHERE round_id = ${Number(dC.round.id)} AND is_reserved = 1`);
       const gC = await grantGalaRound(db, { roundId: dC.round.id });
       assert.deepEqual(gC.granted.map((x) => x.userid), [uid(2)]);
-      assert.deepEqual(gC.failed, [{ userid: uid(5), error: 'winner_pool_missing' }]);
+      assert.deepEqual(gC.failed, [{ userid: uid(5), error: 'winner_pool_missing', is_reserved: 1 }]);
       const spentC = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pC.id]);
       assert.equal(Number(spentC.spent), 9, '员工奖池只应扣普通中奖的 9');
       console.log('✓ 发币兜底：预留奖励不会扣到员工奖池');
@@ -355,14 +380,25 @@ async function main() {
       r = await call(operatorId, 'POST', '/gala/rounds/draw', { event_id: hid, segment: 'lottery', draw_count: 2 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal(r.body.data.winners.length, 3);
-      assert.ok(r.body.data.winners.every((w) => !('is_reserved' in w)), '运营管理员的返回不含预留标记');
+      assert.equal(r.body.data.draw_count, 3, '非超管看到的抽取人数等于名单人数');
+      const PAYOUT_KEYS = ['is_reserved', 'pool_id', 'amount', 'awarded', 'awarded_at', 'award_error'];
+      const noPayout = (w) => PAYOUT_KEYS.every((k) => !(k in w));
+      assert.ok(r.body.data.winners.every(noPayout), '运营管理员的抽签返回不含逐人发放信息');
       r = await call(operatorId, 'GET', `/gala/events/detail?id=${hid}`);
       assert.equal(r.body.data.pools.length, 0, '运营管理员看不到预留奖池');
       r = await call(superId, 'GET', `/gala/rounds?event_id=${hid}`);
       assert.equal(r.body.data[0].winners.filter((w) => w.is_reserved === 1).length, 1);
-      r = await call(operatorId, 'POST', '/gala/rounds/grant', { round_id: r.body.data[0].id });
+      const hRound = r.body.data[0].id;
+      r = await call(operatorId, 'POST', '/gala/rounds/grant', { round_id: hRound });
       assert.equal(r.status, 200);
-      assert.equal(r.body.data.granted.length, 1, '只有预留名额带奖励');
+      assert.deepEqual(r.body.data, { round_id: hRound, failed: [], pending: 0 }, '非超管的发放回执不列成功名单、不含余额');
+      assert.equal(await balanceOf(db, kid), 88 + 50, '预留奖励照常发放');
+      r = await call(operatorId, 'GET', `/gala/rounds?event_id=${hid}`);
+      assert.ok(r.body.data[0].winners.every(noPayout), '运营管理员的轮次列表不含逐人发放信息');
+      assert.equal(r.body.data[0].draw_count, 3);
+      r = await call(superId, 'GET', `/gala/rounds?event_id=${hid}`);
+      assert.equal(r.body.data[0].winners.find((w) => w.is_reserved === 1).awarded, 1);
+      assert.ok(!JSON.stringify(r.body).includes('balance'), '轮次接口不返回余额');
       console.log('✓ HTTP：预留接口仅超管可用，非超管返回中不暴露预留信息');
     } finally {
       server.close();

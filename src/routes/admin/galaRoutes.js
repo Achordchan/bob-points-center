@@ -20,6 +20,7 @@ import {
   listGalaRounds,
   removeGalaParticipant,
   serializeDrawResult,
+  serializeGrantResult,
   updateGalaEvent,
   updateGalaPool,
 } from '../../services/galaService.js';
@@ -154,12 +155,16 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.post('/gala/rounds/grant', requireAdminSession(), handle(async (req, res, db) => {
-    const data = await grantGalaRound(db, { roundId: req.body?.round_id });
-    for (const g of data.granted) {
+    const result = await grantGalaRound(db, { roundId: req.body?.round_id });
+    for (const g of result.granted) {
       publishMallRealtimeEvent('balance_changed', { userid: g.userid, reason: 'gala_award' });
     }
-    publishMallRealtimeEvent('gala_changed', { round_id: data.round_id, reason: 'round_granted' });
-    res.json({ ok: true, data });
+    // 还有未发放的记录（奖池不足等）时不能宣布整轮已发完，只通知刷新。
+    publishMallRealtimeEvent('gala_changed', {
+      round_id: result.round_id,
+      reason: result.pending === 0 ? 'round_granted' : 'round_grant_partial',
+    });
+    res.json({ ok: true, data: serializeGrantResult(result, { includeReserved: isSuper(req) }) });
   }));
 
   router.get('/gala/reserved', requireAdminSession(), handle(async (req, res, db) => {
