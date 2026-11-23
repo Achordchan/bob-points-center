@@ -214,3 +214,14 @@ test('年会备份：金额精度、预留标记取值、已发放凭据与错�
   missed.gala_reserved_slots[0].round_no = 1;
   assert.ok(findGalaFundingErrors(missed).some((e) => e.includes('已经抽过')));
 });
+
+test('年会备份：标识符必须是安全范围内的正整数', () => {
+  const snap = {
+    gala_events: [{ id: '9007199254740993', total_budget: 0 }, { id: '9007199254740992', total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: '9007199254740993', is_reserved: 0, budget: 1, spent: 0 }],
+    gala_participants: [], gala_rounds: [], gala_round_winners: [], gala_reserved_slots: [],
+  };
+  const errors = findGalaFundingErrors(snap);
+  assert.ok(errors.some((e) => e.startsWith('gala_events#9007199254740993') && e.includes('id=')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.startsWith('gala_pools#1') && e.includes('event_id=')), errors.join('\n'));
+});

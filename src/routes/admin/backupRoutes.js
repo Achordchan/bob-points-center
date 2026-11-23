@@ -103,6 +103,17 @@ export function findGalaFundingErrors(backupData) {
       }
     }
   }
+  // 标识符同样必须是安全整数：校验里用 Number 做键，超出安全范围的不同 ID 会被当成同一个，
+  // 而数据库会按原值插入，导致校验通过的引用关系和实际写入的不是一回事。服务端返回 ID 时也按 Number 序列化。
+  const ID_FIELDS = ['id', 'event_id', 'pool_id', 'round_id', 'used_round_id', 'ledger_id'];
+  for (const t of GALA_BACKUP_TABLES) {
+    for (const row of asList(backupData?.[t.name])) {
+      for (const f of ID_FIELDS) {
+        if (row?.[f] == null) continue;
+        if (!safeInt(row[f]) || Number(row[f]) <= 0) errors.push(`${t.name}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的正整数`);
+      }
+    }
+  }
   for (const table of ['gala_pools', 'gala_round_winners']) {
     for (const row of asList(backupData?.[table])) {
       if (row?.is_reserved != null && ![0, 1, '0', '1'].includes(row.is_reserved)) {
@@ -2505,6 +2516,20 @@ export function registerAdminBackupRoutes(router) {
                 }
               }
               report[table.name] = count;
+            }
+            // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水：
+            // 合并后逐条核对，指向的流水若存在，ref_id 必须正是这条中奖记录。
+            const winnerIds = (requireArray('gala_round_winners') || []).map((r) => Number(r?.id)).filter((n) => n > 0);
+            if (winnerIds.length) {
+              const mismatched = await tx.all(
+                `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+                  WHERE w.id = ANY(?::bigint[]) AND l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
+                  ORDER BY w.id LIMIT 20`,
+                [winnerIds],
+              );
+              if (mismatched.length) {
+                throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
+              }
             }
           }
         }

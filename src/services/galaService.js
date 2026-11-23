@@ -255,9 +255,9 @@ export async function getGalaEventDetail(db, { eventId, includeReserved = false 
   );
   const counts = await db.get(
     `SELECT
-       (SELECT COUNT(*) FROM (${PARTICIPANTS_WITH_RESERVED_SQL}) x) AS participants,
+       (SELECT COUNT(*) FROM gala_participants WHERE event_id = ?) AS participants,
        (SELECT COUNT(*) FROM gala_rounds WHERE event_id = ?) AS rounds`,
-    [id, id, id],
+    [id, id],
   );
   const visiblePools = pools.map(serializePool);
   const publicPools = visiblePools.filter((p) => p.is_reserved === 0);
@@ -381,26 +381,16 @@ export async function removeGalaParticipant(db, { eventId, userid }) {
   return { removed: r.changes };
 }
 
-// 预留对象（未取消的预留名额）即使不在名单表里，也作为参与者列出：
-// 否则中奖名单里出现一个“不在参与名单上的人”，就直接暴露了谁是预留对象。
-// 名单表本身不变，所以被预留的人依旧不会进入普通抽签。
-const PARTICIPANTS_WITH_RESERVED_SQL = `
-  SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at, 0 AS is_reserved
-    FROM gala_participants p
-   WHERE p.event_id = ?
-  UNION ALL
-  SELECT s.userid, MAX(COALESCE(NULLIF(u.name, ''), s.userid)) AS name_snapshot, NULL AS table_no,
-         'admin' AS source, MIN(s.created_at) AS joined_at, 1 AS is_reserved
-    FROM gala_reserved_slots s
-    JOIN users u ON u.userid = s.userid
-   WHERE s.event_id = ? AND s.status <> 'cancelled'
-     AND NOT EXISTS (SELECT 1 FROM gala_participants p2 WHERE p2.event_id = s.event_id AND p2.userid = s.userid)
-   GROUP BY s.userid`;
-
 export async function listGalaParticipants(db, { eventId, includeReserved = false }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const rows = await db.all(`${PARTICIPANTS_WITH_RESERVED_SQL} ORDER BY joined_at, userid`, [id, id]);
+  const rows = await db.all(
+    `SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at,
+            EXISTS (SELECT 1 FROM gala_reserved_slots s
+                     WHERE s.event_id = p.event_id AND s.userid = p.userid AND s.status <> 'cancelled') AS reserved
+       FROM gala_participants p WHERE p.event_id = ? ORDER BY p.id`,
+    [id],
+  );
   return rows.map((r) => {
     const out = {
       userid: r.userid,
@@ -409,7 +399,7 @@ export async function listGalaParticipants(db, { eventId, includeReserved = fals
       source: r.source,
       joined_at: Number(r.joined_at),
     };
-    if (includeReserved) out.is_reserved = Number(r.is_reserved) === 1 ? 1 : 0;
+    if (includeReserved) out.is_reserved = r.reserved === true || Number(r.reserved) === 1 ? 1 : 0;
     return out;
   });
 }
@@ -474,12 +464,24 @@ export async function drawGalaRound(db, {
     );
     // 预留名额占本轮一个名额：抽 N 人时普通抽 N-1 人，再加上预留对象，总数仍是 N。
     // 这样操作者和大屏看到的人数与请求一致，看不出本轮有预留。奖励仍从预留奖池出，不占员工预算。
-    const slot = await tx.get(
-      `SELECT s.*, u.name AS user_name FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
+    const pendingSlot = await tx.get(
+      `SELECT s.*, u.name AS user_name,
+              EXISTS (SELECT 1 FROM gala_participants p WHERE p.event_id = s.event_id AND p.userid = s.userid) AS enrolled
+         FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
         WHERE s.event_id = ? AND s.segment = ? AND s.round_no = ? AND s.status = 'pending'
         FOR UPDATE OF s`,
       [id, seg, roundNo],
     );
+    // 预留对象已被移出名单（例如被普通管理员删掉）时不再生效：否则会出现一个不在名单上的中奖人，
+    // 直接暴露身份。该名额作废，超管在预留列表里能看到。
+    let slot = pendingSlot;
+    if (pendingSlot && !pendingSlot.enrolled) {
+      await tx.run(
+        `UPDATE gala_reserved_slots SET status = 'cancelled', note = COALESCE(note, '') || ?, updated_at = unixepoch() WHERE id = ?`,
+        ['（抽签时已不在参与名单，自动作废）', pendingSlot.id],
+      );
+      slot = null;
+    }
     const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
 
     if (picked.length === 0 && !slot) throw new GalaError('no_eligible_participants', 409);
@@ -542,7 +544,9 @@ export async function listGalaRounds(db, { eventId, includeReserved = false, lim
   // 按 id 倒序分页：传上一页最后一轮的 id 作为 before_id 即可取更早的轮次。
   const before = beforeId === null || beforeId === undefined || beforeId === '' ? null : toPositiveId(beforeId);
   if (beforeId !== null && beforeId !== undefined && beforeId !== '' && !before) throw new GalaError('invalid_before_id');
-  const pageSize = Math.min(Math.max(Number(limit) || 200, 1), 200);
+  const rawLimit = limit === null || limit === undefined || limit === '' ? 200 : Number(limit);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1) throw new GalaError('invalid_limit');
+  const pageSize = Math.min(rawLimit, 200);
   const rounds = before
     ? await db.all('SELECT * FROM gala_rounds WHERE event_id = ? AND id < ? ORDER BY id DESC LIMIT ?', [id, before, pageSize])
     : await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, pageSize]);
@@ -718,6 +722,14 @@ export async function createGalaReservedSlot(db, { eventId, segment, roundNo, us
       `INSERT INTO gala_reserved_slots(event_id, segment, round_no, userid, pool_id, amount, note, created_by)
        VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       [id, seg, no, uid, pid, value, cleanText(note, 200) || null, actor.userid || null],
+    );
+    // 预留对象作为普通参与者真实写入名单：中奖时一定在名单上，名单的增删、计数对所有人都一致，
+    // 看不出谁是预留对象。普通抽签照样排除有未取消名额的人。
+    await tx.run(
+      `INSERT INTO gala_participants(event_id, userid, name_snapshot, source)
+       SELECT ?, u.userid, COALESCE(NULLIF(u.name, ''), u.userid), 'admin' FROM users u WHERE u.userid = ?
+       ON CONFLICT (event_id, userid) DO NOTHING`,
+      [id, uid],
     );
     return serializeSlot(row);
   });

@@ -21,6 +21,8 @@ import {
   updateGalaEvent,
   updateGalaPool,
   cancelGalaReservedSlot,
+  listGalaParticipants,
+  removeGalaParticipant,
   serializeGrantResult,
   GALA_SEGMENTS,
 } from '../src/services/galaService.js';
@@ -353,6 +355,54 @@ async function main() {
       assert.deepEqual(ids, [uid(1), uid(2), uid(3), uid(4)].sort(), '被预留的人不应在并发取消时两头落空');
     }
     console.log('✓ 取消预留名额与抽签串行，不会漏掉被预留的人');
+
+    // 预留对象是真实参与者：名单增删、计数与普通人一致；被移出名单后名额自动作废；重置后不再出现在名单
+    {
+      const evR = await createGalaEvent(db, { title: `${PREFIX} 名单`, totalBudget: 0 });
+      await addGalaParticipants(db, { eventId: evR.id, userids: [uid(1), uid(2), uid(3)] });
+      await createGalaReservedSlot(db, { eventId: evR.id, segment: 'lottery', roundNo: 1, userid: uid(10) });
+      await createGalaReservedSlot(db, { eventId: evR.id, segment: 'lottery', roundNo: 2, userid: uid(11) });
+      const pub = await listGalaParticipants(db, { eventId: evR.id });
+      assert.deepEqual(pub.map((x) => x.userid).sort(), [uid(1), uid(2), uid(3), uid(10), uid(11)].sort());
+      assert.ok(pub.every((x) => !('is_reserved' in x)));
+      const sup = await listGalaParticipants(db, { eventId: evR.id, includeReserved: true });
+      assert.deepEqual(sup.filter((x) => x.is_reserved === 1).map((x) => x.userid).sort(), [uid(10), uid(11)].sort());
+      const detail = await getGalaEventDetail(db, { eventId: evR.id });
+      assert.equal(detail.participant_count, 5);
+
+      const rm = await removeGalaParticipant(db, { eventId: evR.id, userid: uid(10) });
+      assert.equal(rm.removed, 1, '移除预留对象与移除普通人结果一致');
+      assert.ok(!(await listGalaParticipants(db, { eventId: evR.id })).some((x) => x.userid === uid(10)));
+      const d1 = await drawGalaRound(db, { eventId: evR.id, segment: 'lottery', drawCount: 2 });
+      assert.ok(d1.winners.every((w) => w.userid !== uid(10)), '已移出名单的预留对象不会中奖');
+      assert.equal(d1.winners.length, 2);
+      const s10 = await db.get('SELECT status FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evR.id, uid(10)]);
+      assert.equal(s10.status, 'cancelled');
+
+      const d2 = await drawGalaRound(db, { eventId: evR.id, segment: 'lottery', drawCount: 1, excludePreviousWinners: false });
+      assert.deepEqual(d2.winners.map((w) => w.userid), [uid(11)]);
+      await db.transaction((tx) => purgeUserBusinessData(tx, [uid(11)]));
+      const afterReset = await listGalaParticipants(db, { eventId: evR.id, includeReserved: true });
+      assert.ok(!afterReset.some((x) => x.userid === uid(11)), '重置后不再出现在名单里');
+      assert.equal((await getGalaEventDetail(db, { eventId: evR.id })).participant_count, afterReset.length);
+
+      await assert.rejects(listGalaRounds(db, { eventId: evR.id, limit: 1.5 }), (e) => e.code === 'invalid_limit');
+      console.log('✓ 预留对象是真实参与者：增删一致、移出即作废、重置后消失');
+    }
+
+    // 迁移：enabled_segments 列晚于活动表引入时，已有活动回填为全部环节启用
+    {
+      const old = await createGalaEvent(db, { title: `${PREFIX} 迁移`, totalBudget: 0, enabledSegments: ['lottery'] });
+      await db.exec('ALTER TABLE gala_events DROP COLUMN enabled_segments');
+      await initDb();
+      const row = await db.get('SELECT enabled_segments FROM gala_events WHERE id = ?', [old.id]);
+      assert.deepEqual(JSON.parse(row.enabled_segments), Object.keys(GALA_SEGMENTS));
+      const fresh = await createGalaEvent(db, { title: `${PREFIX} 迁移后`, totalBudget: 0, enabledSegments: [] });
+      await initDb();
+      const freshRow = await db.get('SELECT enabled_segments FROM gala_events WHERE id = ?', [fresh.id]);
+      assert.deepEqual(JSON.parse(freshRow.enabled_segments), [], '有意设为空的活动不被回填');
+      console.log('✓ 迁移：已有活动回填为全部环节启用，之后设为空的不受影响');
+    }
 
     // 环节停用后不能抽签
     await updateGalaEvent(db, { eventId: event.id, enabledSegments: ['lottery', 'giveaway'] });
