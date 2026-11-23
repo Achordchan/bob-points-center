@@ -58,6 +58,7 @@ const components = {
         spent: { type: 'integer', description: 'budget_below_spent：预留奖池实际支出（仅超级管理员接口）' },
         min_budget: { type: 'integer', description: 'budget_below_spent：预留奖池最低可设预算 = 实际支出 + 已抽中待发的预留奖励（仅超级管理员接口）' },
         next_round_no: { type: 'integer', description: 'round_no_changed：本环节下一轮的轮次号' },
+        index: { type: 'integer', description: 'invalid_userid（名单导入）：userids 中第一项无效值的位置（从 0 开始）' },
         pools_total: { type: 'integer' },
         max_draw_count: { type: 'integer', description: 'not_enough_participants：按公开规则本轮最多可抽人数' },
       },

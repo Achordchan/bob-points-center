@@ -651,9 +651,12 @@ async function main() {
       const rm = await removeGalaParticipant(db, { eventId: evR.id, userid: uid(10) });
       assert.equal(rm.removed, 1, '移除预留对象与移除普通人结果一致');
       assert.ok(!(await listGalaParticipants(db, { eventId: evR.id })).some((x) => x.userid === uid(10)));
+      // 移出时名额已在同一事务里作废，之后重新入名单也不会恢复
+      assert.equal((await db.get('SELECT status FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evR.id, uid(10)])).status, 'cancelled');
+      await addGalaParticipants(db, { eventId: evR.id, userids: [uid(10)] });
       await addFiller(db, evR.id);
       const d1 = await drawGalaRound(db, { eventId: evR.id, segment: 'lottery', drawCount: 2 });
-      assert.ok(d1.winners.every((w) => w.userid !== uid(10)), '已移出名单的预留对象不会中奖');
+      assert.ok(d1.winners.every((w) => w.is_reserved !== 1), '移出后重新入名单，旧名额不再兑现');
       assert.equal(d1.winners.length, 2);
       const s10 = await db.get('SELECT status FROM gala_reserved_slots WHERE event_id = ? AND userid = ?', [evR.id, uid(10)]);
       assert.equal(s10.status, 'cancelled');
@@ -669,7 +672,7 @@ async function main() {
         // eslint-disable-next-line no-await-in-loop
         await assert.rejects(listGalaRounds(db, { eventId: evR.id, limit }), (e) => e.code === 'invalid_limit', String(limit));
       }
-      console.log('✓ 预留对象是真实参与者：增删一致、移出即作废、重置后消失');
+      console.log('✓ 预留对象是真实参与者：增删一致、移出即作废（重新入名单也不恢复）、重置后消失');
     }
 
     // 单人发币轮：中奖的是普通人还是预留对象，非超管看到的发放状态完全一样；预留奖励发放失败也一样

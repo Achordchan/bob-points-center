@@ -210,6 +210,23 @@ async function enterGalaWrite(tx, generation, changedCode = 'round_changed') {
 }
 
 /** 均匀随机抽取 count 个（部分 Fisher-Yates），使用 CSPRNG。 */
+// 从 [0, n) 里均匀抽 count 个不重复的位置（稀疏 Fisher–Yates，只记录被交换过的位置）。
+// 与 pickRandom 对 [0..n) 的结果逐位相同，但不分配长度为 n 的数组。
+export function samplePositions(n, count, randomInt = crypto.randomInt) {
+  const total = Math.max(0, Math.floor(Number(n) || 0));
+  const take = Math.min(Math.max(0, count), total);
+  const swapped = new Map();
+  const out = [];
+  for (let i = 0; i < take; i += 1) {
+    const j = i + randomInt(total - i);
+    const vi = swapped.has(i) ? swapped.get(i) : i;
+    const vj = swapped.has(j) ? swapped.get(j) : j;
+    swapped.set(j, vi);
+    out.push(vj);
+  }
+  return out;
+}
+
 export function pickRandom(list, count, randomInt = crypto.randomInt) {
   const arr = [...list];
   const take = Math.min(Math.max(0, count), arr.length);
@@ -521,9 +538,11 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   // 字符串等错误类型不能被当成“没给名单”而落到全员导入上。
   if (userids !== undefined && userids !== null && !Array.isArray(userids)) throw new GalaError('invalid_userids');
   if (allActiveDingtalk && Array.isArray(userids) && userids.length > 0) throw new GalaError('ambiguous_participant_source');
-  const list = allActiveDingtalk
-    ? []
-    : [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanUserid(x)).filter(Boolean))];
+  // 名单里任何一项无效（空值、空串、对象、数组等）都拒绝整批：静默丢弃会写入部分名单，回执里也看不出输入有误。
+  const cleaned = (Array.isArray(userids) ? userids : []).map((x) => cleanUserid(x));
+  const badIndex = allActiveDingtalk ? -1 : cleaned.findIndex((x) => !x);
+  if (badIndex >= 0) throw new GalaError('invalid_userid', 400, { index: badIndex });
+  const list = allActiveDingtalk ? [] : [...new Set(cleaned)];
   if (!allActiveDingtalk && list.length === 0) throw new GalaError('userids_required');
   if (list.length > 2000) throw new GalaError('too_many_userids');
   // 先锁活动行再写名单，与抽签、创建预留名额、移出名单的加锁顺序一致：
@@ -580,7 +599,17 @@ export async function removeGalaParticipant(db, { eventId, userid, expectedVersi
   // 与抽签串行：抽签持有活动行锁期间，名单不会在“公开人数检查”和“候选人查询”之间变化。
   return await inTx(db, async (tx) => {
     await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
-    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, cleanUserid(userid)]);
+    const uid = cleanUserid(userid);
+    const r = await tx.run('DELETE FROM gala_participants WHERE event_id = ? AND userid = ?', [id, uid]);
+    // 移出即作废：同一事务里取消此人在本活动的待用名额。否则之后重新导入（如“导入全部在册员工”）
+    // 让此人回到名单，旧名额又会在预定轮次兑现。返回值不提名额（非超管也能移出名单），不暴露预留信息。
+    if (r.changes > 0) {
+      await tx.run(
+        `UPDATE gala_reserved_slots SET status = 'cancelled', note = COALESCE(note, '') || '（对象已移出名单，自动作废）', updated_at = unixepoch()
+          WHERE event_id = ? AND userid = ? AND status = 'pending'`,
+        [id, uid],
+      );
+    }
     return { removed: r.changes };
   }, expectedVersion);
 }
@@ -773,8 +802,9 @@ export async function drawGalaRound(db, {
       slot = null;
     }
     // 普通候选人在预留名额处理完之后再查：刚作废的名额对应的人此时不再被排除，和其他人一样参与本轮抽签。
-    const eligibleRows = await tx.all(
-      `SELECT p.userid, p.name_snapshot
+    // 只把命中的候选人传回来：先在库里数合格人数，在 [0, n) 里抽不重复的位置，再按稳定顺序（p.id）取这些位置的行。
+    // 大名单（导入全部在册员工）时不必每轮把所有人的 userid、姓名排序后传回，也不复制整份名单。
+    const eligibleFilter = `
          FROM gala_participants p
         WHERE p.event_id = ?
           AND NOT EXISTS (
@@ -782,11 +812,18 @@ export async function drawGalaRound(db, {
              WHERE r.event_id = p.event_id AND r.userid = p.userid AND r.status <> 'cancelled')
           ${excludePreviousWinners ? `AND NOT EXISTS (
             SELECT 1 FROM gala_round_winners w JOIN gala_rounds gr ON gr.id = w.round_id
-             WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}
-        ORDER BY p.id`,
-      excludePreviousWinners ? [id, seg] : [id],
+             WHERE w.event_id = p.event_id AND w.userid = p.userid AND gr.segment = ?)` : ''}`;
+    const eligibleParams = excludePreviousWinners ? [id, seg] : [id];
+    const eligibleCount = Number((await tx.get(`SELECT COUNT(*) AS n ${eligibleFilter}`, eligibleParams))?.n || 0);
+    const positions = samplePositions(eligibleCount, slot ? count - 1 : count, randomInt);
+    const hitRows = positions.length === 0 ? [] : await tx.all(
+      `SELECT userid, name_snapshot, rn FROM (
+         SELECT p.userid, p.name_snapshot, row_number() OVER (ORDER BY p.id) - 1 AS rn ${eligibleFilter}
+       ) x WHERE rn = ANY(?::bigint[])`,
+      [...eligibleParams, positions],
     );
-    const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
+    const byPos = new Map(hitRows.map((row) => [Number(row.rn), row]));
+    const picked = positions.map((pos) => byPos.get(pos)).filter(Boolean);
 
     // 公开准入已留出 GALA_DRAW_HEADROOM 的余量（不少于预留上限），这里理论上不会触发；
     // 作为兜底仍拒绝，且不带任何人数信息。
@@ -837,7 +874,7 @@ export async function drawGalaRound(db, {
     }
     // 仍持有恢复互斥的共享锁，读到的代数就是这一轮所在数据的代数。
     const generation = await readGalaVersion(tx);
-    return { round, winners: inserted, eligibleCount: eligibleRows.length, generation };
+    return { round, winners: inserted, eligibleCount, generation };
   }, expectedVersion);
 }
 

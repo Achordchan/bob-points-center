@@ -49,22 +49,51 @@ export function requiresGalaTables(meta) {
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
 }
 
-// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数：逐张年会表核对，返回错误描述列表。
+// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数：逐张核对年会表和流水，返回错误描述列表。
 // 行数缺失或不是非负整数同样视为不一致。旧格式备份不检查。
+// 流水一并核对：中奖记录的付款凭据在流水里，流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态。
+// 导出前已重置的用户不受影响：那时记录的行数本来就不含已删流水。
 export function findGalaRowCountErrors(backupData, meta) {
   if (meta?.galaFormat == null) return [];
   const listed = meta?.tables && typeof meta.tables === 'object' ? meta.tables : {};
   const errors = [];
-  for (const t of GALA_BACKUP_TABLES) {
-    const expected = listed[t.name];
-    const actual = Array.isArray(backupData?.[t.name]) ? backupData[t.name].length : null;
+  for (const name of [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger']) {
+    const expected = listed[name];
+    const actual = Array.isArray(backupData?.[name]) ? backupData[name].length : null;
     if (!Number.isSafeInteger(expected) || expected < 0) {
-      errors.push(`${t.name} 缺少导出时的行数记录`);
+      errors.push(`${name} 缺少导出时的行数记录`);
     } else if (actual !== expected) {
-      errors.push(`${t.name} 有 ${actual ?? 0} 行，导出时为 ${expected} 行`);
+      errors.push(`${name} 有 ${actual ?? 0} 行，导出时为 ${expected} 行`);
     }
   }
   return errors;
+}
+
+// 发币轮的正数奖励已全部到账、却仍是 drawn：旧版本在最后一笔到账后、发放收尾前退出就会留下这种数据。
+// 导入时补成 granted（完成时间取最后一笔到账时间，没有则取轮次创建时间），与在线“最后一笔到账即完成”一致。
+// 无币轮不动。原地改写行对象，返回补齐的轮次数。
+export function completeFinishedCoinRounds(backupData) {
+  const rounds = Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [];
+  const winners = Array.isArray(backupData?.gala_round_winners) ? backupData.gala_round_winners : [];
+  const pending = new Set();
+  const lastPaid = new Map();
+  for (const w of winners) {
+    const key = Number(w?.round_id);
+    if (w?.awarded_at == null) {
+      if (Number(w?.amount) > 0) pending.add(key);
+    } else if (Number.isFinite(Number(w.awarded_at))) {
+      lastPaid.set(key, Math.max(lastPaid.get(key) || 0, Number(w.awarded_at)));
+    }
+  }
+  let changed = 0;
+  for (const r of rounds) {
+    if (!r || typeof r !== 'object' || r.prize_type !== 'coin' || (r.status ?? 'drawn') !== 'drawn' || r.granted_at != null) continue;
+    if (pending.has(Number(r.id))) continue;
+    r.status = 'granted';
+    r.granted_at = lastPaid.get(Number(r.id)) ?? (r.created_at ?? Math.floor(Date.now() / 1000));
+    changed += 1;
+  }
+  return changed;
 }
 
 // 写库前整理年会行，返回错误描述列表。当前格式的备份必须带全部列（见下方）；
@@ -443,6 +472,9 @@ export function findGalaFundingErrors(backupData) {
     const pending = pendingCount.get(Number(r?.id)) || 0;
     if (status === 'granted' && pending > 0) {
       errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${pending} 条奖励待发`);
+    } else if (status === 'drawn' && r?.prize_type === 'coin' && pending === 0) {
+      // 反方向：发币轮已没有待发奖励却仍是 drawn，恢复后会一直显示未发完。导入时先由 completeFinishedCoinRounds 补齐。
+      errors.push(`gala_rounds#${r?.id} 是发币轮且奖励已全部到账，却未标记整轮发放完成`);
     }
   }
   // 员工奖池：实际支出 + 待发普通奖励不能超过已分配额（在线时普通奖励都出自已分配的名额，这一关系恒成立）。
@@ -1132,6 +1164,8 @@ export function registerAdminBackupRoutes(router) {
           });
         }
       }
+      // 奖励已全部到账却仍是 drawn 的发币轮补成完成（见 completeFinishedCoinRounds）。
+      completeFinishedCoinRounds(backupData);
       // 引用与资金关系校验（见 findGalaFundingErrors）：子记录必须引用备份内同一活动的父记录，
       // 未发放的正数奖励必须挂在类型一致的奖池上，员工奖池不超活动总预算，发放流水与幂等闸门一致。
       {

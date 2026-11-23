@@ -2,7 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matchPathPermission } from '../../src/services/adminPermissionService.js';
 import { GALA_MAX_RESERVED_SLOTS, pickRandom, serializeGrantResult } from '../../src/services/galaService.js';
-import { findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
+import { completeFinishedCoinRounds, findGalaFundingErrors } from '../../src/routes/admin/backupRoutes.js';
+
+// 与导入流程相同：先补齐“奖励已全部到账”的发币轮，再做资金校验。
+function importCheck(data) {
+  completeFinishedCoinRounds(data);
+  return findGalaFundingErrors(data);
+}
 
 test('年会预留名额与预留奖池只允许超级管理员', () => {
   for (const [m, p] of [
@@ -182,28 +188,28 @@ test('年会备份逐笔核对：流水收款人/金额/ledger_id、重复流水
       { id: 102, userid: 'b', delta: 10, ref_id: 'GALA_W2', reason: '年会奖励·测试' },
     ],
   });
-  assert.deepEqual(findGalaFundingErrors(ok()), []);
+  assert.deepEqual(importCheck(ok()), []);
 
   const wrongPayee = ok();
   wrongPayee.ledger[1].userid = 'a';
-  assert.ok(findGalaFundingErrors(wrongPayee).some((e) => e.includes('收款人或金额')));
+  assert.ok(importCheck(wrongPayee).some((e) => e.includes('收款人或金额')));
 
   // 出处以中奖记录的 ledger_id 为准：已发放并引用 101 的中奖记录，另一条形似的流水只是普通入账，不会再发一次
   const dupLedger = ok();
   dupLedger.ledger.push({ id: 103, userid: 'a', delta: 10, ref_id: 'GALA_W1', reason: '年会奖励·测试' });
-  assert.deepEqual(findGalaFundingErrors(dupLedger), []);
+  assert.deepEqual(importCheck(dupLedger), []);
 
   const wrongLink = ok();
   wrongLink.gala_round_winners[0].ledger_id = 102;
-  assert.ok(findGalaFundingErrors(wrongLink).some((e) => e.includes('ledger_id')));
+  assert.ok(importCheck(wrongLink).some((e) => e.includes('ledger_id')));
 
   const underSpent = ok();
   underSpent.gala_pools[0].spent = 0;
-  assert.ok(findGalaFundingErrors(underSpent).some((e) => e.startsWith('gala_pools#1') && e.includes('支出')));
+  assert.ok(importCheck(underSpent).some((e) => e.startsWith('gala_pools#1') && e.includes('支出')));
 
   const offRound = ok();
   offRound.gala_round_winners.push({ id: 3, round_id: 1, event_id: 1, userid: 'c', amount: 100, pool_id: 2, awarded_at: null });
-  assert.ok(findGalaFundingErrors(offRound).some((e) => e.startsWith('gala_round_winners#3') && e.includes('轮次')));
+  assert.ok(importCheck(offRound).some((e) => e.startsWith('gala_round_winners#3') && e.includes('轮次')));
 });
 
 test('年会备份：金额精度、预留标记取值、已发放凭据与错过轮次的待用名额', () => {
@@ -216,23 +222,23 @@ test('年会备份：金额精度、预留标记取值、已发放凭据与错�
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, amount: 5, status: 'pending' }],
     ledger: [],
   });
-  assert.deepEqual(findGalaFundingErrors(ok()), []);
+  assert.deepEqual(importCheck(ok()), []);
 
   const big = ok();
   big.gala_pools[0].budget = '9007199254740993';
-  assert.ok(findGalaFundingErrors(big).some((e) => e.includes('安全范围')));
+  assert.ok(importCheck(big).some((e) => e.includes('安全范围')));
 
   const flag = ok();
   flag.gala_round_winners[0].is_reserved = 2;
-  assert.ok(findGalaFundingErrors(flag).some((e) => e.includes('is_reserved=2')));
+  assert.ok(importCheck(flag).some((e) => e.includes('is_reserved=2')));
 
   const noReceipt = ok();
   noReceipt.gala_round_winners[0].ledger_id = null;
-  assert.ok(findGalaFundingErrors(noReceipt).some((e) => e.includes('没有 ledger_id')));
+  assert.ok(importCheck(noReceipt).some((e) => e.includes('没有 ledger_id')));
 
   const missed = ok();
   missed.gala_reserved_slots[0].round_no = 1;
-  assert.ok(findGalaFundingErrors(missed).some((e) => e.includes('已经抽过')));
+  assert.ok(importCheck(missed).some((e) => e.includes('已经抽过')));
 });
 
 test('年会备份：标识符必须是安全范围内的正整数', () => {
@@ -416,12 +422,12 @@ test('年会备份：已发放的正数奖励和已使用名额同样必须挂�
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 8, pool_id: 2, status: 'used', used_round_id: 1 }],
     ledger: [{ id: 9, userid: 'k', delta: 8, ref_id: 'GALA_W1', reason: '年会奖励·测试' }],
   });
-  assert.deepEqual(findGalaFundingErrors(ok()), []);
+  assert.deepEqual(importCheck(ok()), []);
   // 已发放的预留奖励和对应名额都去掉奖池：这笔钱不在任何预算里
   const paid = ok();
   paid.gala_round_winners[0].pool_id = null;
   paid.gala_reserved_slots[0].pool_id = null;
-  const errors = findGalaFundingErrors(paid);
+  const errors = importCheck(paid);
   assert.ok(errors.some((e) => e.startsWith('gala_round_winners#1') && e.includes('缺少同一活动的预留奖池')), errors.join('\n'));
   assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('缺少同一活动的预留奖池')), errors.join('\n'));
   // 已取消的名额不再要求奖池
@@ -436,8 +442,8 @@ test('年会备份：已发放的正数奖励和已使用名额同样必须挂�
   const noPool = structuredClone(cancelled);
   noPool.gala_reserved_slots[0].status = 'pending';
   noPool.gala_reserved_slots[0].amount = 0;
-  assert.ok(findGalaFundingErrors(noPool).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('缺少同一活动的预留奖池')));
-  assert.deepEqual(findGalaFundingErrors(cancelled), []);
+  assert.ok(importCheck(noPool).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('缺少同一活动的预留奖池')));
+  assert.deepEqual(importCheck(cancelled), []);
 });
 
 test('年会备份：已使用名额缺少预留中奖记录时，本轮必须空出一个位置', () => {
@@ -451,13 +457,13 @@ test('年会备份：已使用名额缺少预留中奖记录时，本轮必须�
     ledger: [],
   });
   // 预留记录被用户重置删掉、位置空着：合法
-  assert.deepEqual(findGalaFundingErrors(snap([])), []);
+  assert.deepEqual(importCheck(snap([])), []);
   // 中奖记录不在时仍按关联轮次核对名额金额（本轮单价 10）
   const wrongAmount = snap([]);
   wrongAmount.gala_reserved_slots[0].amount = 8;
-  assert.ok(findGalaFundingErrors(wrongAmount).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('奖励不一致')));
+  assert.ok(importCheck(wrongAmount).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('奖励不一致')));
   // 单人轮：名额已使用，唯一的位置却是另一个普通中奖人
-  const errors = findGalaFundingErrors(snap([{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null }]));
+  const errors = importCheck(snap([{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null }]));
   assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('名额已被占满')), errors.join('\n'));
 });
 
@@ -872,7 +878,8 @@ test('当前格式覆盖导入：年会表行数必须与导出记录一致', as
   const data = Object.fromEntries(GALA_BACKUP_TABLES.map((t) => [t.name, []]));
   data.gala_events = [{ id: 1 }];
   data.gala_participants = [{ id: 1 }, { id: 2 }];
-  const tables = Object.fromEntries(GALA_BACKUP_TABLES.map((t) => [t.name, data[t.name].length]));
+  data.ledger = [{ id: 1 }];
+  const tables = Object.fromEntries([...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger'].map((n) => [n, data[n].length]));
   assert.deepEqual(findGalaRowCountErrors(data, { galaFormat: 1, tables }), []);
   // 名单被截成空数组
   const cut = { ...data, gala_participants: [] };
@@ -880,6 +887,8 @@ test('当前格式覆盖导入：年会表行数必须与导出记录一致', as
   // 缺少行数记录
   const { gala_rounds: _omit, ...partial } = tables;
   assert.ok(findGalaRowCountErrors(data, { galaFormat: 1, tables: partial }).some((e) => e.startsWith('gala_rounds')));
+  // 流水被截短同样拒绝
+  assert.ok(findGalaRowCountErrors({ ...data, ledger: [] }, { galaFormat: 1, tables }).some((e) => e.startsWith('ledger')));
   // 旧格式不检查
   assert.deepEqual(findGalaRowCountErrors(cut, { tables }), []);
 });
@@ -913,5 +922,57 @@ test('名单导入与抽签：参数类型不对时拒绝，不猜意图', async
       (e) => e.code === 'invalid_exclude_previous_winners' && e.status === 400,
       String(v),
     );
+  }
+});
+
+test('发币轮奖励已全部到账却仍是 drawn：校验拒绝，导入前补成完成；无币轮不动', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', created_at: 100 },
+      { id: 2, event_id: 1, segment: 'game', round_no: 1, draw_count: 1, prize_type: 'none', amount_each: 0, status: 'drawn', created_at: 100 },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: 300, ledger_id: 9, created_at: 100 },
+      { id: 2, round_id: 2, event_id: 1, userid: 'v', amount: 0, pool_id: null, awarded_at: null, created_at: 100 },
+    ],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  assert.ok(findGalaFundingErrors(snap()).some((e) => e.startsWith('gala_rounds#1') && e.includes('未标记整轮发放完成')));
+  const fixed = snap();
+  assert.equal(completeFinishedCoinRounds(fixed), 1);
+  assert.deepEqual([fixed.gala_rounds[0].status, fixed.gala_rounds[0].granted_at], ['granted', 300]);
+  assert.deepEqual([fixed.gala_rounds[1].status, fixed.gala_rounds[1].granted_at], ['drawn', undefined]);
+  assert.deepEqual(findGalaFundingErrors(fixed), []);
+  // 还有待发的不补
+  const partial = snap();
+  partial.gala_round_winners[0].awarded_at = null;
+  assert.equal(completeFinishedCoinRounds(partial), 0);
+});
+
+test('抽签位置抽样：与对整份名单洗牌逐位相同，且不重复、不越界', async () => {
+  const { samplePositions } = await import('../../src/services/galaService.js');
+  let seed = 7;
+  const rng = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed; };
+  for (const [n, k] of [[1, 1], [5, 5], [50, 7], [1000, 30], [3, 10], [0, 2]]) {
+    const seq = Array.from({ length: Math.min(k, n) }, rng);
+    let i1 = 0;
+    let i2 = 0;
+    const a = samplePositions(n, k, (m) => seq[i1++] % m);
+    const b = pickRandom(Array.from({ length: n }, (_, i) => i), k, (m) => seq[i2++] % m);
+    assert.deepEqual(a, b, `${n}/${k}`);
+    assert.equal(new Set(a).size, a.length);
+    assert.ok(a.every((x) => x >= 0 && x < n));
+  }
+});
+
+test('名单导入：任何一项无效都拒绝整批，不静默丢弃', async () => {
+  const { addGalaParticipants } = await import('../../src/services/galaService.js');
+  for (const bad of [['u1', ''], ['u1', null], ['u1', { id: 1 }], ['u1', ['u2']], ['  ']]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(addGalaParticipants(null, { eventId: 1, userids: bad }), (e) => e.code === 'invalid_userid' && Number.isInteger(e.index), JSON.stringify(bad));
   }
 });
