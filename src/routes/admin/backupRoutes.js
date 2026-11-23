@@ -49,8 +49,9 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_round_winners#${w?.id} 的轮次不存在或不属于同一活动`);
       continue;
     }
-    if (w?.awarded_at == null && Number(w?.amount) > 0 && !poolOk(w?.pool_id, w?.event_id, null)) {
-      errors.push(`gala_round_winners#${w?.id} 未发放奖励 ${w?.amount} 缺少同一活动的奖池`);
+    const reserved = Number(w?.is_reserved) === 1;
+    if (w?.awarded_at == null && Number(w?.amount) > 0 && !poolOk(w?.pool_id, w?.event_id, reserved)) {
+      errors.push(`gala_round_winners#${w?.id} 未发放奖励 ${w?.amount} 缺少同一活动的${reserved ? '预留' : '员工'}奖池`);
     }
   }
   for (const slot of asList(backupData?.gala_reserved_slots)) {
@@ -2328,7 +2329,9 @@ export function registerAdminBackupRoutes(router) {
                   // eslint-disable-next-line no-await-in-loop
                   await execOrThrow(
                     tx,
-                    `INSERT INTO ${table.name}(${table.columns.join(', ')}) VALUES(${placeholders}) ON CONFLICT(id) DO NOTHING`,
+                    // 不吞冲突：预检之后并发写入的同 ID 记录、或备份内部的重复 ID 都必须让整个导入回滚，
+                    // 否则子表会挂到目标库中不相关的活动/奖池/轮次上。
+                    `INSERT INTO ${table.name}(${table.columns.join(', ')}) VALUES(${placeholders})`,
                     table.columns.map((col) => (row[col] === undefined ? (table.defaults?.[col] ?? null) : row[col])),
                     `${table.name}[${i}]`,
                   );

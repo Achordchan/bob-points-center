@@ -535,22 +535,27 @@ async function awardWinner(db, { winnerId, reason }) {
     const claimed = await tx.get(
       `UPDATE gala_round_winners SET awarded_at = unixepoch(), award_error = NULL
         WHERE id = ? AND awarded_at IS NULL AND amount > 0
-        RETURNING id, event_id, userid, name_snapshot, pool_id, amount`,
+        RETURNING id, event_id, userid, name_snapshot, pool_id, amount, is_reserved`,
       [winnerId],
     );
     if (!claimed) return { skipped: true };
     const amount = Number(claimed.amount);
-    // 每一笔正数奖励都必须从同一活动的奖池扣减。抽签与预留名额只会产生这种记录，
-    // 这里再兜底一次，防止残缺或被篡改的备份导入后在预算之外发币。
+    // 每一笔正数奖励都必须从同一活动、且类型一致的奖池扣减：普通中奖扣员工奖池，预留名额扣预留奖池。
+    // 抽签与预留名额只会产生这种记录，这里再兜底一次，防止残缺或被篡改的备份导入后在预算之外发币，
+    // 或把预留奖励记到员工奖池上。
     if (!claimed.pool_id) throw new GalaError('winner_pool_missing', 409);
+    const reservedFlag = Number(claimed.is_reserved) === 1 ? 1 : 0;
     const pool = await tx.get(
       `UPDATE gala_pools SET spent = spent + ?, updated_at = unixepoch()
-        WHERE id = ? AND event_id = ? AND spent + ? <= budget
+        WHERE id = ? AND event_id = ? AND is_reserved = ? AND spent + ? <= budget
         RETURNING id`,
-      [amount, claimed.pool_id, claimed.event_id, amount],
+      [amount, claimed.pool_id, claimed.event_id, reservedFlag, amount],
     );
     if (!pool) {
-      const exists = await tx.get('SELECT 1 AS x FROM gala_pools WHERE id = ? AND event_id = ?', [claimed.pool_id, claimed.event_id]);
+      const exists = await tx.get(
+        'SELECT 1 AS x FROM gala_pools WHERE id = ? AND event_id = ? AND is_reserved = ?',
+        [claimed.pool_id, claimed.event_id, reservedFlag],
+      );
       throw new GalaError(exists ? 'pool_budget_exceeded' : 'winner_pool_missing', 409);
     }
     const granted = await grantBob(tx, {
@@ -673,12 +678,19 @@ export async function listGalaReservedSlots(db, { eventId }) {
 export async function cancelGalaReservedSlot(db, { slotId }) {
   const id = toPositiveId(slotId);
   if (!id) throw new GalaError('invalid_slot_id');
-  const row = await db.get(
-    `UPDATE gala_reserved_slots SET status = 'cancelled', updated_at = unixepoch()
-      WHERE id = ? AND status = 'pending' RETURNING *`,
-    [id],
-  );
-  if (!row) throw new GalaError('slot_not_pending', 409);
-  return serializeSlot(row);
+  // 与创建预留名额、抽签相同：先锁活动行再改名额，避免抽签读完候选人后名额才被取消，
+  // 导致该用户既被排除在普通抽签之外、又拿不到预留名额。
+  return await inTx(db, async (tx) => {
+    const ref = await tx.get('SELECT event_id FROM gala_reserved_slots WHERE id = ?', [id]);
+    if (!ref) throw new GalaError('slot_not_pending', 409);
+    await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [ref.event_id]);
+    const row = await tx.get(
+      `UPDATE gala_reserved_slots SET status = 'cancelled', updated_at = unixepoch()
+        WHERE id = ? AND status = 'pending' RETURNING *`,
+      [id],
+    );
+    if (!row) throw new GalaError('slot_not_pending', 409);
+    return serializeSlot(row);
+  });
 }
 

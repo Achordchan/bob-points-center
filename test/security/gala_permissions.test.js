@@ -72,6 +72,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
       { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
       { id: 2, round_id: 5, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
       { id: 3, round_id: 5, event_id: 10, amount: 50, pool_id: null, awarded_at: 1700000000 },
+      { id: 7, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 1, awarded_at: null },
     ],
     gala_reserved_slots: [
       { id: 1, event_id: 10, amount: 20, pool_id: 2, status: 'pending' },
@@ -83,10 +84,12 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_round_winners.push({ id: 4, round_id: 5, event_id: 10, amount: 50, pool_id: null, awarded_at: null });
   bad.gala_round_winners.push({ id: 5, round_id: 5, event_id: 10, amount: 50, pool_id: 3, awarded_at: null });
   bad.gala_round_winners.push({ id: 6, round_id: 99, event_id: 10, amount: 0, pool_id: null, awarded_at: null });
+  bad.gala_round_winners.push({ id: 8, round_id: 5, event_id: 10, amount: 30, pool_id: 1, is_reserved: 1, awarded_at: null });
+  bad.gala_round_winners.push({ id: 9, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 0, awarded_at: null });
   bad.gala_reserved_slots.push({ id: 3, event_id: 10, amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
-  assert.equal(errors.length, 4, errors.join('\n'));
-  for (const tag of ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_reserved_slots#3']) {
+  assert.equal(errors.length, 6, errors.join('\n'));
+  for (const tag of ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3']) {
     assert.ok(errors.some((e) => e.startsWith(tag)), tag);
   }
 });

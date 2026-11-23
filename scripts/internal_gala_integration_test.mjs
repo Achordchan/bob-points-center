@@ -19,6 +19,7 @@ import {
   listGalaRounds,
   updateGalaEvent,
   updateGalaPool,
+  cancelGalaReservedSlot,
 } from '../src/services/galaService.js';
 import { purgeUserBusinessData } from '../src/services/userDataPurgeService.js';
 
@@ -258,7 +259,42 @@ async function main() {
       const spentB = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pB.id]);
       assert.equal(Number(spentB.spent), 0);
       console.log('✓ 发币兜底：无奖池或跨活动奖池的奖励不会发放');
+
+      // 预留奖励只能扣预留奖池，不能记到员工奖池上
+      const evC = await createGalaEvent(db, { title: `${PREFIX} 预留错池`, totalBudget: 0 });
+      const pC = await createGalaPool(db, { eventId: evC.id, name: '员工池', budget: 1000 });
+      const rC = await createGalaPool(db, { eventId: evC.id, name: '预留池', budget: 1000, reserved: true });
+      await addGalaParticipants(db, { eventId: evC.id, userids: [uid(2)] });
+      await createGalaReservedSlot(db, { eventId: evC.id, segment: 'lottery', roundNo: 1, userid: uid(5), poolId: rC.id, amount: 5 });
+      const dC = await drawGalaRound(db, { eventId: evC.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pC.id, amountEach: 9 });
+      await db.exec(`UPDATE gala_round_winners SET pool_id = ${Number(pC.id)} WHERE round_id = ${Number(dC.round.id)} AND is_reserved = 1`);
+      const gC = await grantGalaRound(db, { roundId: dC.round.id });
+      assert.deepEqual(gC.granted.map((x) => x.userid), [uid(2)]);
+      assert.deepEqual(gC.failed, [{ userid: uid(5), error: 'winner_pool_missing' }]);
+      const spentC = await db.get('SELECT spent FROM gala_pools WHERE id = ?', [pC.id]);
+      assert.equal(Number(spentC.spent), 9, '员工奖池只应扣普通中奖的 9');
+      console.log('✓ 发币兜底：预留奖励不会扣到员工奖池');
     }
+
+    // 取消预留名额与抽签并发：被预留的人要么拿到预留名额，要么回到普通抽签，不能两头落空
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const evX = await createGalaEvent(db, { title: `${PREFIX} 取消并发${i}`, totalBudget: 0 });
+      // eslint-disable-next-line no-await-in-loop
+      await addGalaParticipants(db, { eventId: evX.id, userids: [uid(1), uid(2), uid(3), uid(4)] });
+      // eslint-disable-next-line no-await-in-loop
+      const slot = await createGalaReservedSlot(db, { eventId: evX.id, segment: 'lottery', roundNo: 1, userid: uid(4) });
+      // eslint-disable-next-line no-await-in-loop
+      const [dx, cx] = await Promise.allSettled([
+        drawGalaRound(db, { eventId: evX.id, segment: 'lottery', drawCount: 4 }),
+        cancelGalaReservedSlot(db, { slotId: slot.id }),
+      ]);
+      assert.equal(dx.status, 'fulfilled', String(dx.reason?.code || dx.reason));
+      if (cx.status === 'rejected') assert.equal(cx.reason?.code, 'slot_not_pending');
+      const ids = dx.value.winners.map((w) => w.userid).sort();
+      assert.deepEqual(ids, [uid(1), uid(2), uid(3), uid(4)].sort(), '被预留的人不应在并发取消时两头落空');
+    }
+    console.log('✓ 取消预留名额与抽签串行，不会漏掉被预留的人');
 
     // 环节停用后不能抽签
     await updateGalaEvent(db, { eventId: event.id, enabledSegments: ['lottery', 'giveaway'] });
