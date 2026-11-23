@@ -118,6 +118,10 @@ CREATE TABLE IF NOT EXISTS gala_reserved_slots (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gala_reserved_pending_round
   ON gala_reserved_slots(event_id, segment, round_no)
   WHERE status = 'pending';
+-- 用户重置按 userid 跨活动清理：待发中奖记录、名单、待用名额。
+CREATE INDEX IF NOT EXISTS idx_gala_winners_user_unawarded ON gala_round_winners(userid) WHERE awarded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_gala_participants_user ON gala_participants(userid);
+CREATE INDEX IF NOT EXISTS idx_gala_reserved_user_pending ON gala_reserved_slots(userid) WHERE status = 'pending';
 -- 按人查未取消名额（抽签候选排除、超管名单的预留标记、名额唯一性）。
 CREATE INDEX IF NOT EXISTS idx_gala_reserved_live_user
   ON gala_reserved_slots(event_id, userid)
@@ -135,10 +139,11 @@ ALTER TABLE gala_restore_state ADD COLUMN IF NOT EXISTS version_token TEXT NOT N
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
 
 -- 年会表 ID 不超过 JS 安全整数（接口按 Number 解析 ID）：到上限时插入失败，而不是生成接口无法引用的记录。
+-- 流水表同样设上限：年会付款凭据（中奖记录的 ledger_id、GALA_W 引用）和备份校验都按安全整数处理流水 ID。
 DO $$
 DECLARE t TEXT;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'] LOOP
+  FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots', 'ledger'] LOOP
     EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', pg_get_serial_sequence(t, 'id'));
   END LOOP;
 END $$;

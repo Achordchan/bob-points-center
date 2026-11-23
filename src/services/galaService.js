@@ -146,7 +146,7 @@ async function inSnapshot(db, fn) {
 // 全量恢复与年会写入的互斥：会写中奖记录或流水的年会事务（抽签、发放、记录发放失败、收尾）一开始就拿
 // 这把共享锁，恢复在锁任何表之前拿它的排他锁。两边都先拿同一把锁、再碰表和行，就不会互相等待成死锁。
 export const GALA_PAYOUT_LOCK = 'bob.gala.payout';
-// 用户重置与抽签、创建预留名额的互斥：抽签（唯一写入中奖记录的地方）和创建名额在锁活动行之前拿它的共享锁，
+// 用户重置与抽签、导入名单、创建预留名额的互斥：这些写入在锁活动行之前拿它的共享锁，
 // 用户重置拿排他锁。
 // 不按活动行加锁，是因为重置开始后才创建的活动不在它的行锁范围内；一把全局锁同时覆盖已有和新建的活动。
 export const GALA_RESET_LOCK = 'bob.gala.reset';
@@ -510,6 +510,9 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   // 先锁活动行再写名单，与抽签、创建预留名额、移出名单的加锁顺序一致：
   // 否则导入先插入名单行、再为外键等活动行，而预留事务已锁活动行又在 ON CONFLICT 处等导入提交，互相等待死锁。
   return await inTx(db, async (tx) => {
+    // 与用户重置串行（见 GALA_RESET_LOCK）：重置删了钉钉档案和名单还没提交时，导入不能读到旧的在册档案，
+    // 等重置提交后再把人插回名单。
+    await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
     const event = await tx.get('SELECT id FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
     return allActiveDingtalk ? await addAllActive(tx, id, table) : await addListed(tx, id, list, table);
@@ -530,18 +533,26 @@ async function addAllActive(db, id, table) {
 }
 
 async function addListed(db, id, list, table) {
-  // 一条 INSERT … SELECT 原子写入整批名单：并发抽签只能看到导入前或导入后的完整名单，不会抽到半份名单。
-  const found = await db.all('SELECT userid FROM users WHERE userid = ANY(?::text[])', [list]);
-  const foundSet = new Set(found.map((r) => r.userid));
-  const result = await db.run(
-    `INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
-     SELECT ?, u.userid, COALESCE(NULLIF(u.name, ''), u.userid), CAST(? AS INTEGER), 'admin'
-       FROM users u
-      WHERE u.userid = ANY(?::text[])
-     ON CONFLICT (event_id, userid) DO NOTHING`,
-    [id, table, list],
+  // 一条语句完成“确认用户存在 + 写入名单”：回执里的缺失名单与实际写入用的是同一个用户集合；
+  // 整批原子写入，并发抽签只能看到导入前或导入后的完整名单。FOR KEY SHARE 锁住用到的用户行，
+  // 并发删除的用户不会被选中后又在外键检查时报错。
+  const row = await db.get(
+    `WITH found AS (
+       SELECT u.userid, COALESCE(NULLIF(u.name, ''), u.userid) AS name
+         FROM users u
+        WHERE u.userid = ANY(?::text[])
+        FOR KEY SHARE
+     ), ins AS (
+       INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
+       SELECT ?, f.userid, f.name, CAST(? AS INTEGER), 'admin' FROM found f
+       ON CONFLICT (event_id, userid) DO NOTHING
+       RETURNING 1
+     )
+     SELECT (SELECT COUNT(*) FROM ins) AS added, ARRAY(SELECT userid FROM found) AS found`,
+    [list, id, table],
   );
-  return { added: result.changes, missing: list.filter((u) => !foundSet.has(u)) };
+  const foundSet = new Set(Array.isArray(row?.found) ? row.found : []);
+  return { added: Number(row?.added || 0), missing: list.filter((u) => !foundSet.has(u)) };
 }
 
 export async function removeGalaParticipant(db, { eventId, userid, expectedVersion }) {

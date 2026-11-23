@@ -331,17 +331,18 @@ async function main() {
       }
       console.log('✓ 抽签与用户重置并发：已重置账户不会拿到奖励');
 
-      // 重置开始之后才创建的活动：抽签同样要等重置提交，不能先读到目标用户再写入中奖记录
+      // 刚创建的活动（重置不按活动行加锁）：抽签同样要等重置提交，不能先读到目标用户再写入中奖记录
       {
         let drawSettled = false;
         let drawPromise = null;
+        // 活动在重置拿锁之前刚创建（不在任何按行加的锁里）；导入名单本身也和重置串行，所以名单先备好。
+        const evN = await createGalaEvent(db, { title: `${PREFIX} 重置后新建`, totalBudget: 0 });
+        const pN = await createGalaPool(db, { eventId: evN.id, name: '新建池', budget: 1000 });
+        // 名单 = 目标 + uid(1) + 陪跑：重置前最多可抽 2 人，重置提交后只剩 1 人可抽。
+        await addGalaParticipants(db, { eventId: evN.id, userids: [target, uid(1)] });
+        await addFiller(db, evN.id);
         await db.transaction(async (tx) => {
           await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
-          const evN = await createGalaEvent(db, { title: `${PREFIX} 重置后新建`, totalBudget: 0 });
-          const pN = await createGalaPool(db, { eventId: evN.id, name: '新建池', budget: 1000 });
-          // 名单 = 目标 + uid(1) + 陪跑：重置前最多可抽 2 人，重置提交后只剩 1 人可抽。
-          await addGalaParticipants(db, { eventId: evN.id, userids: [target, uid(1)] });
-          await addFiller(db, evN.id);
           drawPromise = drawGalaRound(db, { eventId: evN.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pN.id, amountEach: 5 })
             .finally(() => { drawSettled = true; });
           await new Promise((r) => { setTimeout(r, 300); });
@@ -352,7 +353,7 @@ async function main() {
         assert.ok(!dN.winners.some((w) => w.userid === target), '重置提交后抽签不应再抽中被重置的用户');
         await grantRound(db, dN.round.id);
         assert.equal(await balanceOf(db, target), 0);
-        console.log('✓ 重置期间新建的活动：抽签等重置提交后再读名单');
+        console.log('✓ 重置开始前刚建的活动：抽签等重置提交后再读名单');
       }
 
       // 创建预留名额（会把人加进名单）与用户重置串行：结果等同于先重置、后创建
@@ -374,6 +375,49 @@ async function main() {
         const inList = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [evS.id, target]);
         assert.deepEqual([st?.status, Number(inList.n)], ['pending', 1], '名额与名单一致：重置之后创建的名额有效');
         console.log('✓ 创建预留名额与用户重置串行');
+      }
+
+      // 导入名单（含“全部在册钉钉员工”）与用户重置串行：重置删档案、删名单未提交时，导入等它提交后再读
+      {
+        const evA = await createGalaEvent(db, { title: `${PREFIX} 重置与导入`, totalBudget: 0 });
+        let importSettled = false;
+        let importPromise = null;
+        await db.transaction(async (tx) => {
+          await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
+          importPromise = addGalaParticipants(db, { eventId: evA.id, allActiveDingtalk: true })
+            .finally(() => { importSettled = true; });
+          await new Promise((r) => { setTimeout(r, 300); });
+          assert.equal(importSettled, false, '用户重置进行中时，导入在册员工应等待');
+          await purgeUserBusinessData(tx, [target]);
+        });
+        await importPromise;
+        const back = await db.get('SELECT COUNT(*) AS n FROM gala_participants WHERE event_id = ? AND userid = ?', [evA.id, target]);
+        assert.equal(Number(back.n), 0, '已重置（档案已删）的用户不会被导入插回名单');
+        console.log('✓ 导入在册员工与用户重置串行');
+      }
+
+      // 用户重置删掉的是某轮最后一笔待发奖励：整轮随即标记完成
+      {
+        const evC = await createGalaEvent(db, { title: `${PREFIX} 重置收尾`, totalBudget: 0 });
+        const pC = await createGalaPool(db, { eventId: evC.id, name: '收尾池', budget: 1000 });
+        await addGalaParticipants(db, { eventId: evC.id, userids: [uid(1), target] });
+        await addFiller(db, evC.id);
+        const dC = await drawGalaRound(db, { eventId: evC.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pC.id, amountEach: 4, randomInt: FIRST });
+        assert.deepEqual(dC.winners.map((w) => w.userid).sort(), [uid(1), target].sort());
+        // 先只给另一位中奖人发：重置对象的记录暂时改成 0 元，让发放跳过它，再恢复金额，模拟“发到一半”。
+        await db.run('UPDATE gala_round_winners SET amount = 0 WHERE round_id = ? AND userid = ?', [dC.round.id, target]);
+        await grantRound(db, dC.round.id);
+        await db.run(`UPDATE gala_rounds SET status = 'drawn', granted_at = NULL WHERE id = ?`, [dC.round.id]);
+        await db.run('UPDATE gala_round_winners SET amount = 4 WHERE round_id = ? AND userid = ?', [dC.round.id, target]);
+        const mid = await db.get('SELECT status FROM gala_rounds WHERE id = ?', [dC.round.id]);
+        assert.equal(mid.status, 'drawn');
+        await db.transaction((tx) => purgeUserBusinessData(tx, [target]));
+        const done = await db.get('SELECT status, granted_at FROM gala_rounds WHERE id = ?', [dC.round.id]);
+        assert.equal(done.status, 'granted', '最后一笔待发被重置清掉后整轮应标记完成');
+        assert.ok(done.granted_at != null);
+        const seqmax = await db.get("SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass");
+        assert.equal(String(seqmax.seqmax), '9007199254740991', '流水序列上限为安全整数');
+        console.log('✓ 用户重置清掉最后一笔待发后整轮标记完成；流水序列有安全上限');
       }
 
       // 抽签重试：先识别重放再检查活动状态；排除规则不同不算同一个请求

@@ -98,11 +98,26 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
     `DELETE FROM user_dingtalk_profiles WHERE userid IN (${placeholders})`,
     targets,
   );
-  counts.gala_round_winners_unawarded = await del(
-    tx,
-    `DELETE FROM gala_round_winners WHERE userid IN (${placeholders}) AND awarded_at IS NULL`,
+  const purgedWinners = await tx.all(
+    `DELETE FROM gala_round_winners WHERE userid IN (${placeholders}) AND awarded_at IS NULL RETURNING round_id, amount`,
     targets,
   );
+  counts.gala_round_winners_unawarded = purgedWinners.length;
+  // 删掉的可能正是某轮最后一笔待发奖励：与发放收尾同一口径（没有待发的正数奖励即整轮完成），在同一事务里补标完成。
+  // 与发放收尾互不遗漏：收尾先锁住轮次时它还能看到这里未提交删除的记录、不标完成，由这里补标；
+  // 这里先锁住时收尾等这里提交后再数，状态已是 granted，条件更新不再生效。
+  const touchedRounds = [...new Set(purgedWinners.filter((w) => Number(w.amount) > 0).map((w) => Number(w.round_id)))]
+    .sort((a, b) => a - b);
+  counts.gala_rounds_completed = 0;
+  if (touchedRounds.length > 0) {
+    counts.gala_rounds_completed = await del(
+      tx,
+      `UPDATE gala_rounds r SET status = 'granted', granted_at = unixepoch()
+        WHERE r.id = ANY(?::bigint[]) AND r.status = 'drawn'
+          AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.amount > 0)`,
+      [touchedRounds],
+    );
+  }
   counts.gala_participants = await del(tx, `DELETE FROM gala_participants WHERE userid IN (${placeholders})`, targets);
   counts.gala_reserved_slots_cancelled = await del(
     tx,

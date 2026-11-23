@@ -423,6 +423,35 @@ export function findGalaFundingErrors(backupData) {
     const r = rounds.get(Number(w?.round_id));
     if (r) segmentWinners.add(`${Number(r.event_id)}:${r.segment}:${String(w?.userid)}`);
   }
+  // 轮次自身的排除规则：开启“排除本环节已中奖者”的一轮，中奖人不能在同一活动同一环节更早的轮次里中过奖。
+  // 否则同一人会在恢复后两轮都拿到奖励，而在线抽签不可能产生这样的数据。
+  const roundsBySegment = new Map();
+  for (const r of rounds.values()) {
+    const key = `${Number(r?.event_id)}:${r?.segment}`;
+    if (!roundsBySegment.has(key)) roundsBySegment.set(key, []);
+    roundsBySegment.get(key).push(r);
+  }
+  const winnersByRound = new Map();
+  for (const w of winnersList) {
+    const key = Number(w?.round_id);
+    if (!winnersByRound.has(key)) winnersByRound.set(key, []);
+    winnersByRound.get(key).push(w);
+  }
+  for (const list of roundsBySegment.values()) {
+    list.sort((a, b) => Number(a?.round_no) - Number(b?.round_no));
+    const earlier = new Set();
+    for (const r of list) {
+      const ws = winnersByRound.get(Number(r?.id)) || [];
+      if (Number(r?.exclude_previous_winners ?? 1) === 1) {
+        for (const w of ws) {
+          if (earlier.has(String(w?.userid))) {
+            errors.push(`gala_round_winners#${w?.id} 在第 ${r?.round_no} 轮再次中奖，但该轮开启了排除本环节已中奖者`);
+          }
+        }
+      }
+      for (const w of ws) earlier.add(String(w?.userid));
+    }
+  }
   const liveSlotsByUser = new Map();
   for (const slot of asList(backupData?.gala_reserved_slots)) {
     if ((slot?.status ?? 'pending') === 'cancelled') continue;

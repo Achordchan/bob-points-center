@@ -645,3 +645,34 @@ test('年会备份：保留的流水 id（即使流水已被删除）也要给�
   const errors = findGalaFundingErrors(snap(Number.MAX_SAFE_INTEGER));
   assert.ok(errors.some((e) => e.startsWith('gala_round_winners#1') && e.includes('ledger_id 已到上限')), errors.join('\n'));
 });
+
+test('年会备份：开启排除已中奖者的一轮，中奖人不能在同一环节更早的轮次中过奖', () => {
+  const snap = (exclude) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 2, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn', exclude_previous_winners: exclude },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null },
+      { id: 2, round_id: 2, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null },
+    ],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  const errors = findGalaFundingErrors(snap(1));
+  assert.ok(errors.some((e) => e.startsWith('gala_round_winners#2') && e.includes('排除本环节已中奖者')), errors.join('\n'));
+  // 缺省视为开启
+  const legacy = snap(1);
+  delete legacy.gala_rounds[1].exclude_previous_winners;
+  assert.ok(findGalaFundingErrors(legacy).some((e) => e.startsWith('gala_round_winners#2')));
+  // 该轮关闭了排除规则：允许重复中奖
+  assert.deepEqual(findGalaFundingErrors(snap(0)), []);
+  // 不同环节不算
+  const otherSeg = snap(1);
+  otherSeg.gala_rounds[1].segment = 'giveaway';
+  otherSeg.gala_rounds[1].round_no = 1;
+  assert.deepEqual(findGalaFundingErrors(otherSeg), []);
+});
