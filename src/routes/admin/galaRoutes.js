@@ -37,7 +37,7 @@ function isSuper(req) {
 function sendError(res, err) {
   if (err instanceof GalaError) {
     const body = { error: err.code };
-    for (const key of ['remaining', 'required', 'spent', 'allocated', 'pools_total', 'max_draw_count']) {
+    for (const key of ['remaining', 'required', 'spent', 'allocated', 'pools_total', 'max_draw_count', 'next_round_no', 'min_budget']) {
       if (err[key] !== undefined) body[key] = err[key];
     }
     return res.status(err.status || 400).json(body);
@@ -162,9 +162,11 @@ export function registerAdminGalaRoutes(router) {
       excludePreviousWinners: b.exclude_previous_winners !== false,
       actor: actorOf(req),
       expectedVersion: versionOf(b),
+      // 必传：本环节要抽的轮次号（最新一轮 + 1）。同样参数的重试返回已抽出的那一轮，不会多抽。
+      expectedRoundNo: b.round_no === undefined ? null : b.round_no,
     });
     const data = serializeDrawResult(result, { includeReserved: isSuper(req) });
-    publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
+    if (!result.replayed) publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
     res.json({ ok: true, data });
   }));
 

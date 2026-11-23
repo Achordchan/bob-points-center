@@ -59,6 +59,9 @@ export const GALA_MAX_DRAW_COUNT = MAX_DRAW_COUNT;
 const PG_INT_MAX = 2147483647;
 // 每场活动最多保留的预留名额（待用 + 已用）。
 export const GALA_MAX_RESERVED_SLOTS = 3;
+// 年会表 ID 的上限：接口按 JS 安全整数解析 ID，序列的 MAXVALUE 也设为它（见 galaSchema），
+// 到上限时插入直接失败，而不是生成一个接口无法引用的记录。
+export const GALA_MAX_ROW_ID = Number.MAX_SAFE_INTEGER;
 // 公开的抽签人数上限：本轮可抽人数（名单 − 本环节已中奖者）至少要比抽签人数多出这么多人。
 // 取预留上限的两倍：被排除的预留对象最多 GALA_MAX_RESERVED_SLOTS 人，普通抽签一定能填满，
 // 且落选者里至少还有同样多的普通参与者，落选名单不会恰好等于预留对象。
@@ -143,6 +146,9 @@ async function inSnapshot(db, fn) {
 // 全量恢复与年会写入的互斥：会写中奖记录或流水的年会事务（抽签、发放、记录发放失败、收尾）一开始就拿
 // 这把共享锁，恢复在锁任何表之前拿它的排他锁。两边都先拿同一把锁、再碰表和行，就不会互相等待成死锁。
 export const GALA_PAYOUT_LOCK = 'bob.gala.payout';
+// 用户重置与抽签的互斥：抽签（唯一写入中奖记录的地方）在锁活动行之前拿它的共享锁，用户重置拿排他锁。
+// 不按活动行加锁，是因为重置开始后才创建的活动不在它的行锁范围内；一把全局锁同时覆盖已有和新建的活动。
+export const GALA_RESET_LOCK = 'bob.gala.reset';
 // 恢复代数：gala_restore_state 单行计数器，全量恢复在排他锁内、自己的事务里加一（不进备份；恢复失败回滚则不变）。
 // 一次发放开始时记下代数，之后每个发放事务在共享锁内重读，代数变了说明期间成功恢复过，整次发放作废。
 export async function bumpGalaRestoreGeneration(tx) {
@@ -456,7 +462,8 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
         [id],
       );
       const committed = Number(pool.spent) + Number(pendingRow?.n || 0);
-      if (nextBudget < committed) throw new GalaError('budget_below_spent', 409, { spent: committed });
+      // spent 只报实际支出（与奖池详情一致），最低可设预算（实际支出 + 待发）另放在 min_budget。
+      if (nextBudget < committed) throw new GalaError('budget_below_spent', 409, { spent: Number(pool.spent), min_budget: committed });
     } else {
       // 员工奖池按已分配额校验（实际支出不会超过已分配额）；报错也只给公开的已分配额。
       const floor = Math.max(allocated, Number(pool.spent));
@@ -583,6 +590,7 @@ export async function drawGalaRound(db, {
   actor = {},
   randomInt = crypto.randomInt,
   expectedVersion,
+  expectedRoundNo,
 }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
@@ -593,8 +601,15 @@ export async function drawGalaRound(db, {
   if (!['none', 'coin'].includes(prizeType)) throw new GalaError('invalid_prize_type');
   const amount = prizeType === 'coin' ? toNonNegativeInt(amountEach) : 0;
   if (prizeType === 'coin' && (!amount || amount <= 0)) throw new GalaError('invalid_amount_each');
+  // expectedRoundNo：这次请求要抽的轮次号（本环节最新一轮 + 1）。管理端接口必传，让重试幂等：
+  // 抽签已提交但响应丢了时，用同样参数重试会拿回已抽出的那一轮，而不是再抽一轮、再占一份预算。
+  const wantRoundNo = expectedRoundNo === undefined ? null : toPositiveId(expectedRoundNo);
+  if (expectedRoundNo !== undefined && !wantRoundNo) throw new GalaError('invalid_round_no');
 
   return await inTx(db, async (tx) => {
+    // 先拿重置互斥的共享锁（见 GALA_RESET_LOCK）：进行中的用户重置提交后才读参与者，
+    // 抽签先拿到则重置等它提交，再删掉它写入的未发放中奖记录。抽签之间共享锁不冲突。
+    await tx.get('SELECT pg_advisory_xact_lock_shared(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
     // 锁活动行：同一活动的抽签串行，轮次号与“已中奖排除”不会被并发抽签打乱。
     const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [id]);
     if (!event) throw new GalaError('event_not_found', 404);
@@ -614,6 +629,24 @@ export async function drawGalaRound(db, {
       [id, seg],
     );
     const roundNo = Number(last?.n || 0) + 1;
+    if (wantRoundNo !== null && wantRoundNo !== roundNo) {
+      const done = wantRoundNo < roundNo
+        ? await tx.get('SELECT * FROM gala_rounds WHERE event_id = ? AND segment = ? AND round_no = ?', [id, seg, wantRoundNo])
+        : null;
+      // 同一轮次号已用同样的参数抽过：视为重试，原样返回那一轮（不重新抽、不再占预算）。
+      if (done
+        && Number(done.draw_count) === count
+        && done.prize_type === prizeType
+        && Number(done.amount_each) === amount
+        && (done.pool_id == null ? null : Number(done.pool_id)) === (pool ? Number(pool.id) : null)
+        && (done.title ?? null) === (cleanText(title) || null)) {
+        const winners = await tx.all('SELECT * FROM gala_round_winners WHERE round_id = ? ORDER BY display_order, id', [done.id]);
+        const generation = await readRestoreGeneration(tx);
+        return { round: done, winners, eligibleCount: null, generation, replayed: true };
+      }
+      // 轮次号对不上（别人已抽了这一轮，或页面数据过旧）：不抽，让操作者刷新后确认。
+      throw new GalaError('round_no_changed', 409, { next_round_no: roundNo });
+    }
 
     // 公开准入：只用名单人数和本环节已中奖人数（所有管理员都看得到）判断，与是否有预留无关。
     const publicRow = await tx.get(
@@ -794,8 +827,9 @@ async function readGalaRounds(db, { id, before, pageSize, includeReserved }) {
 
 export function serializeDrawResult(result, { includeReserved = false } = {}) {
   const out = serializeRound(result.round, result.winners, { includeReserved, generation: result.generation ?? null });
-  // 候选人数已排除被预留的人，和参与名单人数一比就知道有人被预留，只给超管。
-  if (includeReserved) out.eligible_count = result.eligibleCount;
+  // 候选人数已排除被预留的人，和参与名单人数一比就知道有人被预留，只给超管。重试返回的旧轮次没有这个数。
+  if (includeReserved && !result.replayed) out.eligible_count = result.eligibleCount;
+  if (result.replayed) out.replayed = true;
   return out;
 }
 

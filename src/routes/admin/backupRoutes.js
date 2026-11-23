@@ -22,7 +22,7 @@ import {
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
 import {
-  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_ROW_ID, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
 } from '../../services/galaService.js';
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
@@ -136,6 +136,11 @@ export function findGalaFundingErrors(backupData) {
         if (row?.[f] == null) continue;
         if (!safeInt(row[f]) || Number(row[f]) <= 0) errors.push(`${t.name}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的正整数`);
       }
+      // 年会表自己的 ID 还要给后续新建的行留出空间：恢复后序列从 MAX(id)+1 继续，
+      // 必须仍是安全整数（序列的 MAXVALUE 也设在这里），否则新建的活动/轮次无法通过接口操作。
+      if (row?.id != null && safeInt(row.id) && Number(row.id) >= GALA_MAX_ROW_ID) {
+        errors.push(`${t.name}#${row.id} 的 id 已到上限，恢复后无法再新建记录`);
+      }
     }
   }
   // 抽签人数与轮次号按在线抽签的范围校验：已分配额 = 单价 × 抽签人数，负数或超大值会让账面倒扣或溢出；
@@ -171,6 +176,10 @@ export function findGalaFundingErrors(backupData) {
     }
   }
   for (const r of rounds.values()) {
+    // 轮次只能由在线抽签产生，环节必须是可抽签的环节：否则发币时会给一个在线永远抽不出来的轮次付款。
+    if (!GALA_DRAW_SEGMENTS.has(String(r?.segment))) {
+      errors.push(`gala_rounds#${r?.id} 的环节 ${r?.segment} 不可抽签`);
+    }
     // 与在线抽签一致：无币轮没有奖池、单价为 0；发币轮必须挂同一活动的员工奖池且单价为正。
     // 否则无币轮也会被计入已分配额，永久占用员工预算。
     const prize = r?.prize_type ?? 'none';
@@ -416,11 +425,13 @@ export function findGalaFundingErrors(backupData) {
     liveSlotsByUser.set(key, (liveSlotsByUser.get(key) || 0) + 1);
   }
   for (const slot of asList(backupData?.gala_reserved_slots)) {
-    if ((slot?.status ?? 'pending') !== 'pending') continue;
+    const status = slot?.status ?? 'pending';
+    if (status === 'cancelled') continue;
     const key = `${Number(slot?.event_id)}:${slot?.segment}:${String(slot?.userid)}`;
+    // 唯一性覆盖所有未取消的名额（含已使用）：两个已使用名额意味着同一人在同一环节拿了两次预留奖励。
     if ((liveSlotsByUser.get(key) || 0) > 1) {
-      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人在同一活动同一环节还有别的未取消名额`);
-    } else if (segmentWinners.has(key)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 的持有人在同一活动同一环节还有别的未取消名额`);
+    } else if (status === 'pending' && segmentWinners.has(key)) {
       errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人已在同一活动同一环节中过奖`);
     }
   }

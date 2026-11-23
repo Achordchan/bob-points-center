@@ -56,6 +56,8 @@ const components = {
         required: { type: 'integer', description: 'pool_budget_insufficient：本轮需要的额度（单价 × 抽签人数）' },
         allocated: { type: 'integer', description: 'budget_below_allocated：奖池预算不能低于的已分配额' },
         spent: { type: 'integer', description: 'budget_below_spent：预留奖池实际支出（仅超级管理员接口）' },
+        min_budget: { type: 'integer', description: 'budget_below_spent：预留奖池最低可设预算 = 实际支出 + 已抽中待发的预留奖励（仅超级管理员接口）' },
+        next_round_no: { type: 'integer', description: 'round_no_changed：本环节下一轮的轮次号' },
         pools_total: { type: 'integer' },
         max_draw_count: { type: 'integer', description: 'not_enough_participants：按公开规则本轮最多可抽人数' },
       },

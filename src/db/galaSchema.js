@@ -124,4 +124,13 @@ CREATE TABLE IF NOT EXISTS gala_restore_state (
   CONSTRAINT chk_gala_restore_state_singleton CHECK (id = 1)
 );
 INSERT INTO gala_restore_state(id, generation) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+
+-- 年会表 ID 不超过 JS 安全整数（接口按 Number 解析 ID）：到上限时插入失败，而不是生成接口无法引用的记录。
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots'] LOOP
+    EXECUTE format('ALTER SEQUENCE %s MAXVALUE 9007199254740991', pg_get_serial_sequence(t, 'id'));
+  END LOOP;
+END $$;
 `;

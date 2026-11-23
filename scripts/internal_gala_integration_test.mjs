@@ -32,6 +32,7 @@ import {
   GALA_DRAW_HEADROOM,
   GALA_MAX_RESERVED_SLOTS,
   GALA_PAYOUT_LOCK,
+  GALA_RESET_LOCK,
   bumpGalaRestoreGeneration,
   GALA_SEGMENTS,
 } from '../src/services/galaService.js';
@@ -329,6 +330,30 @@ async function main() {
         assert.equal(await balanceOf(db, target), 0, '抽签与重置并发后不应给已重置账户发币');
       }
       console.log('✓ 抽签与用户重置并发：已重置账户不会拿到奖励');
+
+      // 重置开始之后才创建的活动：抽签同样要等重置提交，不能先读到目标用户再写入中奖记录
+      {
+        let drawSettled = false;
+        let drawPromise = null;
+        await db.transaction(async (tx) => {
+          await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
+          const evN = await createGalaEvent(db, { title: `${PREFIX} 重置后新建`, totalBudget: 0 });
+          const pN = await createGalaPool(db, { eventId: evN.id, name: '新建池', budget: 1000 });
+          // 名单 = 目标 + uid(1) + 陪跑：重置前最多可抽 2 人，重置提交后只剩 1 人可抽。
+          await addGalaParticipants(db, { eventId: evN.id, userids: [target, uid(1)] });
+          await addFiller(db, evN.id);
+          drawPromise = drawGalaRound(db, { eventId: evN.id, segment: 'lottery', drawCount: 1, prizeType: 'coin', poolId: pN.id, amountEach: 5 })
+            .finally(() => { drawSettled = true; });
+          await new Promise((r) => { setTimeout(r, 300); });
+          assert.equal(drawSettled, false, '用户重置进行中时，新活动的抽签应等待');
+          await purgeUserBusinessData(tx, [target]);
+        });
+        const dN = await drawPromise;
+        assert.ok(!dN.winners.some((w) => w.userid === target), '重置提交后抽签不应再抽中被重置的用户');
+        await grantRound(db, dN.round.id);
+        assert.equal(await balanceOf(db, target), 0);
+        console.log('✓ 重置期间新建的活动：抽签等重置提交后再读名单');
+      }
     }
 
     // 兜底：缺少奖池或奖池不属于同一活动的正数奖励不能发放
@@ -751,7 +776,7 @@ async function main() {
       await drawGalaRound(db, { eventId: ev.id, segment: 'game', drawCount: 1, prizeType: 'coin', poolId: ep.id, amountEach: 30 });
       await assert.rejects(
         updateGalaPool(db, { poolId: rp2.id, budget: 29, allowReserved: true }),
-        (e) => e.code === 'budget_below_spent' && e.spent === 30,
+        (e) => e.code === 'budget_below_spent' && e.spent === 0 && e.min_budget === 30,
       );
       await updateGalaPool(db, { poolId: rp2.id, budget: 30, allowReserved: true });
       console.log('✓ 预留奖励与本轮普通奖励一致；预留奖池不足时名额作废；预留预算不低于待发');
@@ -880,10 +905,29 @@ async function main() {
       r = await call(superId, 'POST', '/gala/pools/create', { gala_version: gv, event_id: hid, name: '员工池', budget: 1000 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const hPool = r.body.data.id;
-      r = await call(operatorId, 'POST', '/gala/rounds/draw', { gala_version: gv,
+      const drawBody = { gala_version: gv,
         event_id: hid, segment: 'lottery', draw_count: 2, prize_type: 'coin', pool_id: hPool, amount_each: 50,
-      });
+      };
+      r = await call(operatorId, 'POST', '/gala/rounds/draw', drawBody);
+      assert.deepEqual([r.status, r.body?.error], [400, 'invalid_round_no'], '抽签必须带轮次号');
+      r = await call(operatorId, 'POST', '/gala/rounds/draw', { ...drawBody, round_no: 2 });
+      assert.deepEqual([r.status, r.body?.error, r.body?.next_round_no], [409, 'round_no_changed', 1]);
+      r = await call(operatorId, 'POST', '/gala/rounds/draw', { ...drawBody, round_no: 1 });
       assert.equal(r.status, 200, JSON.stringify(r.body));
+      {
+        // 响应丢失后的重试：同样参数拿回同一轮，不多抽、不多占预算；参数不同则拒绝
+        const again = await call(operatorId, 'POST', '/gala/rounds/draw', { ...drawBody, round_no: 1 });
+        assert.equal(again.status, 200, JSON.stringify(again.body));
+        assert.equal(again.body.data.id, r.body.data.id);
+        assert.equal(again.body.data.replayed, true);
+        assert.deepEqual(again.body.data.winners.map((w) => w.userid), r.body.data.winners.map((w) => w.userid));
+        assert.equal(again.body.data.grant_token, r.body.data.grant_token);
+        const other = await call(operatorId, 'POST', '/gala/rounds/draw', { ...drawBody, round_no: 1, draw_count: 1 });
+        assert.deepEqual([other.status, other.body?.error, other.body?.next_round_no], [409, 'round_no_changed', 2]);
+        const cnt = await db.get('SELECT COUNT(*) AS n FROM gala_rounds WHERE event_id = ?', [hid]);
+        assert.equal(Number(cnt.n), 1, '重试不会多抽一轮');
+        console.log('✓ 抽签重试幂等：同轮次号同参数返回原结果');
+      }
       assert.equal(r.body.data.winners.length, 2, '预留对象占本轮名额：抽 2 人出 2 人');
       assert.equal(r.body.data.draw_count, 2);
       assert.ok(r.body.data.winners.some((w) => w.userid === kid));

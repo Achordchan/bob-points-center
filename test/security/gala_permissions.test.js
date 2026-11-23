@@ -579,3 +579,54 @@ test('年会备份：待用名额与在线创建一样，同一活动同一环�
   won.gala_reserved_slots[0].userid = 'a';
   assert.ok(findGalaFundingErrors(won).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('中过奖')));
 });
+
+test('年会备份：同一人同一环节两个已使用名额同样拒绝', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 2, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' },
+    ],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'k', amount: 10, pool_id: 2, is_reserved: 1, awarded_at: null },
+      { id: 2, round_id: 2, event_id: 1, userid: 'k', amount: 10, pool_id: 2, is_reserved: 1, awarded_at: null },
+    ],
+    gala_reserved_slots: [
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 1 },
+      { id: 2, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', amount: 10, pool_id: 2, status: 'used', used_round_id: 2 },
+    ],
+    ledger: [],
+  });
+  const errors = findGalaFundingErrors(snap());
+  assert.ok(errors.some((e) => e.startsWith('gala_reserved_slots#2') && e.includes('别的未取消名额')), errors.join('\n'));
+  // 只有一个已使用名额时通过
+  const one = snap();
+  one.gala_reserved_slots[1].status = 'cancelled';
+  one.gala_reserved_slots[1].used_round_id = null;
+  one.gala_round_winners[1] = { id: 2, round_id: 2, event_id: 1, userid: 'u', amount: 10, pool_id: 1, is_reserved: 0, awarded_at: null };
+  assert.deepEqual(findGalaFundingErrors(one), []);
+});
+
+test('年会备份：轮次必须在可抽签的环节，ID 必须给新记录留出安全范围', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'drawn' }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: null }],
+    gala_reserved_slots: [],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap()), []);
+  const danmaku = snap();
+  danmaku.gala_rounds[0].segment = 'danmaku';
+  assert.ok(findGalaFundingErrors(danmaku).some((e) => e.startsWith('gala_rounds#1') && e.includes('不可抽签')));
+  const maxId = snap();
+  maxId.gala_events[0].id = Number.MAX_SAFE_INTEGER;
+  assert.ok(findGalaFundingErrors(maxId).some((e) => e.includes('id 已到上限')));
+  const nearMax = snap();
+  nearMax.gala_round_winners[0].id = Number.MAX_SAFE_INTEGER - 1;
+  assert.deepEqual(findGalaFundingErrors(nearMax), []);
+});
