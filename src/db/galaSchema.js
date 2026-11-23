@@ -84,11 +84,12 @@ CREATE TABLE IF NOT EXISTS gala_round_winners (
   award_error TEXT,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
   CONSTRAINT uq_gala_round_winners_round_user UNIQUE (round_id, userid),
-  CONSTRAINT chk_gala_round_winners_amount CHECK (amount >= 0)
+  CONSTRAINT chk_gala_round_winners_amount CHECK (amount >= 0),
+  CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_gala_round_winners_event_user ON gala_round_winners(event_id, userid);
 
--- 预留名额：指定某人在某环节第 N 轮额外中奖。仅超级管理员可读写，名额在本轮正常名额之外。
+-- 预留名额：指定某人在某环节第 N 轮中奖。仅超级管理员可读写，占本轮一个名额（抽 N 人时普通抽 N-1 人）。
 CREATE TABLE IF NOT EXISTS gala_reserved_slots (
   id BIGSERIAL PRIMARY KEY,
   event_id BIGINT NOT NULL REFERENCES gala_events(id) ON DELETE CASCADE,

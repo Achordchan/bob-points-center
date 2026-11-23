@@ -85,6 +85,33 @@ export function findGalaFundingErrors(backupData) {
     }
   }
 
+  // 金额类字段先做与在线写入相同的安全整数校验：后续校验和发币都用 Number，
+  // 超出安全整数范围的值会被悄悄改写，导致数据库里存的和实际扣减、入账的不是同一个数。
+  const safeInt = (v) => (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) && Number.isSafeInteger(Number(v)) && Number(v) >= 0;
+  const MONEY_FIELDS = {
+    gala_events: ['total_budget'],
+    gala_pools: ['budget', 'spent'],
+    gala_rounds: ['amount_each'],
+    gala_round_winners: ['amount'],
+    gala_reserved_slots: ['amount'],
+  };
+  for (const [table, fields] of Object.entries(MONEY_FIELDS)) {
+    for (const row of asList(backupData?.[table])) {
+      for (const f of fields) {
+        if (row?.[f] == null) continue;
+        if (!safeInt(row[f])) errors.push(`${table}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的非负整数`);
+      }
+    }
+  }
+  for (const table of ['gala_pools', 'gala_round_winners']) {
+    for (const row of asList(backupData?.[table])) {
+      if (row?.is_reserved != null && ![0, 1, '0', '1'].includes(row.is_reserved)) {
+        errors.push(`${table}#${row?.id} 的 is_reserved=${row.is_reserved} 只能是 0 或 1`);
+      }
+    }
+  }
+  if (errors.length) return errors;
+
   const events = new Map(asList(backupData?.gala_events).map((e) => [Number(e?.id), e]));
   const pools = new Map(asList(backupData?.gala_pools).map((p) => [Number(p?.id), p]));
   const rounds = new Map(asList(backupData?.gala_rounds).map((r) => [Number(r?.id), r]));
@@ -139,6 +166,11 @@ export function findGalaFundingErrors(backupData) {
       continue;
     }
     const reserved = Number(w?.is_reserved) === 1;
+    // 已发放的正数奖励必须带 ledger_id 作为付款凭据。用户重置会删除流水但保留 ledger_id，
+    // 所以只要求 ledger_id 存在，不要求对应流水仍在备份里；完全没有凭据的“已发放”会让这笔奖励永远补发不了。
+    if (w?.awarded_at != null && Number(w?.amount) > 0 && w?.ledger_id == null) {
+      errors.push(`gala_round_winners#${w?.id} 标记已发放但没有 ledger_id，无法证明已付款`);
+    }
     // 普通中奖记录的奖池与金额必须和所属轮次的配置一致；预留记录有自己的奖池和金额。
     if (!reserved) {
       const coin = round.prize_type === 'coin';
@@ -156,7 +188,18 @@ export function findGalaFundingErrors(backupData) {
       errors.push(`gala_round_winners#${w?.id} 未发放奖励 ${w?.amount} 缺少同一活动的${reserved ? '预留' : '员工'}奖池`);
     }
   }
+  // 待用名额的轮次号必须大于该活动该环节已抽的最大轮次，否则恢复后永远用不到，
+  // 却会把对应的人一直排除在普通抽签之外（与在线创建时的 round_already_drawn 一致）。
+  const maxDrawn = new Map();
+  for (const r of rounds.values()) {
+    const key = `${Number(r?.event_id)}:${r?.segment}`;
+    maxDrawn.set(key, Math.max(maxDrawn.get(key) || 0, Number(r?.round_no || 0)));
+  }
   for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') === 'pending'
+      && Number(slot?.round_no) <= (maxDrawn.get(`${Number(slot?.event_id)}:${slot?.segment}`) || 0)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的第 ${slot?.round_no} 轮已经抽过`);
+    }
     if (slot?.pool_id != null && !poolOk(slot.pool_id, slot.event_id, true)) {
       errors.push(`gala_reserved_slots#${slot?.id} 引用的奖池 ${slot.pool_id} 不是同一活动的预留奖池`);
     } else if ((slot?.status ?? 'pending') === 'pending' && Number(slot?.amount) > 0 && slot?.pool_id == null) {

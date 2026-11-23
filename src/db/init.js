@@ -764,6 +764,12 @@ export async function initDb(input) {
   await db.exec(schemaSql);
   await db.exec(galaSchemaSql);
   await db.exec("ALTER TABLE gala_events ADD COLUMN IF NOT EXISTS enabled_segments TEXT NOT NULL DEFAULT '[]'");
+  // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
+  await db.exec(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_gala_round_winners_reserved') THEN
+      ALTER TABLE gala_round_winners ADD CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1));
+    END IF;
+  END $$`);
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'dingtalk'");
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
   // 手机号唯一：外部账号一人一号；钉钉侧不上报手机号，历史数据保持 NULL。

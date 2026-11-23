@@ -112,7 +112,7 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.get('/gala/participants', requireAdminSession(), handle(async (req, res, db) => {
-    res.json({ ok: true, data: await listGalaParticipants(db, { eventId: req.query?.event_id }) });
+    res.json({ ok: true, data: await listGalaParticipants(db, { eventId: req.query?.event_id, includeReserved: isSuper(req) }) });
   }));
 
   router.post('/gala/participants/add', requireAdminSession(), handle(async (req, res, db) => {
@@ -132,7 +132,12 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.get('/gala/rounds', requireAdminSession(), handle(async (req, res, db) => {
-    const data = await listGalaRounds(db, { eventId: req.query?.event_id, includeReserved: isSuper(req) });
+    const data = await listGalaRounds(db, {
+      eventId: req.query?.event_id,
+      beforeId: req.query?.before_id,
+      limit: req.query?.limit,
+      includeReserved: isSuper(req),
+    });
     res.json({ ok: true, data });
   }));
 

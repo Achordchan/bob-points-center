@@ -4,8 +4,11 @@
 // - 抽签只在服务端发生（crypto.randomInt），结果先落库再展示，大屏刷新不会改变结果。
 // - 发币以 gala_round_winners.awarded_at 为幂等闸门：同一中奖记录无论点多少次“发币”，只写一次账本。
 // - 每笔发币在同一事务里条件扣减奖池 spent（spent + amount <= budget），超预算整笔回滚。
-// - 预留名额是本轮正常名额之外的额外名额，奖励只能来自预留奖池；被预留的人不参与本活动的正常抽签，
-//   因此不会占用员工的中奖名额。预留信息只对超级管理员返回。
+// - 预留名额占本轮一个名额（抽 N 人时普通抽 N-1 人），奖励只能来自预留奖池，不占员工预算；
+//   被预留的人不参与本活动的正常抽签。预留信息只对超级管理员返回，非超管视图里不出现任何能认出
+//   预留对象的逐人信息（金额、发放状态、失败名单、排除后的候选人数）。
+//   已知边界：员工奖池的支出、发放失败数量等汇总值，在特殊情况下可能让操作者推断出“本轮有预留”，
+//   但推断不出是谁。
 import crypto from 'node:crypto';
 import { grantBob } from './ledgerService.js';
 
@@ -173,8 +176,7 @@ function serializeRound(row, winners, { includeReserved }) {
     prize_type: row.prize_type,
     pool_id: row.pool_id ? Number(row.pool_id) : null,
     amount_each: Number(row.amount_each || 0),
-    // 非超管看到的抽取人数就是名单人数，避免“请求 N 人、出来 N+1 人”暴露本轮有预留名额。
-    draw_count: includeReserved ? Number(row.draw_count) : sorted.length,
+    draw_count: Number(row.draw_count),
     status: state.status,
     created_by: row.created_by || '',
     created_name: row.created_name || '',
@@ -253,9 +255,9 @@ export async function getGalaEventDetail(db, { eventId, includeReserved = false 
   );
   const counts = await db.get(
     `SELECT
-       (SELECT COUNT(*) FROM gala_participants WHERE event_id = ?) AS participants,
+       (SELECT COUNT(*) FROM (${PARTICIPANTS_WITH_RESERVED_SQL}) x) AS participants,
        (SELECT COUNT(*) FROM gala_rounds WHERE event_id = ?) AS rounds`,
-    [id, id],
+    [id, id, id],
   );
   const visiblePools = pools.map(serializePool);
   const publicPools = visiblePools.filter((p) => p.is_reserved === 0);
@@ -379,21 +381,37 @@ export async function removeGalaParticipant(db, { eventId, userid }) {
   return { removed: r.changes };
 }
 
-export async function listGalaParticipants(db, { eventId }) {
+// 预留对象（未取消的预留名额）即使不在名单表里，也作为参与者列出：
+// 否则中奖名单里出现一个“不在参与名单上的人”，就直接暴露了谁是预留对象。
+// 名单表本身不变，所以被预留的人依旧不会进入普通抽签。
+const PARTICIPANTS_WITH_RESERVED_SQL = `
+  SELECT p.userid, p.name_snapshot, p.table_no, p.source, p.joined_at, 0 AS is_reserved
+    FROM gala_participants p
+   WHERE p.event_id = ?
+  UNION ALL
+  SELECT s.userid, MAX(COALESCE(NULLIF(u.name, ''), s.userid)) AS name_snapshot, NULL AS table_no,
+         'admin' AS source, MIN(s.created_at) AS joined_at, 1 AS is_reserved
+    FROM gala_reserved_slots s
+    JOIN users u ON u.userid = s.userid
+   WHERE s.event_id = ? AND s.status <> 'cancelled'
+     AND NOT EXISTS (SELECT 1 FROM gala_participants p2 WHERE p2.event_id = s.event_id AND p2.userid = s.userid)
+   GROUP BY s.userid`;
+
+export async function listGalaParticipants(db, { eventId, includeReserved = false }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const rows = await db.all(
-    `SELECT userid, name_snapshot, table_no, source, joined_at
-       FROM gala_participants WHERE event_id = ? ORDER BY id`,
-    [id],
-  );
-  return rows.map((r) => ({
-    userid: r.userid,
-    name: r.name_snapshot || r.userid,
-    table_no: r.table_no === null ? null : Number(r.table_no),
-    source: r.source,
-    joined_at: Number(r.joined_at),
-  }));
+  const rows = await db.all(`${PARTICIPANTS_WITH_RESERVED_SQL} ORDER BY joined_at, userid`, [id, id]);
+  return rows.map((r) => {
+    const out = {
+      userid: r.userid,
+      name: r.name_snapshot || r.userid,
+      table_no: r.table_no === null ? null : Number(r.table_no),
+      source: r.source,
+      joined_at: Number(r.joined_at),
+    };
+    if (includeReserved) out.is_reserved = Number(r.is_reserved) === 1 ? 1 : 0;
+    return out;
+  });
 }
 
 // ---------------------------------------------------------------- 抽签
@@ -454,14 +472,15 @@ export async function drawGalaRound(db, {
         ORDER BY p.id`,
       excludePreviousWinners ? [id, seg] : [id],
     );
-    const picked = pickRandom(eligibleRows, count, randomInt);
-
+    // 预留名额占本轮一个名额：抽 N 人时普通抽 N-1 人，再加上预留对象，总数仍是 N。
+    // 这样操作者和大屏看到的人数与请求一致，看不出本轮有预留。奖励仍从预留奖池出，不占员工预算。
     const slot = await tx.get(
       `SELECT s.*, u.name AS user_name FROM gala_reserved_slots s JOIN users u ON u.userid = s.userid
         WHERE s.event_id = ? AND s.segment = ? AND s.round_no = ? AND s.status = 'pending'
         FOR UPDATE OF s`,
       [id, seg, roundNo],
     );
+    const picked = pickRandom(eligibleRows, slot ? count - 1 : count, randomInt);
 
     if (picked.length === 0 && !slot) throw new GalaError('no_eligible_participants', 409);
 
@@ -517,10 +536,16 @@ export async function drawGalaRound(db, {
   });
 }
 
-export async function listGalaRounds(db, { eventId, includeReserved = false, limit = 200 }) {
+export async function listGalaRounds(db, { eventId, includeReserved = false, limit = 200, beforeId = null }) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id');
-  const rounds = await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, limit]);
+  // 按 id 倒序分页：传上一页最后一轮的 id 作为 before_id 即可取更早的轮次。
+  const before = beforeId === null || beforeId === undefined || beforeId === '' ? null : toPositiveId(beforeId);
+  if (beforeId !== null && beforeId !== undefined && beforeId !== '' && !before) throw new GalaError('invalid_before_id');
+  const pageSize = Math.min(Math.max(Number(limit) || 200, 1), 200);
+  const rounds = before
+    ? await db.all('SELECT * FROM gala_rounds WHERE event_id = ? AND id < ? ORDER BY id DESC LIMIT ?', [id, before, pageSize])
+    : await db.all('SELECT * FROM gala_rounds WHERE event_id = ? ORDER BY id DESC LIMIT ?', [id, pageSize]);
   if (rounds.length === 0) return [];
   const winners = await db.all(
     'SELECT * FROM gala_round_winners WHERE round_id = ANY(?::bigint[]) ORDER BY id',
@@ -594,7 +619,8 @@ export async function grantGalaRound(db, { roundId }) {
     [id],
   );
   const label = GALA_SEGMENTS[round.segment] || round.segment;
-  const reason = `年会奖励·${round.title || label}·第${round.round_no}轮`;
+  // 流水原因固定带环节名称，方便按环节对账；自定义标题附在后面。
+  const reason = `年会奖励·${label}${round.title ? `（${round.title}）` : ''}·第${round.round_no}轮`;
   const granted = [];
   const failed = [];
   for (const w of winners) {
@@ -626,8 +652,8 @@ export async function grantGalaRound(db, { roundId }) {
 }
 
 // 发放结果对外只给发放回执，不含账户余额（余额属于用户资料，需要单独的查看权限）。
-// 非超管只看到普通中奖人的失败明细和待发数量，不列出成功名单：
-// 成功名单与中奖名单一对比，就能认出没出现在任何一边的预留对象。
+// 非超管只看到普通中奖记录的汇总，不列出成功或失败名单：
+// 任何逐人名单与中奖名单一对比，都能认出没出现在里面的预留对象。
 export function serializeGrantResult(result, { includeReserved = false } = {}) {
   if (includeReserved) {
     return {
@@ -637,9 +663,19 @@ export function serializeGrantResult(result, { includeReserved = false } = {}) {
       pending: result.pending,
     };
   }
+  // 失败者也不逐人列出：员工奖池耗尽时普通中奖人全部失败，而预留对象不在失败名单里，
+  // 一对照中奖名单就能认出来。普通回执只给失败数量、按原因汇总和待发数量。
+  const reasons = {};
+  let failedCount = 0;
+  for (const f of result.failed) {
+    if (f.is_reserved === 1) continue;
+    failedCount += 1;
+    reasons[f.error] = (reasons[f.error] || 0) + 1;
+  }
   return {
     round_id: result.round_id,
-    failed: result.failed.filter((f) => f.is_reserved !== 1).map((f) => ({ userid: f.userid, error: f.error })),
+    failed_count: failedCount,
+    failed_reasons: reasons,
     pending: result.pendingPublic,
   };
 }

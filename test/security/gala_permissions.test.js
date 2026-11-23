@@ -185,3 +185,32 @@ test('年会备份逐笔核对：流水收款人/金额/ledger_id、重复流水
   offRound.gala_round_winners.push({ id: 3, round_id: 1, event_id: 1, userid: 'c', amount: 100, pool_id: 2, awarded_at: null });
   assert.ok(findGalaFundingErrors(offRound).some((e) => e.startsWith('gala_round_winners#3') && e.includes('轮次')));
 });
+
+test('年会备份：金额精度、预留标记取值、已发放凭据与错过轮次的待用名额', () => {
+  const ok = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 55 }],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, amount: 5, status: 'pending' }],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(ok()), []);
+
+  const big = ok();
+  big.gala_pools[0].budget = '9007199254740993';
+  assert.ok(findGalaFundingErrors(big).some((e) => e.includes('安全范围')));
+
+  const flag = ok();
+  flag.gala_round_winners[0].is_reserved = 2;
+  assert.ok(findGalaFundingErrors(flag).some((e) => e.includes('is_reserved=2')));
+
+  const noReceipt = ok();
+  noReceipt.gala_round_winners[0].ledger_id = null;
+  assert.ok(findGalaFundingErrors(noReceipt).some((e) => e.includes('没有 ledger_id')));
+
+  const missed = ok();
+  missed.gala_reserved_slots[0].round_no = 1;
+  assert.ok(findGalaFundingErrors(missed).some((e) => e.includes('已经抽过')));
+});
