@@ -49,21 +49,25 @@ export function requiresGalaTables(meta) {
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
 }
 
-// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数：逐张核对年会表和流水，返回错误描述列表。
-// 行数缺失或不是非负整数同样视为不一致。旧格式备份不检查。
-// 流水一并核对：中奖记录的付款凭据在流水里，流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态。
-// 导出前已重置的用户不受影响：那时记录的行数本来就不含已删流水。
-export function findGalaRowCountErrors(backupData, meta) {
+// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数，返回错误描述列表：
+// - _meta.tables 列出的每张表，数组长度都必须与记录一致（被截短的账户、流水、名单等都会被发现）；
+// - required 里的表必须有行数记录（默认六张年会表和流水；覆盖导入传入全部全量表）。
+// 流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态；账户被截短时，覆盖会清掉已到账的余额，
+// 而中奖记录仍是已发放，重试发币也不会补回。导出前已重置的用户不受影响：那时记录的行数本来就不含已删数据。
+// 旧格式备份不检查。
+export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger'] } = {}) {
   if (meta?.galaFormat == null) return [];
   const listed = meta?.tables && typeof meta.tables === 'object' ? meta.tables : {};
   const errors = [];
-  for (const name of [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger']) {
-    const expected = listed[name];
-    const actual = Array.isArray(backupData?.[name]) ? backupData[name].length : null;
+  for (const name of required) {
+    if (!Object.hasOwn(listed, name)) errors.push(`${name} 缺少导出时的行数记录`);
+  }
+  for (const [name, expected] of Object.entries(listed)) {
+    const actual = Array.isArray(backupData?.[name]) ? backupData[name].length : 0;
     if (!Number.isSafeInteger(expected) || expected < 0) {
-      errors.push(`${name} 缺少导出时的行数记录`);
+      errors.push(`${name} 的导出行数记录无效`);
     } else if (actual !== expected) {
-      errors.push(`${name} 有 ${actual ?? 0} 行，导出时为 ${expected} 行`);
+      errors.push(`${name} 有 ${actual} 行，导出时为 ${expected} 行`);
     }
   }
   return errors;
@@ -1147,11 +1151,13 @@ export function registerAdminBackupRoutes(router) {
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
       }
-      // 当前格式的导入（覆盖与合并都算）：每张年会表和流水的行数必须与导出时记在 _meta.tables 里的一致。
+      // 当前格式的导入（覆盖与合并都算）：各表行数必须与导出时记在 _meta.tables 里的一致（见 findGalaRowCountErrors）。
       // 被截短的数组（例如名单变成 []、中奖记录变成 []）在没有其他引用时校验发现不了：覆盖会恢复出残缺的活动，
       // 合并时随后的完成状态补齐还会把原本待发的发币轮当成已发完。当前格式只有整库导出，没有按活动的部分备份。
       {
-        const countErrors = findGalaRowCountErrors(backupData, backup?._meta);
+        const countErrors = findGalaRowCountErrors(backupData, backup?._meta, mode === 'overwrite'
+          ? { required: [...new Set([...FULL_TABLES, ...GALA_BACKUP_TABLES.map((t) => t.name)])] }
+          : undefined);
         if (countErrors.length) {
           await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
           return res.status(400).json({

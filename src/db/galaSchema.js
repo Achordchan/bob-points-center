@@ -148,6 +148,15 @@ BEGIN
   END IF;
 END $$;
 
+-- 旧版本在最后一笔到账提交后、发放收尾之前退出，会留下“正数奖励已全部到账、却仍是 drawn”的发币轮。
+-- 现在最后一笔到账与完成标记在同一事务里，不会再产生这种状态；这里在启动迁移时补齐（与备份导入的
+-- completeFinishedCoinRounds 同一条件：完成时间取最后一笔到账时间，没有则取轮次创建时间）。仍有待发奖励的轮次、无币轮不动。幂等。
+UPDATE gala_rounds r
+   SET status = 'granted',
+       granted_at = COALESCE((SELECT MAX(w.awarded_at) FROM gala_round_winners w WHERE w.round_id = r.id), r.created_at)
+ WHERE r.prize_type = 'coin' AND r.status = 'drawn'
+   AND NOT EXISTS (SELECT 1 FROM gala_round_winners w WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.amount > 0);
+
 -- 全量恢复状态：单行。generation 计数，version_token 是数据版本（建库时随机生成，每次成功的全量恢复换新值，
 -- 失败回滚则不变）。不进备份；写接口和发放用 version_token 识别“读到数据之后发生过恢复”，换库也不会撞上旧值。
 CREATE TABLE IF NOT EXISTS gala_restore_state (

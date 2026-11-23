@@ -109,9 +109,13 @@ function toNonNegativeInt(value) {
   return n !== null && n >= 0 ? n : null;
 }
 
+// 按完整 Unicode 字符截断：按 UTF-16 码元截断可能留下半个代理对，写库时被替换成 U+FFFD，
+// 与内存里的值不再相等（例如抽签重试比较标题时）。
 function cleanText(value, max = MAX_TITLE_LENGTH) {
   if (value === null || value === undefined) return '';
-  return String(value).trim().slice(0, max);
+  const text = String(value).trim();
+  if (text.length <= max) return text;
+  return Array.from(text).slice(0, max).join('');
 }
 
 // userid 原样比较（只去掉首尾空白），不截断：截断后可能匹配到前缀相同的另一个人。超长的直接拒绝。
@@ -347,7 +351,9 @@ export async function createGalaEvent(db, { title, eventDate, totalBudget, enabl
        VALUES(?, ?, ?, ?, ?, ?) RETURNING *`,
       [cleanTitle, cleanText(eventDate, 32) || null, budget, JSON.stringify(segments), actor.userid || null, actor.name || null],
     );
-    return serializeEvent(row);
+    // 同一事务、仍持恢复互斥共享锁时读数据版本：客户端紧接着配置奖池等写入就绑定在这场刚建的活动上，
+    // 中间若发生覆盖恢复（ID 可能被复用），后续写入会得到 gala_data_changed。
+    return { ...serializeEvent(row), gala_version: await readGalaVersion(tx) };
   });
 }
 
@@ -476,7 +482,9 @@ export async function createGalaPool(db, { eventId, name, sponsor, budget, reser
   }, expectedVersion);
 }
 
-export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowReserved = false, expectedVersion }) {
+// reserved：调用入口要求的奖池类型（员工入口 false、预留入口 true），必须与奖池实际类型一致，
+// 否则按找不到处理：在预留入口误传员工奖池 ID 不会改到员工预算，反之也不会暴露预留奖池。
+export async function updateGalaPool(db, { poolId, name, sponsor, budget, reserved = false, expectedVersion }) {
   const id = toPositiveId(poolId);
   if (!id) throw new GalaError('invalid_pool_id');
   return await inTx(db, async (tx) => {
@@ -486,7 +494,7 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
     if (!ref) throw new GalaError('pool_not_found', 404);
     const event = await tx.get('SELECT * FROM gala_events WHERE id = ? FOR UPDATE', [ref.event_id]);
     const pool = await tx.get('SELECT * FROM gala_pools WHERE id = ? FOR UPDATE', [id]);
-    if (!pool || (Number(pool.is_reserved) === 1 && !allowReserved)) throw new GalaError('pool_not_found', 404);
+    if (!pool || (Number(pool.is_reserved) === 1) !== (reserved === true)) throw new GalaError('pool_not_found', 404);
     const nextBudget = budget === undefined ? Number(pool.budget) : toNonNegativeInt(budget);
     if (nextBudget === null) throw new GalaError('invalid_budget');
     const reservedPool = Number(pool.is_reserved) === 1;
@@ -522,7 +530,7 @@ export async function updateGalaPool(db, { poolId, name, sponsor, budget, allowR
       `UPDATE gala_pools SET name = ?, sponsor = ?, budget = ?, updated_at = unixepoch() WHERE id = ? RETURNING *`,
       [nextName, sponsor === undefined ? pool.sponsor : (cleanText(sponsor, 40) || null), nextBudget, id],
     );
-    return serializePool(row, { allocated, includeReserved: allowReserved });
+    return serializePool(row, { allocated, includeReserved: reserved === true });
   }, expectedVersion);
 }
 

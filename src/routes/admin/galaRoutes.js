@@ -212,7 +212,7 @@ export function registerAdminGalaRoutes(router) {
       name: b.name,
       sponsor: b.sponsor,
       budget: b.budget,
-      allowReserved: true,
+      reserved: true,
       expectedVersion: versionOf(b),
     });
     res.json({ ok: true, data });

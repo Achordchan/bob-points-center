@@ -887,6 +887,13 @@ test('当前格式覆盖导入：年会表行数必须与导出记录一致', as
   // 缺少行数记录
   const { gala_rounds: _omit, ...partial } = tables;
   assert.ok(findGalaRowCountErrors(data, { galaFormat: 1, tables: partial }).some((e) => e.startsWith('gala_rounds')));
+  // 列出的其他表（如账户）被截短同样拒绝
+  const withAcc = { ...data, accounts: [{ userid: 'a' }, { userid: 'b' }] };
+  const accTables = { ...tables, accounts: 2 };
+  assert.deepEqual(findGalaRowCountErrors(withAcc, { galaFormat: 1, tables: accTables }), []);
+  assert.ok(findGalaRowCountErrors({ ...withAcc, accounts: [{ userid: 'a' }] }, { galaFormat: 1, tables: accTables }).some((e) => e.startsWith('accounts')));
+  // 覆盖导入要求的表必须有行数记录
+  assert.ok(findGalaRowCountErrors(data, { galaFormat: 1, tables }, { required: ['accounts'] }).some((e) => e.startsWith('accounts')));
   // 流水被截短同样拒绝
   assert.ok(findGalaRowCountErrors({ ...data, ledger: [] }, { galaFormat: 1, tables }).some((e) => e.startsWith('ledger')));
   // 旧格式不检查

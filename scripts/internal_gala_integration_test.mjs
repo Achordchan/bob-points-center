@@ -486,6 +486,23 @@ async function main() {
         console.log('✓ 抽签重试：活动结束后仍能拿回已抽结果；排除规则不同则拒绝');
       }
 
+      // 标题按完整字符截断：第 80 个字符是 emoji 时不会留下半个代理对，重试仍能识别为同一请求
+      {
+        const evE = await createGalaEvent(db, { title: `${PREFIX} 表情`, totalBudget: 0 });
+        assert.match(evE.gala_version, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, '创建活动同时返回数据版本');
+        assert.equal(evE.gala_version, (await db.get('SELECT version_token FROM gala_restore_state WHERE id = 1')).version_token);
+        await addGalaParticipants(db, { eventId: evE.id, userids: [uid(1), uid(2)] });
+        await addFiller(db, evE.id);
+        const title = `${'a'.repeat(79)}😀尾巴`;
+        const args = { eventId: evE.id, segment: 'lottery', drawCount: 1, title, expectedRoundNo: 1 };
+        const first = await drawGalaRound(db, args);
+        assert.equal(first.round.title, `${'a'.repeat(79)}😀`);
+        const again = await drawGalaRound(db, args);
+        assert.equal(again.replayed, true);
+        assert.equal(Number(again.round.id), Number(first.round.id));
+        console.log('✓ 标题按完整字符截断，含 emoji 的抽签重试仍返回原轮次；创建活动返回数据版本');
+      }
+
       // 最后一笔到账与整轮完成在同一事务：模拟到账提交后、发放收尾之前进程退出（不调用收尾）
       {
         const evK = await createGalaEvent(db, { title: `${PREFIX} 中断`, totalBudget: 0 });
@@ -918,11 +935,17 @@ async function main() {
       await enrolledSlot(db, { eventId: ev.id, segment: 'game', roundNo: 1, userid: uid(3), poolId: rp2.id });
       await drawGalaRound(db, { eventId: ev.id, segment: 'game', drawCount: 1, prizeType: 'coin', poolId: ep.id, amountEach: 30 });
       await assert.rejects(
-        updateGalaPool(db, { poolId: rp2.id, budget: 29, allowReserved: true }),
+        updateGalaPool(db, { poolId: rp2.id, budget: 29, reserved: true }),
         (e) => e.code === 'budget_below_spent' && e.spent === 0 && e.min_budget === 30,
       );
-      await updateGalaPool(db, { poolId: rp2.id, budget: 30, allowReserved: true });
-      console.log('✓ 预留奖励与本轮普通奖励一致；预留奖池不足时名额作废；预留预算不低于待发');
+      await updateGalaPool(db, { poolId: rp2.id, budget: 30, reserved: true });
+      // 两个更新入口只改各自类型的奖池：预留入口传员工奖池、员工入口传预留奖池都按找不到处理，预算不变
+      const epBefore = Number((await db.get('SELECT budget FROM gala_pools WHERE id = ?', [ep.id])).budget);
+      await assert.rejects(updateGalaPool(db, { poolId: ep.id, budget: epBefore + 1, reserved: true }), (e) => e.code === 'pool_not_found');
+      await assert.rejects(updateGalaPool(db, { poolId: rp2.id, budget: 31 }), (e) => e.code === 'pool_not_found');
+      assert.equal(Number((await db.get('SELECT budget FROM gala_pools WHERE id = ?', [ep.id])).budget), epBefore);
+      assert.equal(Number((await db.get('SELECT budget FROM gala_pools WHERE id = ?', [rp2.id])).budget), 30);
+      console.log('✓ 预留奖励与本轮普通奖励一致；预留奖池不足时名额作废；预留预算不低于待发；奖池更新入口只认对应类型');
     }
 
     // 参数严格校验：布尔、数组、超出 INTEGER 的值不会被隐式转换
@@ -1284,6 +1307,22 @@ async function realRestoreChecks(cfg) {
       assert.deepEqual(flags.map((x) => Number(x.f)), [1, 0, 1], '只有出现重复中奖的旧轮次回填为不排除');
       assert.deepEqual(flags.map((x) => Number(x.id)), [ra.round.id, rb.round.id, rc.round.id].map(Number));
     }
+    // 升级补齐：旧版本留下的“正数奖励已全部到账、仍是 drawn”的发币轮，启动迁移时标记完成；仍有待发的不动
+    {
+      const evG = await createGalaEvent(tdb, { title: 'RT 补齐', totalBudget: 0 });
+      const pG = await createGalaPool(tdb, { eventId: evG.id, name: '池', budget: 100 });
+      await addGalaParticipants(tdb, { eventId: evG.id, userids: users });
+      const done = await drawGalaRound(tdb, { eventId: evG.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pG.id, amountEach: 1 });
+      const open = await drawGalaRound(tdb, { eventId: evG.id, segment: 'lottery', drawCount: 2, prizeType: 'coin', poolId: pG.id, amountEach: 1 });
+      await grantRound(tdb, done.round.id);
+      // 模拟旧版本：到账已提交，收尾没执行
+      await tdb.run("UPDATE gala_rounds SET status = 'drawn', granted_at = NULL WHERE id = ?", [done.round.id]);
+      const lastPaid = Number((await tdb.get('SELECT MAX(awarded_at) AS t FROM gala_round_winners WHERE round_id = ?', [done.round.id])).t);
+      await tdb.exec(galaSchemaSql);
+      const st = await tdb.all('SELECT id, status, granted_at FROM gala_rounds WHERE id = ANY(?::bigint[]) ORDER BY id', [[done.round.id, open.round.id].map(Number)]);
+      assert.deepEqual(st.map((x) => [x.status, x.granted_at == null ? null : Number(x.granted_at)]), [['granted', lastPaid], ['drawn', null]]);
+      await tdb.run('DELETE FROM gala_events WHERE id = ?', [evG.id]);
+    }
 
     await generationChecks(tdb, users);
 
@@ -1417,6 +1456,16 @@ async function realRestoreChecks(cfg) {
       assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
       assert.ok(JSON.stringify(r.body).includes('gala_participants'));
       assert.deepEqual(await snapshot(), before3);
+    }
+    // 2c') 账户被截短：覆盖前拒绝，不会清掉已到账的余额而保留已发放标记
+    {
+      const noAcc = structuredClone(b0);
+      noAcc.data.accounts = noAcc.data.accounts.slice(1);
+      const before5 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: noAcc, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('accounts'));
+      assert.deepEqual(await snapshot(), before5);
     }
     // 2d) 合并导入同样核对行数：中奖记录被截成空数组时拒绝，不会把待发的发币轮补成已完成
     {
