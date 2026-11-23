@@ -108,6 +108,7 @@ import { registerAdminContentRoutes } from './contentRoutes.js';
 import { registerAdminSettingsRoutes } from './settingsRoutes.js';
 import { registerAdminBackupRoutes } from './backupRoutes.js';
 import { registerAdminAuctionRoutes } from './auctionRoutes.js';
+import { registerAdminGalaRoutes } from './galaRoutes.js';
 
 import {
   ADMIN_OAUTH_COOKIE,
@@ -2101,6 +2102,7 @@ export function adminRouter() {
   // ── 备份管理 ──────────────────────────────────────────────────────────────
   registerAdminBackupRoutes(router);
   registerAdminAuctionRoutes(router);
+  registerAdminGalaRoutes(router);
 
   return router;
 }

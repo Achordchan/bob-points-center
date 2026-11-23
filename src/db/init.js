@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
+import { galaSchemaSql } from './galaSchema.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -761,6 +762,8 @@ export async function initDb(input) {
   const db = new PgDb(pool);
   await db.get('SELECT 1');
   await db.exec(schemaSql);
+  await db.exec(galaSchemaSql);
+  await db.exec("ALTER TABLE gala_events ADD COLUMN IF NOT EXISTS enabled_segments TEXT NOT NULL DEFAULT '[]'");
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'dingtalk'");
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
   // 手机号唯一：外部账号一人一号；钉钉侧不上报手机号，历史数据保持 NULL。

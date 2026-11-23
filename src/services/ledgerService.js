@@ -41,6 +41,7 @@ export function formatLedgerReason(row = {}) {
   if (reason === 'auction_win_pay') return '竞拍成交扣款';
   if (reason === 'charity' || reason.startsWith('公益助力')) return reason.startsWith('公益助力') ? reason : '公益助力';
   if (reason === '打卡奖励') return '打卡奖励';
+  if (reason.startsWith('年会奖励')) return reason;
   return reason;
 }
 

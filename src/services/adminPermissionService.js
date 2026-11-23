@@ -24,6 +24,11 @@ export const ADMIN_PERMISSION_CATALOG = [
     { key: 'activities:view', label: '查看活动' },
     { key: 'activities:edit', label: '编辑活动' },
   ] },
+  { group: '年会', permissions: [
+    { key: 'gala:view', label: '查看年会' },
+    { key: 'gala:edit', label: '配置年会（活动、奖池、名单）' },
+    { key: 'gala:operate', label: '年会现场操作（抽签、发币）' },
+  ] },
   { group: '消息中心', permissions: [
     { key: 'messages:view', label: '查看消息配置' },
     { key: 'messages:edit', label: '编辑消息配置' },
@@ -59,7 +64,7 @@ const ROLE_DEFAULTS = [
     name: '运营管理员',
     permissions: [
       'dashboard:view', 'users:view', 'users:grant', 'orders:view', 'commerce:view', 'commerce:edit', 'commerce:cdk',
-      'activities:view', 'activities:edit', 'messages:view', 'messages:edit', 'messages:test', 'content:view', 'content:edit',
+      'activities:view', 'activities:edit', 'gala:view', 'gala:edit', 'gala:operate', 'messages:view', 'messages:edit', 'messages:test', 'content:view', 'content:edit',
     ],
   },
   { code: 'readonly_audit', name: '只读审计', permissions: ['dashboard:view', 'users:view', 'orders:view', 'commerce:view', 'activities:view', 'content:view', 'audit:view'] },
@@ -169,6 +174,10 @@ export function matchPathPermission(method, path) {
   if (p.startsWith('/settings/dingtalk/status')) return 'dashboard:view';
   if (p.startsWith('/settings/dingtalk/departments')) return ['integrations:view', 'activities:view'];
   if (p.startsWith('/red-packet') || p.startsWith('/charity') || p.startsWith('/auction') || p.startsWith('/settings/attendance-reward')) return m === 'GET' ? 'activities:view' : 'activities:edit';
+  // 年会：预留名额与预留奖池只对超级管理员开放。
+  if (p.startsWith('/gala/reserved')) return 'super';
+  if (p.startsWith('/gala/rounds/draw') || p.startsWith('/gala/rounds/grant')) return 'gala:operate';
+  if (p.startsWith('/gala')) return m === 'GET' ? 'gala:view' : 'gala:edit';
   if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';
   if (p.startsWith('/notify') || p.startsWith('/settings/notify') || p.startsWith('/settings/group-card')) return m === 'GET' ? 'messages:view' : 'messages:edit';
   if (p.startsWith('/content')) {
