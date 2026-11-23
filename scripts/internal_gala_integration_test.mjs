@@ -506,6 +506,29 @@ async function main() {
         console.log('✓ 最后一笔到账提交即标记整轮完成，不依赖发放收尾');
       }
 
+      // 异步到账通知失败：拒绝被接住，不产生未处理的 Promise 拒绝，后续发放照常完成
+      {
+        const evN = await createGalaEvent(db, { title: `${PREFIX} 通知失败`, totalBudget: 0 });
+        const pN = await createGalaPool(db, { eventId: evN.id, name: '通知池', budget: 100 });
+        await addGalaParticipants(db, { eventId: evN.id, userids: [uid(1), uid(2), uid(3)] });
+        await addFiller(db, evN.id);
+        const dN = await drawGalaRound(db, { eventId: evN.id, segment: 'lottery', drawCount: 3, prizeType: 'coin', poolId: pN.id, amountEach: 2 });
+        const unhandled = [];
+        const onUnhandled = (reason) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        let calls = 0;
+        try {
+          const res = await grantRound(db, dN.round.id, undefined, async () => { calls += 1; throw new Error('notify failed'); });
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          assert.equal(res.granted.length, 3);
+          assert.equal(calls, 3);
+          assert.equal(unhandled.length, 0, '通知失败不应成为未处理的拒绝');
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
+        console.log('✓ 异步到账通知失败不影响发放，也不产生未处理的拒绝');
+      }
+
       // 名单导入两种方式同时给出：拒绝，不静默按全员导入
       {
         const evA = await createGalaEvent(db, { title: `${PREFIX} 二选一`, totalBudget: 0 });
@@ -1347,6 +1370,9 @@ async function realRestoreChecks(cfg) {
       winners: await tdb.all('SELECT id, awarded_at, ledger_id FROM gala_round_winners ORDER BY id'),
       events: await tdb.all('SELECT id FROM gala_events ORDER BY id'),
     });
+    // 手工拼出的备份按当前格式导入：行数记录要与数组一致（行数校验对合并同样生效）
+    const recount = (b) => { b._meta.tables = Object.fromEntries(Object.keys(b.data).map((k) => [k, Array.isArray(b.data[k]) ? b.data[k].length : 0])); return b; };
+    recount(bad);
     const before = await snapshot();
     r = await call('POST', '/backup/import', { backup: bad, mode: 'merge' });
     assert.notEqual(r.status, 200);
@@ -1373,6 +1399,7 @@ async function realRestoreChecks(cfg) {
       early.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990002, event_id: 990002, budget: 7, spent: 7 }];
       early.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990002, event_id: 990002, pool_id: 990002, amount_each: 7 }];
       early.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990002, round_id: 990002, event_id: 990002, userid: users[1], pool_id: 990002, amount: 7, ledger_id: Number(old.id), created_at: now }];
+      recount(early);
       const before2 = await snapshot();
       r = await call('POST', '/backup/import', { backup: early, mode: 'merge' });
       assert.notEqual(r.status, 200);
@@ -1391,7 +1418,17 @@ async function realRestoreChecks(cfg) {
       assert.ok(JSON.stringify(r.body).includes('gala_participants'));
       assert.deepEqual(await snapshot(), before3);
     }
-    console.log('✓ 合并库拒绝早于中奖记录的付款凭据；覆盖导入核对年会表行数');
+    // 2d) 合并导入同样核对行数：中奖记录被截成空数组时拒绝，不会把待发的发币轮补成已完成
+    {
+      const trunc = structuredClone(bad);
+      trunc.data.gala_round_winners = [];
+      const before4 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: trunc, mode: 'merge' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('gala_round_winners'));
+      assert.deepEqual(await snapshot(), before4);
+    }
+    console.log('✓ 合并库拒绝早于中奖记录的付款凭据；覆盖与合并导入都核对年会表行数');
 
     // 3) 不认识的年会格式号：写库前拒绝，数据与代数不变
     {

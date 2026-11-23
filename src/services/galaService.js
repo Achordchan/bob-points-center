@@ -539,10 +539,21 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   if (userids !== undefined && userids !== null && !Array.isArray(userids)) throw new GalaError('invalid_userids');
   if (allActiveDingtalk && Array.isArray(userids) && userids.length > 0) throw new GalaError('ambiguous_participant_source');
   // 名单里任何一项无效（空值、空串、对象、数组等）都拒绝整批：静默丢弃会写入部分名单，回执里也看不出输入有误。
-  const cleaned = (Array.isArray(userids) ? userids : []).map((x) => cleanUserid(x));
-  const badIndex = allActiveDingtalk ? -1 : cleaned.findIndex((x) => !x);
-  if (badIndex >= 0) throw new GalaError('invalid_userid', 400, { index: badIndex });
-  const list = allActiveDingtalk ? [] : [...new Set(cleaned)];
+  // 按输入顺序逐项检查，清洗为空和清洗时抛错（超长、非安全整数）都报告当前位置，保证返回的是第一项无效值。
+  const cleaned = [];
+  if (!allActiveDingtalk) {
+    (Array.isArray(userids) ? userids : []).forEach((x, index) => {
+      let uid = '';
+      try {
+        uid = cleanUserid(x);
+      } catch {
+        uid = '';
+      }
+      if (!uid) throw new GalaError('invalid_userid', 400, { index });
+      cleaned.push(uid);
+    });
+  }
+  const list = [...new Set(cleaned)];
   if (!allActiveDingtalk && list.length === 0) throw new GalaError('userids_required');
   if (list.length > 2000) throw new GalaError('too_many_userids');
   // 先锁活动行再写名单，与抽签、创建预留名额、移出名单的加锁顺序一致：
@@ -1016,7 +1027,10 @@ export async function grantGalaRound(db, { roundId, grantToken, onAwarded }) {
       if (!r.skipped) {
         granted.push({ userid: r.userid, amount: r.amount, is_reserved: reserved });
         try {
-          onAwarded?.({ userid: r.userid, amount: r.amount });
+          // 回调可能是异步的：不等待（通知不拖慢发放），但必须接住它的拒绝，
+          // 否则一次通知失败会成为未处理的 Promise 拒绝，可能在部分奖励已提交后终止进程。
+          const pending = onAwarded?.({ userid: r.userid, amount: r.amount });
+          if (pending && typeof pending.then === 'function') pending.then(undefined, () => {});
         } catch {
           // 通知失败不影响已提交的发放
         }

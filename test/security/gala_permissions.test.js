@@ -74,7 +74,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   const base = {
     gala_events: [{ id: 10, total_budget: 0 }, { id: 20, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 500, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 100 }],
-    gala_participants: [{ id: 1, event_id: 10 }],
+    gala_participants: [{ id: 1, event_id: 10 }, { id: 2, event_id: 10, userid: 'k1' }, { id: 3, event_id: 10, userid: 'k3' }],
     gala_rounds: [{ id: 5, event_id: 10, segment: 'lottery', round_no: 1, draw_count: 10, pool_id: 1, prize_type: 'coin', amount_each: 50 }, { id: 6, event_id: 10, segment: 'game', round_no: 1, draw_count: 1, pool_id: null, prize_type: 'none', amount_each: 0 }],
     gala_round_winners: [
       { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
@@ -216,7 +216,7 @@ test('年会备份：金额精度、预留标记取值、已发放凭据与错�
   const ok = () => ({
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }, { id: 2, event_id: 1, is_reserved: 1, budget: 50, spent: 0 }],
-    gala_participants: [],
+    gala_participants: [{ id: 1, event_id: 1, userid: 'k' }],
     gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
     gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 55 }],
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, amount: 5, status: 'pending' }],
@@ -255,11 +255,11 @@ test('年会备份：标识符必须是安全范围内的正整数', () => {
 test('年会备份：待用名额必须落在可抽签环节', () => {
   const snap = {
     gala_events: [{ id: 1, total_budget: 0 }],
-    gala_pools: [{ id: 9, event_id: 1, is_reserved: 1, budget: 10, spent: 0 }], gala_participants: [], gala_rounds: [], gala_round_winners: [],
+    gala_pools: [{ id: 9, event_id: 1, is_reserved: 1, budget: 10, spent: 0 }], gala_participants: [{ id: 1, event_id: 1, userid: 'k' }], gala_rounds: [], gala_round_winners: [],
     gala_reserved_slots: [
-      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, amount: 0, pool_id: 9, status: 'pending' },
-      { id: 2, event_id: 1, segment: 'lotery', round_no: 1, amount: 0, pool_id: 9, status: 'pending' },
-      { id: 3, event_id: 1, segment: 'danmaku', round_no: 1, amount: 0, pool_id: 9, status: 'pending' },
+      { id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', amount: 0, pool_id: 9, status: 'pending' },
+      { id: 2, event_id: 1, segment: 'lotery', round_no: 1, userid: 'k', amount: 0, pool_id: 9, status: 'pending' },
+      { id: 3, event_id: 1, segment: 'danmaku', round_no: 1, userid: 'k', amount: 0, pool_id: 9, status: 'pending' },
       { id: 4, event_id: 1, segment: 'lotery', round_no: 1, amount: 0, status: 'cancelled' },
     ],
   };
@@ -561,7 +561,7 @@ test('年会备份：待用名额与在线创建一样，同一活动同一环�
   const base = () => ({
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }, { id: 2, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
-    gala_participants: [],
+    gala_participants: [{ id: 1, event_id: 1, userid: 'k' }],
     gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, prize_type: 'none', amount_each: 0, status: 'drawn' }],
     gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 0 }],
     gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 2, userid: 'k', pool_id: 2, status: 'pending' }],
@@ -974,5 +974,43 @@ test('名单导入：任何一项无效都拒绝整批，不静默丢弃', async
   for (const bad of [['u1', ''], ['u1', null], ['u1', { id: 1 }], ['u1', ['u2']], ['  ']]) {
     // eslint-disable-next-line no-await-in-loop
     await assert.rejects(addGalaParticipants(null, { eventId: 1, userids: bad }), (e) => e.code === 'invalid_userid' && Number.isInteger(e.index), JSON.stringify(bad));
+  }
+});
+
+test('年会备份：待用名额的持有人必须在同一活动的名单里，已使用、已取消的名额不受限', () => {
+  const snap = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }, { id: 2, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 1, budget: 100, spent: 0 }],
+    gala_participants: [{ id: 1, event_id: 1, userid: 'k' }, { id: 2, event_id: 2, userid: 'm' }],
+    gala_rounds: [],
+    gala_round_winners: [],
+    gala_reserved_slots: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, userid: 'k', pool_id: 1, status: 'pending' }],
+    ledger: [],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap()), []);
+  const out = snap();
+  out.gala_participants = out.gala_participants.filter((p) => p.userid !== 'k');
+  assert.ok(findGalaFundingErrors(out).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('参与名单')));
+  // 在别的活动的名单里不算
+  const other = snap();
+  other.gala_reserved_slots[0].userid = 'm';
+  assert.ok(findGalaFundingErrors(other).some((e) => e.startsWith('gala_reserved_slots#1') && e.includes('参与名单')));
+  const cancelled = snap();
+  cancelled.gala_participants = [];
+  cancelled.gala_reserved_slots[0].status = 'cancelled';
+  assert.deepEqual(findGalaFundingErrors(cancelled), []);
+});
+
+test('名单导入：第一项无效值的位置，包括清洗时抛错的超长、非安全整数', async () => {
+  const { addGalaParticipants } = await import('../../src/services/galaService.js');
+  const cases = [
+    [['ok', 'x'.repeat(5000)], 1],
+    [['', 'x'.repeat(5000)], 0],
+    [['ok', 9007199254740993], 1],
+    [['ok', 'ok2', null], 2],
+  ];
+  for (const [list, index] of cases) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(addGalaParticipants(null, { eventId: 1, userids: list }), (e) => e.code === 'invalid_userid' && e.index === index, String(index));
   }
 });

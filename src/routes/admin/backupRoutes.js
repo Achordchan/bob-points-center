@@ -627,6 +627,15 @@ export function findGalaFundingErrors(backupData) {
     if (!normalWinsByEventUser.has(key)) normalWinsByEventUser.set(key, []);
     normalWinsByEventUser.get(key).push(Number(r.id));
   }
+  // 待用名额的持有人必须在同一活动的名单里：在线创建要求先入名单，移出名单时名额同时作废。
+  // 不在名单里的待用名额恢复后，只要在预定轮次前重新导入此人就会兑现。已使用、已取消的名额是历史记录，不受此限。
+  const enrolled = new Set(asList(backupData?.gala_participants).map((p) => `${Number(p?.event_id)}:${String(p?.userid)}`));
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') !== 'pending') continue;
+    if (!enrolled.has(`${Number(slot?.event_id)}:${String(slot?.userid)}`)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人不在同一活动的参与名单里`);
+    }
+  }
   const liveSlotsByUser = new Map();
   for (const slot of asList(backupData?.gala_reserved_slots)) {
     if ((slot?.status ?? 'pending') === 'cancelled') continue;
@@ -1138,15 +1147,15 @@ export function registerAdminBackupRoutes(router) {
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
       }
-      // 当前格式的覆盖导入：每张年会表的行数必须与导出时记在 _meta.tables 里的一致。
-      // 覆盖会先清空年会表，被截短的数组（例如名单变成 []）在没有轮次、名额引用时其他校验发现不了，
-      // 会恢复出残缺的活动。部分合并导入不受此限制。
-      if (mode === 'overwrite') {
+      // 当前格式的导入（覆盖与合并都算）：每张年会表和流水的行数必须与导出时记在 _meta.tables 里的一致。
+      // 被截短的数组（例如名单变成 []、中奖记录变成 []）在没有其他引用时校验发现不了：覆盖会恢复出残缺的活动，
+      // 合并时随后的完成状态补齐还会把原本待发的发币轮当成已发完。当前格式只有整库导出，没有按活动的部分备份。
+      {
         const countErrors = findGalaRowCountErrors(backupData, backup?._meta);
         if (countErrors.length) {
           await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
           return res.status(400).json({
-            error: `年会数据行数与导出记录不一致，已拒绝覆盖导入：${countErrors.slice(0, 5).join('；')}`,
+            error: `年会数据行数与导出记录不一致，已拒绝导入：${countErrors.slice(0, 5).join('；')}`,
             errors: countErrors,
             backupMode,
           });
