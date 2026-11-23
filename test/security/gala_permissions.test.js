@@ -67,20 +67,20 @@ test('年会六张表纳入全量备份，且必须整组导入', async () => {
 test('年会备份资金关系校验：未发放奖励必须挂在同一活动、类型一致的奖池上', () => {
   const base = {
     gala_events: [{ id: 10, total_budget: 0 }, { id: 20, total_budget: 0 }],
-    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 100 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
+    gala_pools: [{ id: 1, event_id: 10, is_reserved: 0, budget: 100, spent: 50 }, { id: 2, event_id: 10, is_reserved: 1, budget: 50 }, { id: 3, event_id: 20, is_reserved: 0, budget: 10 }],
     gala_participants: [{ id: 1, event_id: 10 }],
-    gala_rounds: [{ id: 5, event_id: 10, pool_id: 1 }],
+    gala_rounds: [{ id: 5, event_id: 10, pool_id: 1, prize_type: 'coin', amount_each: 50 }, { id: 6, event_id: 10, pool_id: null, prize_type: 'none', amount_each: 0 }],
     gala_round_winners: [
       { id: 1, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: null },
-      { id: 2, round_id: 5, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
-      { id: 3, round_id: 5, event_id: 10, amount: 50, pool_id: 1, awarded_at: 1700000000 },
+      { id: 2, round_id: 6, event_id: 10, amount: 0, pool_id: null, awarded_at: null },
+      { id: 3, round_id: 5, event_id: 10, userid: 'u3', amount: 50, pool_id: 1, awarded_at: 1700000000, ledger_id: 900 },
       { id: 7, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 1, awarded_at: null },
     ],
     gala_reserved_slots: [
       { id: 1, event_id: 10, amount: 20, pool_id: 2, status: 'pending' },
       { id: 2, event_id: 10, amount: 20, pool_id: 2, status: 'used', used_round_id: 5 },
     ],
-    ledger: [{ id: 900, ref_id: 'GALA_W3' }, { id: 901, ref_id: 'ADMIN_X' }],
+    ledger: [{ id: 900, userid: 'u3', delta: 50, ref_id: 'GALA_W3' }, { id: 901, userid: 'u9', delta: 5, ref_id: 'ADMIN_X' }],
   };
   assert.deepEqual(findGalaFundingErrors(base), []);
   const bad = structuredClone(base);
@@ -134,7 +134,7 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
     gala_events: [{ id: 1, total_budget: 0 }],
     gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100 }],
     gala_participants: [],
-    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1 }],
+    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
     gala_round_winners: [{ id: 11, round_id: 1, event_id: 1, amount: 10, pool_id: 1, awarded_at: null }],
     gala_reserved_slots: [],
     ledger: [{ id: 1, ref_id: 'GALA_W11' }, { id: 2, ref_id: 'GALA_W12' }],
@@ -145,4 +145,43 @@ test('年会备份流水校验：已有发放流水的中奖记录必须已标�
   const legacy = { ledger: [{ id: 1, ref_id: 'GALA_W11' }] };
   assert.equal(findGalaFundingErrors(legacy).length, 1);
   assert.deepEqual(findGalaFundingErrors({ ledger: [{ id: 1, ref_id: 'ADMIN_1' }] }), []);
+});
+
+test('年会备份逐笔核对：流水收款人/金额/ledger_id、重复流水、奖池支出与轮次配置', () => {
+  const ok = () => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 20 }, { id: 2, event_id: 1, is_reserved: 0, budget: 100, spent: 0 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, pool_id: 1, prize_type: 'coin', amount_each: 10 }],
+    gala_round_winners: [
+      { id: 1, round_id: 1, event_id: 1, userid: 'a', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 101 },
+      { id: 2, round_id: 1, event_id: 1, userid: 'b', amount: 10, pool_id: 1, awarded_at: 1, ledger_id: 102 },
+    ],
+    gala_reserved_slots: [],
+    ledger: [
+      { id: 101, userid: 'a', delta: 10, ref_id: 'GALA_W1' },
+      { id: 102, userid: 'b', delta: 10, ref_id: 'GALA_W2' },
+    ],
+  });
+  assert.deepEqual(findGalaFundingErrors(ok()), []);
+
+  const wrongPayee = ok();
+  wrongPayee.ledger[1].userid = 'a';
+  assert.ok(findGalaFundingErrors(wrongPayee).some((e) => e.includes('收款人或金额')));
+
+  const dupLedger = ok();
+  dupLedger.ledger.push({ id: 103, userid: 'a', delta: 10, ref_id: 'GALA_W1' });
+  assert.ok(findGalaFundingErrors(dupLedger).some((e) => e.includes('重复指向')));
+
+  const wrongLink = ok();
+  wrongLink.gala_round_winners[0].ledger_id = 102;
+  assert.ok(findGalaFundingErrors(wrongLink).some((e) => e.includes('ledger_id')));
+
+  const underSpent = ok();
+  underSpent.gala_pools[0].spent = 0;
+  assert.ok(findGalaFundingErrors(underSpent).some((e) => e.startsWith('gala_pools#1') && e.includes('支出')));
+
+  const offRound = ok();
+  offRound.gala_round_winners.push({ id: 3, round_id: 1, event_id: 1, userid: 'c', amount: 100, pool_id: 2, awarded_at: null });
+  assert.ok(findGalaFundingErrors(offRound).some((e) => e.startsWith('gala_round_winners#3') && e.includes('轮次')));
 });

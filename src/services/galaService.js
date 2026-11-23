@@ -359,19 +359,18 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   const list = [...new Set((Array.isArray(userids) ? userids : []).map((x) => cleanText(x, 128)).filter(Boolean))];
   if (list.length === 0) throw new GalaError('userids_required');
   if (list.length > 2000) throw new GalaError('too_many_userids');
-  const found = await db.all('SELECT userid, name FROM users WHERE userid = ANY(?::text[])', [list]);
+  // 一条 INSERT … SELECT 原子写入整批名单：并发抽签只能看到导入前或导入后的完整名单，不会抽到半份名单。
+  const found = await db.all('SELECT userid FROM users WHERE userid = ANY(?::text[])', [list]);
   const foundSet = new Set(found.map((r) => r.userid));
-  let added = 0;
-  for (const user of found) {
-    const r = await db.run(
-      `INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
-       VALUES(?, ?, ?, ?, 'admin')
-       ON CONFLICT (event_id, userid) DO NOTHING`,
-      [id, user.userid, user.name || user.userid, table],
-    );
-    added += r.changes;
-  }
-  return { added, missing: list.filter((u) => !foundSet.has(u)) };
+  const result = await db.run(
+    `INSERT INTO gala_participants(event_id, userid, name_snapshot, table_no, source)
+     SELECT ?, u.userid, COALESCE(NULLIF(u.name, ''), u.userid), CAST(? AS INTEGER), 'admin'
+       FROM users u
+      WHERE u.userid = ANY(?::text[])
+     ON CONFLICT (event_id, userid) DO NOTHING`,
+    [id, table, list],
+  );
+  return { added: result.changes, missing: list.filter((u) => !foundSet.has(u)) };
 }
 
 export async function removeGalaParticipant(db, { eventId, userid }) {
@@ -538,10 +537,10 @@ export async function listGalaRounds(db, { eventId, includeReserved = false, lim
 }
 
 export function serializeDrawResult(result, { includeReserved = false } = {}) {
-  return {
-    ...serializeRound(result.round, result.winners, { includeReserved }),
-    eligible_count: result.eligibleCount,
-  };
+  const out = serializeRound(result.round, result.winners, { includeReserved });
+  // 候选人数已排除被预留的人，和参与名单人数一比就知道有人被预留，只给超管。
+  if (includeReserved) out.eligible_count = result.eligibleCount;
+  return out;
 }
 
 // ---------------------------------------------------------------- 发币

@@ -159,10 +159,11 @@ export function registerAdminGalaRoutes(router) {
     for (const g of result.granted) {
       publishMallRealtimeEvent('balance_changed', { userid: g.userid, reason: 'gala_award' });
     }
-    // 还有未发放的记录（奖池不足等）时不能宣布整轮已发完，只通知刷新。
+    // 这是广播给所有订阅者（含大屏、商城）的公共事件，只能按普通中奖记录判断是否发完，
+    // 预留名额的发放结果不能从这里体现；完整状态只在超管的 HTTP 回执里。
     publishMallRealtimeEvent('gala_changed', {
       round_id: result.round_id,
-      reason: result.pending === 0 ? 'round_granted' : 'round_grant_partial',
+      reason: result.pendingPublic === 0 ? 'round_granted' : 'round_grant_partial',
     });
     res.json({ ok: true, data: serializeGrantResult(result, { includeReserved: isSuper(req) }) });
   }));

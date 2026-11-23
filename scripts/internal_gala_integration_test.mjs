@@ -381,6 +381,7 @@ async function main() {
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal(r.body.data.winners.length, 3);
       assert.equal(r.body.data.draw_count, 3, '非超管看到的抽取人数等于名单人数');
+      assert.ok(!('eligible_count' in r.body.data), '非超管看不到排除预留后的候选人数');
       const PAYOUT_KEYS = ['is_reserved', 'pool_id', 'amount', 'awarded', 'awarded_at', 'award_error'];
       const noPayout = (w) => PAYOUT_KEYS.every((k) => !(k in w));
       assert.ok(r.body.data.winners.every(noPayout), '运营管理员的抽签返回不含逐人发放信息');

@@ -42,21 +42,48 @@ export function findGalaFundingErrors(backupData) {
   const winnersList = asList(backupData?.gala_round_winners);
   const winners = new Map(winnersList.map((w) => [Number(w?.id), w]));
 
-  // 发放流水是 awarded_at 幂等闸门的旁证：流水里有 GALA_W<id>，对应中奖记录就必须已标记发放，
-  // 否则恢复后会再发一次。没有年会表、流水里却有年会发放，说明不是真正的旧备份，同样拒绝。
-  for (const row of asList(backupData?.ledger)) {
+  // 发放流水是 awarded_at 幂等闸门的旁证，必须与中奖记录逐笔对上：
+  // - 流水里有 GALA_W<id>，对应中奖记录必须存在且已标记发放，否则恢复后会再发一次；
+  // - 收款人、金额必须一致，中奖记录的 ledger_id 若有值必须指向这条流水，否则真正的中奖人没拿到币、
+  //   闸门却已关闭，无法补发；
+  // - 同一条中奖记录只能有一条发放流水。
+  // 没有年会表、流水里却有年会发放，说明不是真正的旧备份，同样拒绝。
+  const ledgerRows = asList(backupData?.ledger);
+  const ledgerById = new Map(ledgerRows.map((r) => [Number(r?.id), r]));
+  const ledgerByWinner = new Map();
+  for (const row of ledgerRows) {
     const m = /^GALA_W(\d+)$/.exec(String(row?.ref_id || ''));
     if (!m) continue;
     if (!hasGala) {
       errors.push(`ledger#${row?.id} 含年会发放流水 ${row.ref_id}，但备份缺少年会数据`);
       continue;
     }
-    const w = winners.get(Number(m[1]));
+    const wid = Number(m[1]);
+    if (ledgerByWinner.has(wid)) {
+      errors.push(`ledger#${row?.id} 与 ledger#${ledgerByWinner.get(wid).id} 重复指向 ${row.ref_id}`);
+      continue;
+    }
+    ledgerByWinner.set(wid, row);
+    const w = winners.get(wid);
     if (!w || w.awarded_at == null) {
       errors.push(`ledger#${row?.id} 已发放 ${row.ref_id}，但对应中奖记录不存在或未标记发放`);
+      continue;
+    }
+    if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
+      errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
+    }
+    if (w.ledger_id != null && Number(w.ledger_id) !== Number(row.id)) {
+      errors.push(`gala_round_winners#${wid} 的 ledger_id ${w.ledger_id} 与发放流水 ledger#${row.id} 不一致`);
     }
   }
   if (!hasGala) return errors;
+  for (const w of winnersList) {
+    if (w?.ledger_id == null) continue;
+    const linked = ledgerById.get(Number(w.ledger_id));
+    if (linked && String(linked.ref_id || '') !== `GALA_W${w.id}`) {
+      errors.push(`gala_round_winners#${w.id} 的 ledger_id ${w.ledger_id} 指向的不是它自己的发放流水`);
+    }
+  }
 
   const events = new Map(asList(backupData?.gala_events).map((e) => [Number(e?.id), e]));
   const pools = new Map(asList(backupData?.gala_pools).map((p) => [Number(p?.id), p]));
@@ -91,6 +118,20 @@ export function findGalaFundingErrors(backupData) {
     if (cap > 0 && total > cap) errors.push(`gala_events#${eventId} 员工奖池预算合计 ${total} 超过活动总预算 ${cap}`);
   }
 
+  // 已发奖励必须已计入奖池支出，否则恢复后奖池还能再发一遍。
+  const awardedByPool = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at == null || w?.pool_id == null) continue;
+    const key = Number(w.pool_id);
+    awardedByPool.set(key, (awardedByPool.get(key) || 0) + Number(w.amount || 0));
+  }
+  for (const [poolId, total] of awardedByPool) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool.spent || 0) < total) {
+      errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 小于已发奖励合计 ${total}`);
+    }
+  }
+
   for (const w of winnersList) {
     const round = rounds.get(Number(w?.round_id));
     if (!round || Number(round.event_id) !== Number(w?.event_id)) {
@@ -98,6 +139,17 @@ export function findGalaFundingErrors(backupData) {
       continue;
     }
     const reserved = Number(w?.is_reserved) === 1;
+    // 普通中奖记录的奖池与金额必须和所属轮次的配置一致；预留记录有自己的奖池和金额。
+    if (!reserved) {
+      const coin = round.prize_type === 'coin';
+      const expectPool = coin ? Number(round.pool_id) : null;
+      const expectAmount = coin ? Number(round.amount_each || 0) : 0;
+      const gotPool = w?.pool_id == null ? null : Number(w.pool_id);
+      if (gotPool !== expectPool || Number(w?.amount || 0) !== expectAmount) {
+        errors.push(`gala_round_winners#${w?.id} 的奖池或金额与轮次 ${round.id} 的配置不一致`);
+        continue;
+      }
+    }
     if (w?.pool_id != null && !poolOk(w.pool_id, w.event_id, reserved)) {
       errors.push(`gala_round_winners#${w?.id} 引用的奖池 ${w.pool_id} 不是同一活动的${reserved ? '预留' : '员工'}奖池`);
     } else if (w?.awarded_at == null && Number(w?.amount) > 0 && w?.pool_id == null) {
@@ -2382,7 +2434,10 @@ export function registerAdminBackupRoutes(router) {
               const placeholders = table.columns.map((_, i) => `$${i + 1}`).join(',');
               for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
-                if (!row?.id) continue;
+                if (!(Number(row?.id) > 0)) {
+                  // 缺主键的行不能静默跳过：覆盖导入已清表，跳过就等于悄悄丢掉一条奖励或名单。
+                  markAndThrow(table.name, i, new Error('缺少有效主键 id'));
+                }
                 try {
                   // eslint-disable-next-line no-await-in-loop
                   await execOrThrow(
