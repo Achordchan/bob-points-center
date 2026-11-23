@@ -77,8 +77,8 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
       { id: 7, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 1, awarded_at: null },
     ],
     gala_reserved_slots: [
-      { id: 1, event_id: 10, amount: 20, pool_id: 2, status: 'pending' },
-      { id: 2, event_id: 10, amount: 20, pool_id: 2, status: 'used', used_round_id: 5 },
+      { id: 1, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 2, status: 'pending' },
+      { id: 2, event_id: 10, segment: 'lottery', round_no: 1, amount: 20, pool_id: 2, status: 'used', used_round_id: 5 },
     ],
     ledger: [{ id: 900, userid: 'u3', delta: 50, ref_id: 'GALA_W3' }, { id: 901, userid: 'u9', delta: 5, ref_id: 'ADMIN_X' }],
   };
@@ -89,7 +89,7 @@ test('年会备份资金关系校验：未发放奖励必须挂在同一活动�
   bad.gala_round_winners.push({ id: 6, round_id: 99, event_id: 10, amount: 0, pool_id: null, awarded_at: null });
   bad.gala_round_winners.push({ id: 8, round_id: 5, event_id: 10, amount: 30, pool_id: 1, is_reserved: 1, awarded_at: null });
   bad.gala_round_winners.push({ id: 9, round_id: 5, event_id: 10, amount: 30, pool_id: 2, is_reserved: 0, awarded_at: null });
-  bad.gala_reserved_slots.push({ id: 3, event_id: 10, amount: 20, pool_id: 1, status: 'pending' });
+  bad.gala_reserved_slots.push({ id: 3, event_id: 10, segment: 'lottery', round_no: 9, amount: 20, pool_id: 1, status: 'pending' });
   const errors = findGalaFundingErrors(bad);
   const tags = ['gala_round_winners#4', 'gala_round_winners#5', 'gala_round_winners#6', 'gala_round_winners#8', 'gala_round_winners#9', 'gala_reserved_slots#3'];
   assert.equal(errors.length, tags.length, errors.join('\n'));
