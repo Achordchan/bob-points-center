@@ -1158,7 +1158,10 @@ async function generationChecks(db, users) {
     const errs = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND award_error IS NOT NULL', [d.round.id]);
     assert.equal(Number(errs.n), 0);
     const r1 = await db.get('SELECT status FROM gala_rounds WHERE id = ?', [d.round.id]);
-    if (g.status === 'rejected') assert.equal(r1.status, 'drawn', '中途停止的发放不应标记整轮完成');
+    // 恢复可能恰好落在最后一笔到账之后、收尾之前：此时整轮已在最后一笔的事务里标记完成，请求仍返回 round_changed。
+    // 所以按实际待发笔数断言：还有待发的不能标记完成，没有待发的必须已标记完成。
+    const left = await db.get('SELECT COUNT(*) AS n FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NULL AND amount > 0', [d.round.id]);
+    assert.equal(r1.status, Number(left.n) > 0 ? 'drawn' : 'granted', `待发 ${left.n} 笔时轮次状态应与之一致`);
     const paidSoFar = await db.all('SELECT userid FROM gala_round_winners WHERE round_id = ? AND awarded_at IS NOT NULL ORDER BY userid', [d.round.id]);
     assert.deepEqual(notified.slice().sort(), paidSoFar.map((x) => x.userid), '每笔到账都已通知，中途停止也不漏');
     await grantRound(db, d.round.id);
@@ -1354,6 +1357,38 @@ async function realRestoreChecks(cfg) {
     r = await call('POST', '/gala/participants/remove', { gala_version: await galaVersion(), event_id: ev.id, userid: 9007199254740993 });
     assert.deepEqual([r.status, r.body?.error], [400, 'invalid_userid']);
     console.log('✓ 真实全量恢复：恢复点含最后一笔已到账奖励，旧凭据/旧版本作废，后置核对失败时一切不变；锁竞争重试只生效一次');
+
+    // 2b) 合并库核对付款凭据的时间：目标库里一条早于中奖记录的同名流水，不能被备份里的中奖记录认作付款
+    {
+      const old = await tdb.get(
+        `INSERT INTO ledger(userid, delta, reason, ref_id, created_at) VALUES(?, 7, '年会奖励·抽奖·第1轮', 'GALA_W990002', ?) RETURNING id`,
+        [users[1], now - 1000],
+      );
+      const early = structuredClone(bad);
+      early.data.ledger = [];
+      early.data.gala_events = [{ ...bad.data.gala_events[0], id: 990002, title: 'RT 早于' }];
+      early.data.gala_pools = [{ ...bad.data.gala_pools[0], id: 990002, event_id: 990002, budget: 7, spent: 7 }];
+      early.data.gala_rounds = [{ ...bad.data.gala_rounds[0], id: 990002, event_id: 990002, pool_id: 990002, amount_each: 7 }];
+      early.data.gala_round_winners = [{ ...bad.data.gala_round_winners[0], id: 990002, round_id: 990002, event_id: 990002, userid: users[1], pool_id: 990002, amount: 7, ledger_id: Number(old.id), created_at: now }];
+      const before2 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: early, mode: 'merge' });
+      assert.notEqual(r.status, 200);
+      assert.ok(JSON.stringify(r.body).includes('不属于它的流水'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), before2);
+      await tdb.run('DELETE FROM ledger WHERE id = ?', [old.id]);
+    }
+    // 2c) 当前格式的覆盖导入：年会表被截短（名单变成空数组）时拒绝，不恢复出残缺的活动
+    {
+      const cut = structuredClone(b0);
+      assert.ok(cut.data.gala_participants.length > 0);
+      cut.data.gala_participants = [];
+      const before3 = await snapshot();
+      r = await call('POST', '/backup/import', { backup: cut, mode: 'overwrite' });
+      assert.equal(r.status, 400, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('gala_participants'));
+      assert.deepEqual(await snapshot(), before3);
+    }
+    console.log('✓ 合并库拒绝早于中奖记录的付款凭据；覆盖导入核对年会表行数');
 
     // 3) 不认识的年会格式号：写库前拒绝，数据与代数不变
     {

@@ -27,7 +27,7 @@ import {
 import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
 
 // 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
-const GALA_BACKUP_TABLES = [
+export const GALA_BACKUP_TABLES = [
   { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: JSON.stringify(Object.keys(GALA_SEGMENTS)) } },
   { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
   { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
@@ -47,6 +47,24 @@ export function requiresGalaTables(meta) {
   if (meta?.galaFormat != null) return true;
   const listed = meta?.tables && typeof meta.tables === 'object' ? Object.keys(meta.tables) : [];
   return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
+}
+
+// 当前格式（_meta.galaFormat）的导出在 _meta.tables 里记了每张表的行数：逐张年会表核对，返回错误描述列表。
+// 行数缺失或不是非负整数同样视为不一致。旧格式备份不检查。
+export function findGalaRowCountErrors(backupData, meta) {
+  if (meta?.galaFormat == null) return [];
+  const listed = meta?.tables && typeof meta.tables === 'object' ? meta.tables : {};
+  const errors = [];
+  for (const t of GALA_BACKUP_TABLES) {
+    const expected = listed[t.name];
+    const actual = Array.isArray(backupData?.[t.name]) ? backupData[t.name].length : null;
+    if (!Number.isSafeInteger(expected) || expected < 0) {
+      errors.push(`${t.name} 缺少导出时的行数记录`);
+    } else if (actual !== expected) {
+      errors.push(`${t.name} 有 ${actual ?? 0} 行，导出时为 ${expected} 行`);
+    }
+  }
+  return errors;
 }
 
 // 写库前整理年会行，返回错误描述列表。当前格式的备份必须带全部列（见下方）；
@@ -163,6 +181,10 @@ export function findGalaFundingErrors(backupData) {
     if (w.ledger_id != null && Number(w.ledger_id) === Number(row.id)) {
       if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
         errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
+      } else if (!couldPayWinner(row, w)) {
+        // 付款不可能早于抽签：更早的同名流水是升级前的历史记录，不是这笔奖励的付款。
+        // 接受它会让 awarded_at 挡住之后的发放，真正的奖励却从未支付。
+        errors.push(`ledger#${row?.id} 早于中奖记录 ${row.ref_id} 产生，不可能是它的付款凭据`);
       }
     } else if (w.awarded_at == null && couldPayWinner(row, w)) {
       errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
@@ -1083,6 +1105,20 @@ export function registerAdminBackupRoutes(router) {
         const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
         await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
         return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
+      }
+      // 当前格式的覆盖导入：每张年会表的行数必须与导出时记在 _meta.tables 里的一致。
+      // 覆盖会先清空年会表，被截短的数组（例如名单变成 []）在没有轮次、名额引用时其他校验发现不了，
+      // 会恢复出残缺的活动。部分合并导入不受此限制。
+      if (mode === 'overwrite') {
+        const countErrors = findGalaRowCountErrors(backupData, backup?._meta);
+        if (countErrors.length) {
+          await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
+          return res.status(400).json({
+            error: `年会数据行数与导出记录不一致，已拒绝覆盖导入：${countErrors.slice(0, 5).join('；')}`,
+            errors: countErrors,
+            backupMode,
+          });
+        }
       }
       // 轮次的排除开关：当前格式必须带齐，旧格式按中奖记录推断并写回（见 prepareGalaRoundFlags）。
       {
@@ -3042,13 +3078,14 @@ export function registerAdminBackupRoutes(router) {
             }
             // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水。
             // 导入后对整张表核对，而不只是本次导入的中奖记录：备份里一条无关流水也可能恰好占用目标库
-            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录。
+            // 已有中奖记录空出来的 ledger_id。指向的流水若存在，ref_id 必须正是这条中奖记录，且不早于中奖记录产生。
             const mismatched = await tx.all(
               `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
                 WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
                    OR l.userid IS DISTINCT FROM w.userid
                    OR l.delta IS DISTINCT FROM w.amount
                    OR NOT starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                   OR l.created_at < w.created_at
                 ORDER BY w.id LIMIT 20`,
               [],
             );

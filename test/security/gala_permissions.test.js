@@ -755,11 +755,21 @@ test('旧格式备份缺少排除开关：按中奖记录推断（与升级迁�
   for (const r of explicit.gala_rounds) r.exclude_previous_winners = 1;
   assert.deepEqual(prepareGalaRoundFlags(explicit, { version: 2 }), []);
   assert.ok(findGalaFundingErrors(explicit).some((e) => e.startsWith('gala_round_winners#2')));
-  // 当前格式：缺失不推断，直接拒绝（损坏的备份不能借推断放过重复中奖）
+  // 当前格式：缺失不推断，直接拒绝（损坏的备份不能借推断放过重复中奖）。
+  // 用带齐全部列的样本，只删掉第 2 轮（有重复中奖、旧格式会被推断为 0）的这一列。
+  const { GALA_BACKUP_TABLES } = await import('../../src/routes/admin/backupRoutes.js');
   const current = snap();
+  for (const t of GALA_BACKUP_TABLES) {
+    for (const row of current[t.name] || []) {
+      for (const c of t.columns) if (!Object.hasOwn(row, c)) row[c] = c === 'exclude_previous_winners' ? 1 : null;
+    }
+  }
+  assert.deepEqual(prepareGalaRoundFlags(structuredClone(current), { version: 2, galaFormat: 1 }), []);
+  delete current.gala_rounds[1].exclude_previous_winners;
   const errs = prepareGalaRoundFlags(current, { version: 2, galaFormat: 1 });
-  assert.equal(errs.filter((e) => e.includes('缺少 exclude_previous_winners')).length, 4);
-  assert.ok(current.gala_rounds.every((r) => r.exclude_previous_winners === undefined));
+  assert.equal(errs.length, 2, errs.join('\n'));
+  assert.ok(errs.every((e) => e.startsWith('gala_rounds#2') && e.includes('exclude_previous_winners')), errs.join('\n'));
+  assert.equal(current.gala_rounds[1].exclude_previous_winners, undefined, '当前格式不推断');
   // 取值非法
   const badVal = snap();
   for (const r of badVal.gala_rounds) r.exclude_previous_winners = 1;
@@ -854,5 +864,54 @@ test('当前格式备份：年会行缺任何一列都拒绝（不套默认值�
     const errs = prepareGalaRoundFlags(b, { version: 2, galaFormat: 1 });
     assert.ok(errs.some((e) => e.startsWith('gala_events#1') && e.includes(col)), errs.join('\n'));
     assert.deepEqual(prepareGalaRoundFlags(b, { version: 2 }), []);
+  }
+});
+
+test('当前格式覆盖导入：年会表行数必须与导出记录一致', async () => {
+  const { findGalaRowCountErrors, GALA_BACKUP_TABLES } = await import('../../src/routes/admin/backupRoutes.js');
+  const data = Object.fromEntries(GALA_BACKUP_TABLES.map((t) => [t.name, []]));
+  data.gala_events = [{ id: 1 }];
+  data.gala_participants = [{ id: 1 }, { id: 2 }];
+  const tables = Object.fromEntries(GALA_BACKUP_TABLES.map((t) => [t.name, data[t.name].length]));
+  assert.deepEqual(findGalaRowCountErrors(data, { galaFormat: 1, tables }), []);
+  // 名单被截成空数组
+  const cut = { ...data, gala_participants: [] };
+  assert.ok(findGalaRowCountErrors(cut, { galaFormat: 1, tables }).some((e) => e.startsWith('gala_participants')));
+  // 缺少行数记录
+  const { gala_rounds: _omit, ...partial } = tables;
+  assert.ok(findGalaRowCountErrors(data, { galaFormat: 1, tables: partial }).some((e) => e.startsWith('gala_rounds')));
+  // 旧格式不检查
+  assert.deepEqual(findGalaRowCountErrors(cut, { tables }), []);
+});
+
+test('年会备份：中奖记录引用的付款流水不能早于中奖记录产生', () => {
+  const snap = (ledgerAt) => ({
+    gala_events: [{ id: 1, total_budget: 0 }],
+    gala_pools: [{ id: 1, event_id: 1, is_reserved: 0, budget: 100, spent: 10 }],
+    gala_participants: [],
+    gala_rounds: [{ id: 1, event_id: 1, segment: 'lottery', round_no: 1, draw_count: 1, pool_id: 1, prize_type: 'coin', amount_each: 10, status: 'granted', granted_at: 2000 }],
+    gala_round_winners: [{ id: 1, round_id: 1, event_id: 1, userid: 'u', amount: 10, pool_id: 1, awarded_at: 2000, ledger_id: 5, created_at: 1000 }],
+    gala_reserved_slots: [],
+    ledger: [{ id: 5, userid: 'u', delta: 10, reason: '年会奖励·抽奖·第1轮', ref_id: 'GALA_W1', created_at: ledgerAt }],
+  });
+  assert.deepEqual(findGalaFundingErrors(snap(1500)), []);
+  assert.ok(findGalaFundingErrors(snap(500)).some((e) => e.startsWith('ledger#5') && e.includes('早于')));
+  // 用户重置后流水已删、凭据仍保留：合法
+  const purged = snap(1500);
+  purged.ledger = [];
+  assert.deepEqual(findGalaFundingErrors(purged), []);
+});
+
+test('名单导入与抽签：参数类型不对时拒绝，不猜意图', async () => {
+  const { addGalaParticipants, drawGalaRound } = await import('../../src/services/galaService.js');
+  await assert.rejects(addGalaParticipants(null, { eventId: 1, userids: 'u1', allActiveDingtalk: true }), (e) => e.code === 'invalid_userids');
+  await assert.rejects(addGalaParticipants(null, { eventId: 1, userids: ['u1'], allActiveDingtalk: true }), (e) => e.code === 'ambiguous_participant_source');
+  for (const v of ['false', 0, 1, null]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(
+      drawGalaRound(null, { eventId: 1, segment: 'lottery', drawCount: 1, excludePreviousWinners: v, expectedRoundNo: 1 }),
+      (e) => e.code === 'invalid_exclude_previous_winners' && e.status === 400,
+      String(v),
+    );
   }
 });

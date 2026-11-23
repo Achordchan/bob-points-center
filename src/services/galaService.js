@@ -517,6 +517,9 @@ export async function addGalaParticipants(db, { eventId, userids = [], allActive
   const table = tableNo === null || tableNo === undefined || tableNo === '' ? null : toPositiveId(tableNo, PG_INT_MAX);
   if (tableNo !== null && tableNo !== undefined && tableNo !== '' && table === null) throw new GalaError('invalid_table_no');
   // 两种导入方式二选一：同时给了名单和“全部在册员工”时不猜意图（静默按全员导入会改变整场候选名单），直接拒绝。
+  // 显式给出的 userids 必须是数组（缺省或 null 视为没给），且全员导入时必须为空：
+  // 字符串等错误类型不能被当成“没给名单”而落到全员导入上。
+  if (userids !== undefined && userids !== null && !Array.isArray(userids)) throw new GalaError('invalid_userids');
   if (allActiveDingtalk && Array.isArray(userids) && userids.length > 0) throw new GalaError('ambiguous_participant_source');
   const list = allActiveDingtalk
     ? []
@@ -633,6 +636,8 @@ export async function drawGalaRound(db, {
   if (!GALA_DRAW_SEGMENTS.has(seg)) throw new GalaError('segment_not_drawable');
   const count = toPositiveId(drawCount, MAX_DRAW_COUNT);
   if (!count) throw new GalaError('invalid_draw_count');
+  // 排除开关只接受布尔值：字符串 "false"、数字 0 等不猜意图，免得按与预期不同的候选名单落库。
+  if (typeof excludePreviousWinners !== 'boolean') throw new GalaError('invalid_exclude_previous_winners');
   if (!['none', 'coin'].includes(prizeType)) throw new GalaError('invalid_prize_type');
   const amount = prizeType === 'coin' ? toNonNegativeInt(amountEach) : 0;
   if (prizeType === 'coin' && (!amount || amount <= 0)) throw new GalaError('invalid_amount_each');

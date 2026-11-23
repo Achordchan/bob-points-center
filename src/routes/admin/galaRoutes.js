@@ -162,7 +162,7 @@ export function registerAdminGalaRoutes(router) {
       prizeType: b.prize_type === undefined || b.prize_type === null ? 'none' : b.prize_type,
       poolId: b.pool_id,
       amountEach: b.amount_each,
-      excludePreviousWinners: b.exclude_previous_winners !== false,
+      excludePreviousWinners: b.exclude_previous_winners === undefined ? true : b.exclude_previous_winners,
       actor: actorOf(req),
       expectedVersion: versionOf(b),
       // 必传：本环节要抽的轮次号（最新一轮 + 1）。同样参数的重试返回已抽出的那一轮，不会多抽。
