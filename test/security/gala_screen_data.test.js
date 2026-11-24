@@ -402,3 +402,30 @@ test('src/admin-app/src/screen/ 目录下代码与注释不含敏感词且不引
     assert.doesNotMatch(text, /from\s+['"][^'"]*api\.js['"]|from\s+['"]\.\.\/api['"]/, `${name} 不得引用管理端 api.js`);
   }
 });
+
+test('揭晓名字卡：超长名字最小字号单行放不下时折行且放得进卡片，常规名字仍单行', async () => {
+  const { computeCardNameFit, estimateVisualUnits, NAME_LINE_HEIGHT, WRAP_MIN_FONT_PX } = await import('../../src/admin-app/src/screen/nameFit.js');
+  const layouts = [
+    { cols: 8, cardW: Math.floor((1760 - 7 * 16) / 8), cardH: 74, fontSize: 30, tier: 'dense', padX: 24, padY: 12 },
+    { cols: 8, cardW: Math.floor((1760 - 7 * 20) / 8), cardH: 110, fontSize: 34, tier: 'compact', padX: 24, padY: 12 },
+    { cols: 6, cardW: Math.floor((1760 - 5 * 24) / 6), cardH: 132, fontSize: 42, tier: 'normal', padX: 32, padY: 24 },
+    { cols: 5, cardW: 328, cardH: 168, fontSize: 54, tier: 'medium', padX: 32, padY: 24 },
+    { cols: 1, cardW: 900, cardH: 300, fontSize: 160, tier: 'hero', padX: 100, padY: 52 },
+  ];
+  const longNames = ['Christopher Alexander Montgomery-Williams', 'Maximilian Bartholomew Featherstonehaugh-Smythe', 'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ'];
+  for (const layout of layouts) {
+    for (const name of ['张三', '欧阳娜娜', 'Maria Garcia']) {
+      const fit = computeCardNameFit(name, layout);
+      assert.equal(fit.lines, 1, `${layout.tier} ${name}`);
+      assert.ok(fit.fontSize * estimateVisualUnits(name) <= layout.cardW - layout.padX, `${layout.tier} ${name} 单行放得下`);
+    }
+    for (const name of longNames) {
+      const fit = computeCardNameFit(name, layout);
+      const lineWidth = (layout.cardW - layout.padX) * fit.lines;
+      assert.ok(fit.fontSize >= WRAP_MIN_FONT_PX);
+      assert.ok(fit.fontSize * estimateVisualUnits(name) <= lineWidth, `${layout.tier} ${name} 宽度放得下`);
+      assert.ok(fit.lines * fit.fontSize * NAME_LINE_HEIGHT <= layout.cardH - layout.padY, `${layout.tier} ${name} 高度放得下`);
+    }
+  }
+  assert.equal(computeCardNameFit('Christopher Alexander Montgomery-Williams', layouts[0]).lines > 1, true, '密集网格里的超长名字必须折行');
+});

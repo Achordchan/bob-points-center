@@ -1157,6 +1157,18 @@ body,
   color: var(--gs-ivory);
 }
 
+/* 超长名字（最小字号单行也放不下）在卡片内折行，行数由内联 -webkit-line-clamp 给出；
+   溢出隐藏兜底，任何情况下都不越出卡片压到相邻中奖人。 */
+.gs-reveal-card-name-wrap {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  letter-spacing: 0.02em;
+}
+
 @keyframes gs-reveal-card-in {
   0% {
     opacity: 0;

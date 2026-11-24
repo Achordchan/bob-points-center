@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import NameSphere from './NameSphere.jsx';
+import { computeCardNameFit } from './nameFit.js';
 
 const WAITING_SPEED_RPS = 0.65;
 const DECELERATE_DURATION_MS = 1200;
@@ -21,8 +22,6 @@ const PAGE_INTERVAL_MS = 10000;
 const PAGE_TRANSITION_MS = 600;
 const COMPACT_HEADER_THRESHOLD = 24;
 const STAGE_INNER_WIDTH = 1760;
-const MIN_SCREEN_FONT_SIZE = 28;
-const LONG_NAME_MIN_FONT_PX = 14;
 
 const CONFETTI_COLORS = ['#F6D58E', '#C9973B', '#C8102E', '#FFF4DC'];
 
@@ -160,62 +159,6 @@ function computeWinnerLayout(pageSize) {
   const gap = 16;
   const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
   return { cols: 8, cardW, cardH: 74, gap, fontSize: 30, tier: 'dense', groupGap: 24 };
-}
-
-function countNameChars(text) {
-  return Array.from(String(text || '').trim()).length;
-}
-
-function getLengthScaleFactor(charCount) {
-  if (charCount <= 3) return 1;
-  if (charCount === 4) return 0.85;
-  if (charCount === 5) return 0.75;
-  return 0.65;
-}
-
-function estimateVisualUnits(text) {
-  const str = String(text || '').trim();
-  let units = 0;
-  for (const ch of str) {
-    const code = ch.codePointAt(0) || 0;
-    if (code <= 0x7f) {
-      units += code >= 0x41 && code <= 0x5a ? 0.8 : 0.64;
-    } else {
-      units += 1.06;
-    }
-  }
-  return Math.max(1, units);
-}
-
-function computeCardFontSize(name, layout) {
-  const text = String(name || '').trim();
-  const chars = countNameChars(text);
-  const units = estimateVisualUnits(text);
-  const horizontalPadding = layout.tier === 'hero'
-    ? 100
-    : layout.tier === 'dense' || layout.tier === 'compact'
-      ? 24
-      : 32;
-  const availWidth = Math.max(80, layout.cardW - horizontalPadding);
-  const fitWidth = Math.floor(availWidth / units);
-
-  if (layout.cols >= 6) {
-    const baseSize = Math.max(MIN_SCREEN_FONT_SIZE, layout.fontSize);
-    if (chars < 5) {
-      return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(baseSize, fitWidth));
-    }
-    // 6–8 列名字卡字号默认不低于 28px；仅当名字 ≥5 个字且 28px 放不下时按比例缩小到刚好放下，不使用省略号
-    if (fitWidth >= MIN_SCREEN_FONT_SIZE) {
-      return Math.min(baseSize, fitWidth);
-    }
-    return Math.max(LONG_NAME_MIN_FONT_PX, fitWidth);
-  }
-
-  const tierScaled = Math.round(layout.fontSize * getLengthScaleFactor(chars));
-  if (chars < 5) {
-    return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(tierScaled, fitWidth));
-  }
-  return Math.max(LONG_NAME_MIN_FONT_PX, Math.min(tierScaled, fitWidth));
 }
 
 function chunkIntoRows(items, cols) {
@@ -530,7 +473,7 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
                               }}
                             >
                               {row.map(({ name: winnerName, index }) => {
-                                const cardFontSize = computeCardFontSize(winnerName, layout);
+                                const nameFit = computeCardNameFit(winnerName, layout);
                                 return (
                                   <div
                                     key={`${activeRoundId}-p${layer.id}-${index}`}
@@ -544,8 +487,16 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
                                   >
                                     <div className="gs-reveal-card-inner">
                                       <span
-                                        className="gs-reveal-card-name"
-                                        style={{ fontSize: `${cardFontSize}px` }}
+                                        className={
+                                          nameFit.lines > 1
+                                            ? 'gs-reveal-card-name gs-reveal-card-name-wrap'
+                                            : 'gs-reveal-card-name'
+                                        }
+                                        style={
+                                          nameFit.lines > 1
+                                            ? { fontSize: `${nameFit.fontSize}px`, WebkitLineClamp: nameFit.lines }
+                                            : { fontSize: `${nameFit.fontSize}px` }
+                                        }
                                       >
                                         {winnerName}
                                       </span>

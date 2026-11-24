@@ -375,3 +375,23 @@ test('12. 荣耀榜滚动只在展示内容变化时重置；大屏首次连上 
   const openHandler = hookCode.slice(hookCode.indexOf("addEventListener('open'"), hookCode.indexOf("addEventListener('gala_screen'"));
   assert.match(openHandler, /else\s*\{[\s\S]*?refreshRounds\(\)[\s\S]*?refreshEvent\(\)[\s\S]*?refreshState\(\)/, '首次连上 SSE 必须补拉轮次、活动和状态');
 });
+
+test('13. 揭晓名字卡折行兜底：折行样式隐藏溢出，组件按计算结果切换折行', () => {
+  const css = readRepoFile('src/admin-app/src/screen/screen.css');
+  const block = css.slice(css.indexOf('.gs-reveal-card-name-wrap {'));
+  const rule = block.slice(0, block.indexOf('}'));
+  assert.match(rule, /overflow:\s*hidden/);
+  assert.match(rule, /white-space:\s*normal/);
+  assert.match(rule, /-webkit-box-orient:\s*vertical/);
+  const reveal = stripJsComments(readRepoFile('src/admin-app/src/screen/RevealView.jsx'));
+  assert.match(reveal, /computeCardNameFit\(winnerName, layout\)/);
+  assert.match(reveal, /gs-reveal-card-name-wrap/);
+  assert.match(reveal, /WebkitLineClamp:\s*nameFit\.lines/);
+});
+
+test('14. 控制卡片的轮次选择绑定数据版本：版本变化清空选择，旧版本选择不能用于揭晓', () => {
+  const card = stripJsComments(readRepoFile('src/admin-app/src/pages/gala/ScreenControlCard.jsx'));
+  assert.match(card, /selectedRoundVersion === galaVersion/);
+  assert.match(card, /useEffect\(\(\) => \{\s*setSelectedRoundId\(undefined\);\s*setSelectedRoundVersion\(undefined\);\s*\}, \[galaVersion\]\);/);
+  assert.match(card, /setSelectedRoundVersion\(value == null \? undefined : galaVersion\)/);
+});

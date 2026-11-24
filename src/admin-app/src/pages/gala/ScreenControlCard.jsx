@@ -29,6 +29,7 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
   const [screenState, setScreenState] = useState(null);
   const [selectedSegment, setSelectedSegment] = useState(undefined);
   const [selectedRoundId, setSelectedRoundId] = useState(undefined);
+  const [selectedRoundVersion, setSelectedRoundVersion] = useState(undefined);
   const [submittingMode, setSubmittingMode] = useState(null);
 
   const mountedRef = useRef(true);
@@ -90,8 +91,11 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
     [roundMap, segmentLabelMap],
   );
 
+  // 选择绑定选中时的数据版本：全量恢复会复用轮次 ID，恢复后旧选择即使 ID 还在列表里，也已是另一轮，作废。
   const validSelectedRoundId =
-    selectedRoundId != null && roundMap.has(Number(selectedRoundId))
+    selectedRoundId != null &&
+    selectedRoundVersion === galaVersion &&
+    roundMap.has(Number(selectedRoundId))
       ? Number(selectedRoundId)
       : undefined;
 
@@ -132,6 +136,12 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
       clearInterval(timer);
     };
   }, [eventId, loadScreenState]);
+
+  // 数据版本变化（全量恢复）时清掉轮次选择：同一个 ID 可能已是另一轮，必须让操作者重新选。
+  useEffect(() => {
+    setSelectedRoundId(undefined);
+    setSelectedRoundVersion(undefined);
+  }, [galaVersion]);
 
   // 滚动中如果新抽出轮次，后端会自动切换为揭晓，这里及时同步一次大屏状态。
   const latestRoundId = Array.isArray(rounds) && rounds.length > 0 ? Number(rounds[0]?.id) || null : null;
@@ -287,7 +297,10 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
                 value={validSelectedRoundId}
                 disabled={isSubmitting}
                 options={roundOptions}
-                onChange={(value) => setSelectedRoundId(value ?? undefined)}
+                onChange={(value) => {
+                  setSelectedRoundId(value ?? undefined);
+                  setSelectedRoundVersion(value == null ? undefined : galaVersion);
+                }}
               />
               <Button
                 size="small"
