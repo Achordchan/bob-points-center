@@ -45,6 +45,7 @@ export default function EventFormModal({
   const [submitting, setSubmitting] = useState(false);
   const [capturedVersion, setCapturedVersion] = useState('');
   const wasOpenRef = useRef(false);
+  const dateEditedRef = useRef(false);
   const isEdit = Boolean(event?.id);
   const rawEventDate = isEdit && typeof event?.event_date === 'string' ? event.event_date : '';
   const hasNonStandardEventDate = Boolean(rawEventDate.trim()) && !parseEventDate(rawEventDate);
@@ -69,6 +70,7 @@ export default function EventFormModal({
 
   useEffect(() => {
     if (!open) return;
+    dateEditedRef.current = false;
     form.resetFields();
     if (event?.id) {
       form.setFieldsValue({
@@ -113,7 +115,7 @@ export default function EventFormModal({
           status: values.status,
           gala_version: capturedVersion,
         };
-        if (form.isFieldTouched('event_date')) {
+        if (dateEditedRef.current) {
           body.event_date = values.event_date ? values.event_date.format('YYYY-MM-DD') : null;
         }
         const resp = await api('/admin/gala/events/update', {
@@ -188,7 +190,15 @@ export default function EventFormModal({
           label="活动日期"
           extra={hasNonStandardEventDate ? `当前值：${rawEventDate}，未修改则保持不变` : undefined}
         >
-          <DatePicker format="YYYY-MM-DD" style={{ width: '100%' }} placeholder="请选择活动日期（可选）" allowClear />
+          <DatePicker
+            format="YYYY-MM-DD"
+            style={{ width: '100%' }}
+            placeholder="请选择活动日期（可选）"
+            allowClear
+            onChange={() => {
+              dateEditedRef.current = true;
+            }}
+          />
         </Form.Item>
 
         <Form.Item
