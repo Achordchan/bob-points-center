@@ -245,9 +245,11 @@ export default function WinnersView({ rounds, segmentLabels }) {
                           <div className="gs-round-head">
                             <h3 className="gs-round-meta">{roundHeading}</h3>
                             {showPrize ? (
-                              <span className="gs-prize-capsule">
-                                每人 {round.amount_each} BOB
-                              </span>
+                              <div className="gs-round-prize">
+                                <span className="gs-prize-capsule">
+                                  每人 {round.amount_each} BOB
+                                </span>
+                              </div>
                             ) : null}
                           </div>
 
