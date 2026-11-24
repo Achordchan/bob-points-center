@@ -18,6 +18,7 @@ import { galaErrorText } from './errors.js';
 import {
   clearPendingDraw,
   isAmbiguousDrawError,
+  isAuthDrawError,
   loadPendingDraw,
   savePendingDraw,
 } from './pendingDraw.js';
@@ -191,15 +192,27 @@ export default function RoundsTab({
     }
   }, []);
 
+  const handleBeforeDraw = useCallback((pending) => {
+    const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
+    savePendingDraw(targetEventId, pending);
+    if (Number(targetEventId) === Number(currentEventIdRef.current)) {
+      setPendingDraw(pending);
+    }
+  }, []);
+
   const handleAmbiguousDraw = useCallback(
-    (pending) => {
+    (pending, err) => {
       const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
       savePendingDraw(targetEventId, pending);
       if (Number(targetEventId) === Number(currentEventIdRef.current)) {
         setPendingDraw(pending);
       }
       setDrawModal(null);
-      message.warning('抽签结果未确认，请在轮次页按原参数重试');
+      message.warning(
+        isAuthDrawError(err)
+          ? '登录已失效或无权限，恢复后可按原参数重试'
+          : '抽签结果未确认，请在轮次页按原参数重试',
+      );
     },
     [message],
   );
@@ -276,7 +289,11 @@ export default function RoundsTab({
       }
     } catch (err) {
       if (isAmbiguousDrawError(err)) {
-        message.warning('仍未确认，请稍后再试');
+        message.warning(
+          isAuthDrawError(err)
+            ? '登录已失效或无权限，恢复后可按原参数重试'
+            : '仍未确认，请稍后再试',
+        );
         return;
       }
       clearPendingState(targetEventId);
@@ -599,6 +616,8 @@ export default function RoundsTab({
         nextRoundNos={nextRoundNos}
         getNextRoundNo={getNextRoundNo}
         onRoundNoChanged={handleRoundNoChanged}
+        onBeforeDraw={handleBeforeDraw}
+        onClearPendingDraw={clearPendingState}
         onSuccess={handleDrawSuccess}
         onAmbiguousDraw={handleAmbiguousDraw}
         onRefreshAll={refreshAll}

@@ -33,6 +33,8 @@ export default function DrawModal({
   nextRoundNos,
   getNextRoundNo,
   onRoundNoChanged,
+  onBeforeDraw,
+  onClearPendingDraw,
   onSuccess,
   onAmbiguousDraw,
   onRefreshAll,
@@ -203,21 +205,25 @@ export default function DrawModal({
           payload.pool_id = poolId;
           payload.amount_each = each;
         }
+        const pending = {
+          payload,
+          segment_label: segmentLabel,
+        };
+        onBeforeDraw?.(pending);
         try {
           const resp = await api('/admin/gala/rounds/draw', {
             method: 'POST',
             body: payload,
           });
+          onClearPendingDraw?.(eventId);
           setRoundNoNotice('');
           await onSuccess(resp?.data || null);
         } catch (err) {
           if (isAmbiguousDrawError(err)) {
-            onAmbiguousDraw?.({
-              payload,
-              segment_label: segmentLabel,
-            });
+            onAmbiguousDraw?.(pending, err);
             return;
           }
+          onClearPendingDraw?.(eventId);
           if (err?.code === 'round_no_changed') {
             const nextNo = Number(err?.data?.next_round_no);
             if (Number.isSafeInteger(nextNo) && nextNo > 0) {

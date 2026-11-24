@@ -1,16 +1,26 @@
 export const PENDING_DRAW_KEY_PREFIX = 'gala:pendingDraw:';
 
+const NON_DEFINITIVE_CLIENT_STATUSES = new Set([401, 403, 408, 429]);
+
 export function getPendingDrawKey(eventId) {
   return `${PENDING_DRAW_KEY_PREFIX}${eventId}`;
 }
 
-export function isAmbiguousDrawError(err) {
-  if (!err || typeof err !== 'object') return true;
-  if (typeof err.status !== 'number' || !Number.isFinite(err.status)) return true;
-  if (err.status >= 500) return true;
+export function isDefinitiveDrawRejection(err) {
+  if (!err || typeof err !== 'object') return false;
+  if (typeof err.status !== 'number' || !Number.isFinite(err.status)) return false;
+  if (err.status < 400 || err.status >= 500) return false;
+  if (NON_DEFINITIVE_CLIENT_STATUSES.has(err.status)) return false;
   const code = typeof err.code === 'string' ? err.code.trim() : '';
-  if (!code) return true;
-  return false;
+  return code.length > 0;
+}
+
+export function isAmbiguousDrawError(err) {
+  return !isDefinitiveDrawRejection(err);
+}
+
+export function isAuthDrawError(err) {
+  return Boolean(err && typeof err === 'object' && (err.status === 401 || err.status === 403));
 }
 
 function isValidPendingDraw(record, eventId) {
