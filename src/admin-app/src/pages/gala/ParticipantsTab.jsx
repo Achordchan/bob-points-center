@@ -23,9 +23,9 @@ const PG_INT_MAX = 2147483647;
 function parseBatchUserids(rawText) {
   const seen = new Set();
   const list = [];
-  for (const line of String(rawText || '').split(/\r?\n/)) {
-    const uid = line.trim();
-    if (!uid || seen.has(uid)) continue;
+  for (const rawLine of String(rawText || '').split('\n')) {
+    const uid = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (/^\s*$/.test(uid) || seen.has(uid)) continue;
     seen.add(uid);
     list.push(uid);
   }
@@ -130,6 +130,7 @@ export default function ParticipantsTab({
 
   const handleAddSubmit = async (values) => {
     setSubmitting(true);
+    let submittedUserids = null;
     try {
       const useAllActive = values.all_active_dingtalk === true;
       const payload = {
@@ -142,7 +143,8 @@ export default function ParticipantsTab({
       if (useAllActive) {
         payload.all_active_dingtalk = true;
       } else {
-        payload.userids = parseBatchUserids(values.userids_text);
+        submittedUserids = parseBatchUserids(values.userids_text);
+        payload.userids = submittedUserids;
       }
 
       const resp = await api('/admin/gala/participants/add', {
@@ -167,6 +169,13 @@ export default function ParticipantsTab({
       closeModal();
       await Promise.all([loadParticipants(), reload()]);
     } catch (err) {
+      if (err?.code === 'invalid_userid' && Array.isArray(submittedUserids)) {
+        const idx = err?.data?.index;
+        if (typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 && idx < submittedUserids.length) {
+          message.error(`第 ${idx + 1} 个用户 ID「${submittedUserids[idx]}」格式无效`);
+          return;
+        }
+      }
       const versionChanged = handleError(err);
       if (versionChanged) {
         closeModal();

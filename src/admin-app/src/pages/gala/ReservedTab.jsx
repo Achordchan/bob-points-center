@@ -21,7 +21,6 @@ import { amountText, formatTs, localTablePagination } from '../../utils.js';
 const PAGE_SIZE = 100;
 const MAX_RESERVED_SLOTS = 3;
 const PG_INT_MAX = 2147483647;
-const MAX_USERID_LENGTH = 512;
 const MAX_NOTE_LENGTH = 200;
 
 const SLOT_STATUS_META = {
@@ -311,7 +310,7 @@ export default function ReservedTab({
           event_id: eventId,
           segment: values.segment,
           round_no: Number(values.round_no),
-          userid: String(values.userid || '').trim(),
+          userid: String(values.userid ?? ''),
           pool_id: Number(values.pool_id),
           note: String(values.note || '').trim(),
           gala_version: galaVersion,
@@ -701,11 +700,10 @@ export default function ReservedTab({
               label="用户 ID（userid）"
               extra="该用户须已加入本场活动参与名单，且本环节未中过奖、无未取消的预留名额"
               rules={[
-                { required: true, whitespace: true, message: '请输入用户 ID' },
-                { max: MAX_USERID_LENGTH, message: `用户 ID 最多 ${MAX_USERID_LENGTH} 字符` },
+                { required: true, whitespace: true, message: '请填写用户 ID' },
               ]}
             >
-              <Input placeholder="请输入参与人的 userid" maxLength={MAX_USERID_LENGTH} />
+              <Input placeholder="请输入参与人的 userid" />
             </Form.Item>
 
             <Form.Item
