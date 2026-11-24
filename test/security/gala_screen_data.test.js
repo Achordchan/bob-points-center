@@ -9,6 +9,7 @@ import {
   createSingleFlight,
   fetchAllParticipantNames,
   fetchAllRounds,
+  fetchAllRoundsVersioned,
   fetchEventDetail,
   fetchScreenState,
   fetchSegmentLabels,
@@ -138,13 +139,17 @@ test('pickState 丢弃多余字段并校验 mode', () => {
     is_reserved: 1,
     extra: 'drop_me',
   });
-  assert.deepEqual(Object.keys(picked).sort(), ['mode', 'round_id', 'segment', 'version']);
+  assert.deepEqual(Object.keys(picked).sort(), ['data_version', 'mode', 'round_id', 'segment', 'version']);
   assert.deepEqual(picked, {
     mode: 'reveal',
     segment: null,
     round_id: 18,
     version: 5,
+    data_version: null,
   });
+  const V = '33333333-3333-4333-8333-333333333333';
+  assert.equal(pickState({ mode: 'idle', data_version: V }).data_version, V);
+  assert.equal(pickState({ mode: 'idle', data_version: 'not-a-version' }).data_version, null);
 
   const fallback = pickState({ mode: 'invalid_mode', segment: 'lottery', round_id: -1, version: -5 });
   assert.deepEqual(fallback, {
@@ -152,6 +157,7 @@ test('pickState 丢弃多余字段并校验 mode', () => {
     segment: 'lottery',
     round_id: null,
     version: 0,
+    data_version: null,
   });
   assert.equal(pickState(null), null);
 });
@@ -312,7 +318,7 @@ test('fetch 分页拉取使用 same-origin + no-store，轮次按 id 升序且�
   assert.deepEqual(event, { title: '年会', event_date: '2026-12-31', participant_count: 501 });
 
   const state = await fetchScreenState(7, mockFetch);
-  assert.deepEqual(state, { mode: 'rolling', segment: 'lottery', round_id: null, version: 3 });
+  assert.deepEqual(state, { mode: 'rolling', segment: 'lottery', round_id: null, version: 3, data_version: null });
 
   const labels = await fetchSegmentLabels(mockFetch);
   assert.deepEqual(labels, { lottery: '抽奖' });
@@ -321,6 +327,30 @@ test('fetch 分页拉取使用 same-origin + no-store，轮次按 id 升序且�
     assert.equal(c.opts.credentials, 'same-origin');
     assert.equal(c.opts.cache, 'no-store');
   }
+});
+
+test('fetchAllRoundsVersioned 给出轮次所属数据版本，翻页途中版本变化则整批作废', async () => {
+  const VA = '44444444-4444-4444-8444-444444444444';
+  const VB = '55555555-5555-4555-8555-555555555555';
+  const makeFetch = (secondPageVersion) => async (url) => {
+    const u = new URL(url, 'http://localhost');
+    const page = u.searchParams.get('before_id')
+      ? [{ id: 1, segment: 'lottery', round_no: 1, gala_version: secondPageVersion, winners: [] }]
+      : Array.from({ length: ROUNDS_PAGE_SIZE }, (_, idx) => ({
+        id: 500 - idx, segment: 'lottery', round_no: 500 - idx, gala_version: VA, winners: [],
+      }));
+    return { ok: true, status: 200, async json() { return { ok: true, data: page }; } };
+  };
+
+  const ok = await fetchAllRoundsVersioned(7, makeFetch(VA));
+  assert.equal(ok.dataVersion, VA);
+  assert.equal(ok.rounds.length, ROUNDS_PAGE_SIZE + 1);
+  assert.equal('gala_version' in ok.rounds[0], false, '轮次本身仍按白名单取字段');
+
+  await assert.rejects(() => fetchAllRoundsVersioned(7, makeFetch(VB)), /rounds_version_changed/);
+
+  const empty = await fetchAllRoundsVersioned(7, async () => ({ ok: true, status: 200, async json() { return { ok: true, data: [] }; } }));
+  assert.deepEqual(empty, { rounds: [], dataVersion: null });
 });
 
 test('createSingleFlight 阻止并发并在在途请求结束后合并补拉一次', async () => {

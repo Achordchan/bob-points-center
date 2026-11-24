@@ -65,8 +65,11 @@ test('getGalaScreenState 未设置时默认返回 idle，非法 eventId 抛错',
     round_id: null,
     version: 0,
     updated_at: null,
+    data_version: null,
   });
   assert.deepEqual(getGalaScreenState('91001'), state);
+  // 路由带上当前数据版本时，未设置的状态也回报这个版本
+  assert.equal(getGalaScreenState(91001, { currentDataVersion: V1 }).data_version, V1);
 
   for (const bad of [undefined, null, '', 0, -1, 1.5, 'abc', true]) {
     assert.throws(
@@ -160,8 +163,8 @@ test('revealRoundIfRolling：idle 时返回 null 不变，rolling 切到 reveal 
   assert.equal(getGalaScreenState(91005).mode, 'idle');
   assert.equal(getGalaScreenState(91005).version, 0);
 
-  // 2. 显式设为 idle 时同样返回 null 且 version 不变
-  const db = createMockDb({ events: [91006] });
+  // 2. 显式设为 idle 时同样返回 null 且 version 不变（402 已落库，开始滚动时的基线包含它）
+  const db = createMockDb({ events: [91006], rounds: [{ id: 402, event_id: 91006 }] });
   await setGalaScreenState(db, { eventId: 91006, mode: 'idle', expectedVersion: V1 });
   assert.equal(revealRoundIfRolling(91006, 402, { segment: 'giveaway', dataVersion: V1 }), null);
   assert.equal(getGalaScreenState(91006).mode, 'idle');
@@ -171,18 +174,18 @@ test('revealRoundIfRolling：idle 时返回 null 不变，rolling 切到 reveal 
   await setGalaScreenState(db, { eventId: 91006, mode: 'rolling', segment: 'giveaway', expectedVersion: V1 });
   assert.equal(getGalaScreenState(91006).version, 2);
 
-  const revealed = revealRoundIfRolling(91006, 402, { segment: 'giveaway', dataVersion: V1 });
+  const revealed = revealRoundIfRolling(91006, 403, { segment: 'giveaway', dataVersion: V1 });
   assert.ok(revealed);
   assert.equal(revealed.event_id, 91006);
   assert.equal(revealed.mode, 'reveal');
   assert.equal(revealed.segment, null);
-  assert.equal(revealed.round_id, 402);
+  assert.equal(revealed.round_id, 403);
   assert.equal(revealed.version, 3);
   assert.equal(typeof revealed.updated_at, 'number');
 
-  assert.equal(revealRoundIfRolling(91006, 402, { segment: 'giveaway', dataVersion: V1 }), null);
+  assert.equal(revealRoundIfRolling(91006, 403, { segment: 'giveaway', dataVersion: V1 }), null);
   assert.equal(getGalaScreenState(91006).version, 3);
-  assert.equal(getGalaScreenState(91006).round_id, 402);
+  assert.equal(getGalaScreenState(91006).round_id, 403);
 });
 
 test('revealRoundIfRolling：重试滚动开始前已抽完的旧轮次不打断滚动，滚动后新抽的轮次照常揭晓（含补发）', async () => {
@@ -213,7 +216,8 @@ test('revealRoundIfRolling：重试滚动开始前已抽完的旧轮次不打断
   assert.equal(revealed?.mode, 'reveal');
   assert.equal(revealed.round_id, 503);
   assert.equal(revealed.version, rollingVersion + 1);
-  assert.equal(Object.hasOwn(revealed, 'data_version'), false, '内部字段不对外返回');
+  assert.equal(revealed.data_version, V1);
+  assert.equal(Object.hasOwn(revealed, 'reveal_after_round_id'), false, '内部字段不对外返回');
 
   // 揭晓后再开始滚动：刚揭晓过的 503 被重试也不会再打断
   db.roundList.push({ id: 503, event_id: 91007 });
@@ -258,7 +262,8 @@ test('getGalaScreenState：数据版本变化后旧状态作废回到待机，ve
   assert.equal(reset.mode, 'idle');
   assert.equal(reset.round_id, null);
   assert.equal(reset.version, set.version + 1);
-  assert.deepEqual(Object.keys(reset).sort(), ['event_id', 'mode', 'round_id', 'segment', 'updated_at', 'version']);
+  assert.equal(reset.data_version, V2);
+  assert.deepEqual(Object.keys(reset).sort(), ['data_version', 'event_id', 'mode', 'round_id', 'segment', 'updated_at', 'version']);
 
   assert.deepEqual(getGalaScreenState(91009, { currentDataVersion: V2 }), reset);
 
@@ -267,6 +272,37 @@ test('getGalaScreenState：数据版本变化后旧状态作废回到待机，ve
   db.version = V2;
   assert.equal(revealRoundIfRolling(91009, 702, { segment: 'lottery', dataVersion: V2 }), null);
   assert.equal(getGalaScreenState(91009).mode, 'rolling');
+});
+
+test('开始滚动与抽签交错：抽签在读基线之后、写入滚动之前完成时，写入滚动直接揭晓这一轮', async () => {
+  const db = createMockDb({ events: [91010], rounds: [{ id: 801, event_id: 91010 }] });
+  const realGet = db.get;
+  // 读基线（MAX(id)）那一刻，另一个请求的抽签（ID 802）尚未提交；读完后它提交并调用揭晓钩子，此时还不是滚动状态。
+  db.get = async (sql, params) => {
+    const row = await realGet(sql, params);
+    if (sql.includes('MAX(id)')) {
+      assert.equal(revealRoundIfRolling(91010, 802, { segment: 'lottery', dataVersion: V1 }), null);
+    }
+    return row;
+  };
+  const state = await setGalaScreenState(db, { eventId: 91010, mode: 'rolling', segment: 'lottery', expectedVersion: V1 });
+  assert.equal(state.mode, 'reveal');
+  assert.equal(state.round_id, 802);
+  assert.deepEqual(getGalaScreenState(91010), state);
+
+  // 交错的是其他环节、旧轮次或另一份数据的抽签：照常进入滚动
+  db.get = async (sql, params) => {
+    const row = await realGet(sql, params);
+    if (sql.includes('MAX(id)')) {
+      revealRoundIfRolling(91010, 803, { segment: 'giveaway', dataVersion: V1 });
+      revealRoundIfRolling(91010, 801, { segment: 'lottery', dataVersion: V1 });
+      revealRoundIfRolling(91010, 804, { segment: 'lottery', dataVersion: V2 });
+    }
+    return row;
+  };
+  db.roundList.push({ id: 802, event_id: 91010 });
+  const rolling = await setGalaScreenState(db, { eventId: 91010, mode: 'rolling', segment: 'lottery', expectedVersion: V1 });
+  assert.equal(rolling.mode, 'rolling');
 });
 
 test('isPublicAdminPath：仅 GET /gala/screen 放行给路由自校验，POST 与 /gala/screen/state 不公开', () => {

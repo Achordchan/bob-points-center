@@ -174,7 +174,9 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
       }
       requestSeqRef.current += 1;
       setScreenState(resp?.data || null);
-      message.success(MODE_SUCCESS_TEXT[mode] || '大屏状态已更新');
+      // 开始滚动时若恰好有一轮刚抽完，服务端会直接揭晓它：按实际返回的模式提示。
+      const appliedMode = resp?.data?.mode || mode;
+      message.success(MODE_SUCCESS_TEXT[appliedMode] || '大屏状态已更新');
     } catch (err) {
       if (!mountedRef.current || Number(targetEventId) !== Number(currentEventIdRef.current)) {
         return;

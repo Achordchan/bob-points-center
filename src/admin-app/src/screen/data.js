@@ -3,6 +3,12 @@
 
 const SCREEN_MODES = new Set(['idle', 'rolling', 'reveal', 'winners']);
 const FORBIDDEN_MAP_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// 数据版本（gala_version）：全量恢复时换新的随机 UUID。大屏用它判断缓存的轮次是否属于当前这份数据。
+const DATA_VERSION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function pickDataVersion(value) {
+  return typeof value === 'string' && DATA_VERSION_RE.test(value) ? value : null;
+}
 
 export const PARTICIPANTS_PAGE_SIZE = 500;
 export const ROUNDS_PAGE_SIZE = 200;
@@ -12,6 +18,7 @@ export const DEFAULT_SCREEN_STATE = Object.freeze({
   segment: null,
   round_id: null,
   version: 0,
+  data_version: null,
 });
 
 function toPositiveInt(value) {
@@ -85,6 +92,7 @@ export function pickState(raw) {
     segment,
     round_id: roundId,
     version: Number.isSafeInteger(version) && version >= 0 ? version : 0,
+    data_version: pickDataVersion(raw.data_version),
   };
 }
 
@@ -202,10 +210,14 @@ export async function fetchAllParticipantNames(eventId, fetchImpl = globalThis.f
   return names;
 }
 
-export async function fetchAllRounds(eventId, fetchImpl = globalThis.fetch) {
+// 拉全部轮次，并给出这批轮次所属的数据版本（每页与轮次同一快照读出）。
+// 各页版本不一致说明翻页途中做过全量恢复，拼出来的列表混了两份数据：整批作废，交给调用方重试。
+export async function fetchAllRoundsVersioned(eventId, fetchImpl = globalThis.fetch) {
   const id = toPositiveInt(eventId);
   if (!id) throw new Error('invalid_event_id');
   const byId = new Map();
+  let dataVersion = null;
+  let versionSeen = false;
   let beforeId = null;
   while (true) {
     const qs = beforeId !== null
@@ -216,14 +228,26 @@ export async function fetchAllRounds(eventId, fetchImpl = globalThis.fetch) {
     if (page.length === 0) break;
     for (const item of page) {
       const picked = pickRound(item);
-      if (picked) byId.set(picked.id, picked);
+      if (!picked) continue;
+      const itemVersion = pickDataVersion(item?.gala_version);
+      if (!versionSeen) {
+        versionSeen = true;
+        dataVersion = itemVersion;
+      } else if (itemVersion !== dataVersion) {
+        throw new Error('rounds_version_changed');
+      }
+      byId.set(picked.id, picked);
     }
     if (page.length < ROUNDS_PAGE_SIZE) break;
     const lastId = toPositiveInt(page[page.length - 1]?.id);
     if (!lastId || (beforeId !== null && lastId >= beforeId)) break;
     beforeId = lastId;
   }
-  return Array.from(byId.values()).sort((a, b) => a.id - b.id);
+  return { rounds: Array.from(byId.values()).sort((a, b) => a.id - b.id), dataVersion };
+}
+
+export async function fetchAllRounds(eventId, fetchImpl = globalThis.fetch) {
+  return (await fetchAllRoundsVersioned(eventId, fetchImpl)).rounds;
 }
 
 export async function fetchScreenState(eventId, fetchImpl = globalThis.fetch) {

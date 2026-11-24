@@ -375,6 +375,8 @@ function serializeRound(row, winners, { includeReserved, generation = null }) {
     granted_at: state.granted_at,
     // 发币时原样带回（见 grantTokenOf）；与轮次同一快照读出，恢复后失效。
     grant_token: generation === null ? null : grantTokenOf(generation, row.id),
+    // 与轮次同一快照读出的数据版本：大屏据此判断缓存的轮次是否属于当前这份数据（恢复可能复用轮次 ID）。
+    gala_version: generation === null ? null : generation,
     winners: sorted.map((w) => serializeWinner(w, { includeReserved })),
   };
 }

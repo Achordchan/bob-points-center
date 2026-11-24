@@ -330,12 +330,23 @@ test('8. 大屏控制带回数据版本：卡片提交 gala_version、版本错�
   assert.match(drawHandler, /revealRoundIfRolling\([^)]*dataVersion/, '抽签后自动揭晓必须带上数据版本');
 });
 
-test('9. 大屏补拉揭晓轮次没有永久次数上限：失败后指数退避（封顶）持续重试，卸载时清理定时器', () => {
+test('9. 大屏读取失败与补拉揭晓轮次没有永久次数上限：指数退避（封顶）持续重试，卸载时清理定时器', () => {
   const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
   assert.doesNotMatch(hookCode, /MAX_ROUND_BACKFILL_ATTEMPTS|roundBackfillAttempts/, '不得保留会永久耗尽的补拉次数上限');
-  assert.match(hookCode, /ROUND_BACKFILL_MAX_DELAY_MS/, '补拉退避必须有封顶');
-  assert.match(hookCode, /Math\.min\(\s*delay\s*\*\s*2\s*,\s*ROUND_BACKFILL_MAX_DELAY_MS\s*\)/, '补拉必须指数退避');
-  assert.match(hookCode, /setTimeout\(/);
+  assert.match(hookCode, /RETRY_MAX_DELAY_MS/, '重试退避必须有封顶');
+  assert.match(hookCode, /Math\.min\(\s*delay\s*\*\s*2\s*,\s*RETRY_MAX_DELAY_MS\s*\)/, '重试必须指数退避');
+  for (const name of ['refreshEvent', 'refreshParticipants', 'refreshRounds', 'refreshSegments']) {
+    assert.match(hookCode, new RegExp(`const ${name} = createRefresh\\(`), `${name} 失败后必须按退避重试`);
+  }
+  assert.match(hookCode, /refreshState = createRefresh\(/, '状态读取失败后必须按退避重试');
   const cleanup = hookCode.slice(hookCode.lastIndexOf('disposed = true'));
   assert.match(cleanup, /stopRoundBackfill\(\)/, '卸载时必须停止补拉循环');
+  assert.match(cleanup, /for \(const stop of retryStops\) stop\(\)/, '卸载时必须清理重试定时器');
+});
+
+test('10. 大屏只在轮次与状态属于同一份数据时认定轮次已加载，数据版本变化时重拉缓存', () => {
+  const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
+  assert.match(hookCode, /fetchAllRoundsVersioned\(/);
+  assert.match(hookCode, /knownRoundIds\.has\(roundId\)\s*&&\s*roundsDataVersion === latestDataVersion/);
+  assert.match(hookCode, /next\.data_version !== prevVersion[\s\S]*?refreshRounds\(\)/);
 });

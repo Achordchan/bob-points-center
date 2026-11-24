@@ -32,6 +32,7 @@ function toPublic(state) {
     round_id: state.round_id,
     version: state.version,
     updated_at: state.updated_at,
+    data_version: typeof state.data_version === 'string' ? state.data_version : null,
   };
 }
 
@@ -43,7 +44,30 @@ function idleState(eventId) {
     round_id: null,
     version: 0,
     updated_at: null,
+    data_version: null,
   };
+}
+
+// 每个活动最近抽完的轮次（进程内，只留最近几条）。开始滚动与抽签完成可能交错：抽签在“读最大轮次 ID”之后、
+// “写入滚动状态”之前提交并调用揭晓钩子时，钩子看到的还是旧状态，什么也不做。写入滚动状态时据此补上，
+// 免得大屏一直停在滚动。
+const RECENT_DRAWS_PER_EVENT = 20;
+const recentDraws = new Map();
+
+function noteDrawCompleted(eventId, roundId, segment, dataVersion) {
+  const list = recentDraws.get(eventId) || [];
+  if (!list.some((d) => d.round_id === roundId && d.data_version === dataVersion)) {
+    list.push({ round_id: roundId, segment: typeof segment === 'string' ? segment : null, data_version: dataVersion });
+    if (list.length > RECENT_DRAWS_PER_EVENT) list.splice(0, list.length - RECENT_DRAWS_PER_EVENT);
+    recentDraws.set(eventId, list);
+  }
+}
+
+// 滚动状态是否应揭晓这一轮：滚动开始后新抽出（ID 大于基线）、环节一致（滚动指定了环节时）、同一份数据。
+function shouldRevealDraw(rolling, roundId, segment, dataVersion) {
+  if (roundId <= (rolling.reveal_after_round_id || 0)) return false;
+  if (rolling.segment && segment !== rolling.segment) return false;
+  return typeof dataVersion === 'string' && rolling.data_version === dataVersion;
 }
 
 async function inTx(db, fn) {
@@ -57,7 +81,11 @@ export function getGalaScreenState(eventId, { currentDataVersion } = {}) {
   const id = toPositiveId(eventId);
   if (!id) throw new GalaError('invalid_event_id', 400);
   const existing = screenStates.get(id);
-  if (!existing) return idleState(id);
+  if (!existing) {
+    return typeof currentDataVersion === 'string'
+      ? { ...idleState(id), data_version: currentDataVersion }
+      : idleState(id);
+  }
   if (typeof currentDataVersion === 'string' && existing.data_version !== currentDataVersion) {
     const next = {
       ...idleState(id),
@@ -132,6 +160,19 @@ export async function setGalaScreenState(db, { eventId, mode, segment, roundId, 
     data_version: checked.dataVersion,
     reveal_after_round_id: checked.revealAfterRoundId,
   };
+  if (normalizedMode === 'rolling') {
+    // 读基线到这里之间已完成的抽签（钩子当时看到的不是滚动状态）：直接揭晓其中最新的一轮。
+    // 这段代码到写入状态之间没有 await，之后完成的抽签一定会看到滚动状态，由钩子揭晓。
+    const missed = (recentDraws.get(id) || [])
+      .filter((d) => shouldRevealDraw(next, d.round_id, d.segment, d.data_version))
+      .reduce((best, d) => (!best || d.round_id > best.round_id ? d : best), null);
+    if (missed) {
+      next.mode = 'reveal';
+      next.segment = null;
+      next.round_id = missed.round_id;
+      next.reveal_after_round_id = 0;
+    }
+  }
   screenStates.set(id, next);
   return toPublic(next);
 }
@@ -144,11 +185,11 @@ export function revealRoundIfRolling(eventId, roundId, { segment, dataVersion } 
   const rid = toPositiveId(roundId);
   if (!id || !rid) return null;
 
+  if (typeof dataVersion === 'string') noteDrawCompleted(id, rid, segment, dataVersion);
+
   const current = screenStates.get(id);
   if (!current || current.mode !== 'rolling') return null;
-  if (rid <= (current.reveal_after_round_id || 0)) return null;
-  if (current.segment && segment !== current.segment) return null;
-  if (current.data_version !== dataVersion) return null;
+  if (!shouldRevealDraw(current, rid, segment, dataVersion)) return null;
 
   const next = {
     event_id: id,

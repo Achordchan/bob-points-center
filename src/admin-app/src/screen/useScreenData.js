@@ -3,7 +3,7 @@ import {
   DEFAULT_SCREEN_STATE,
   createSingleFlight,
   fetchAllParticipantNames,
-  fetchAllRounds,
+  fetchAllRoundsVersioned,
   fetchEventDetail,
   fetchScreenState,
   fetchSegmentLabels,
@@ -17,10 +17,11 @@ const STATE_POLL_INTERVAL_MS = 30_000;
 const PARTICIPANTS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const INITIAL_RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-// 揭晓的轮次不在已加载列表里时补拉轮次：失败后按指数退避一直重试（封顶 30 秒），直到拿到或大屏离开这一轮。
-// 不设次数上限：接口临时故障恢复后，大屏要能自己补上，而不是停在等待动画里。
-const ROUND_BACKFILL_INITIAL_DELAY_MS = 2_000;
-const ROUND_BACKFILL_MAX_DELAY_MS = 30_000;
+// 读取失败后的重试：指数退避（2 秒起，封顶 30 秒），一直重试到成功，不设次数上限。
+// SSE 连着时没有别的机会重拉：接口临时故障恢复后，大屏要能自己补上，而不是停在空榜单或等待动画里。
+const RETRY_INITIAL_DELAY_MS = 2_000;
+const RETRY_MAX_DELAY_MS = 30_000;
+const EMPTY_ROUNDS = Object.freeze({ list: [], dataVersion: null });
 
 function parseSseJson(raw) {
   if (typeof raw !== 'string' || !raw) return null;
@@ -39,7 +40,7 @@ export function useScreenData() {
 
   const [event, setEvent] = useState(null);
   const [names, setNames] = useState([]);
-  const [rounds, setRounds] = useState([]);
+  const [roundsData, setRoundsData] = useState(EMPTY_ROUNDS);
   const [segmentLabels, setSegmentLabels] = useState({});
   const [state, setState] = useState(() => ({ ...DEFAULT_SCREEN_STATE }));
   const [ready, setReady] = useState(() => !eventId);
@@ -55,47 +56,84 @@ export function useScreenData() {
     let reconnectTimer = null;
     let retryDelay = INITIAL_RECONNECT_DELAY_MS;
     let needsReconnectRefresh = false;
+    // 已加载轮次的 ID 与它们所属的数据版本；最近一次读到的大屏状态里的数据版本。
+    // 全量恢复可能复用轮次 ID：只有两个版本相同，ID 命中才算真正拿到了这一轮。
     const knownRoundIds = new Set();
+    let roundsDataVersion = null;
+    let latestDataVersion = null;
     let backfillRoundId = null;
     let backfillTimer = null;
     let backfillToken = 0;
+    const retryStops = [];
 
-    const refreshEvent = createSingleFlight(async () => {
-      if (disposed) return;
-      try {
-        const next = await fetchEventDetail(eventId);
-        if (!disposed) setEvent(next);
-      } catch {
-        // 失败时保留上一次成功数据
-      }
-    });
-
-    const refreshParticipants = createSingleFlight(async () => {
-      if (disposed) return;
-      try {
-        const next = await fetchAllParticipantNames(eventId);
-        if (!disposed) setNames(next);
-      } catch {
-        // 失败时保留上一次成功数据
-      }
-    });
-
-    const refreshRounds = createSingleFlight(async () => {
-      if (disposed) return;
-      try {
-        const next = await fetchAllRounds(eventId);
-        if (!disposed) {
-          knownRoundIds.clear();
-          for (const item of next) {
-            if (item && item.id) {
-              knownRoundIds.add(item.id);
-            }
-          }
-          setRounds(next);
+    // 包一层单飞 + 失败退避重试：load 抛错即视为失败，保留上一次成功数据，按退避再拉一次。
+    const createRefresh = (load) => {
+      let timer = null;
+      let delay = RETRY_INITIAL_DELAY_MS;
+      const run = createSingleFlight(async () => {
+        if (disposed) return;
+        let ok = false;
+        try {
+          await load();
+          ok = true;
+        } catch {
+          // 失败时保留上一次成功数据，下面按退避重试
         }
-      } catch {
-        // 失败时保留上一次成功数据
+        if (disposed) return;
+        if (ok) {
+          delay = RETRY_INITIAL_DELAY_MS;
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          return;
+        }
+        if (timer !== null) return;
+        const wait = delay;
+        delay = Math.min(delay * 2, RETRY_MAX_DELAY_MS);
+        timer = setTimeout(() => {
+          timer = null;
+          void run();
+        }, wait);
+      });
+      retryStops.push(() => {
+        run.cancelPending();
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      });
+      return run;
+    };
+
+    const isRoundLoaded = (roundId) => (
+      knownRoundIds.has(roundId) && roundsDataVersion === latestDataVersion
+    );
+
+    const refreshEvent = createRefresh(async () => {
+      const next = await fetchEventDetail(eventId);
+      if (!disposed) setEvent(next);
+    });
+
+    const refreshParticipants = createRefresh(async () => {
+      const next = await fetchAllParticipantNames(eventId);
+      if (!disposed) setNames(next);
+    });
+
+    // 先声明，refreshRounds 发现版本与大屏状态不一致时要顺手刷新状态。
+    let refreshState = () => Promise.resolve();
+
+    const refreshRounds = createRefresh(async () => {
+      const next = await fetchAllRoundsVersioned(eventId);
+      if (disposed) return;
+      knownRoundIds.clear();
+      for (const item of next.rounds) {
+        if (item && item.id) knownRoundIds.add(item.id);
       }
+      roundsDataVersion = next.dataVersion;
+      setRoundsData({ list: next.rounds, dataVersion: next.dataVersion });
+      // 轮次比状态新（或旧）：再读一次状态，让两边对上；空列表没有版本，不算不一致。
+      if (next.dataVersion !== null && next.dataVersion !== latestDataVersion) void refreshState();
     });
 
     // 每次停止或换轮都换一个令牌：旧循环醒来发现令牌不对就退出，同一时刻只有一个补拉循环。
@@ -108,17 +146,18 @@ export function useScreenData() {
       }
     };
 
+    // 读取成功但列表里仍没有揭晓的这一轮（如抽签刚提交、列表还没跟上）：按退避继续补拉，直到拿到或离开这一轮。
     const runRoundBackfill = async (token, delay) => {
       if (disposed || token !== backfillToken) return;
       await refreshRounds();
       if (disposed || token !== backfillToken) return;
-      if (knownRoundIds.has(backfillRoundId)) {
+      if (isRoundLoaded(backfillRoundId)) {
         stopRoundBackfill();
         return;
       }
       backfillTimer = setTimeout(() => {
         backfillTimer = null;
-        void runRoundBackfill(token, Math.min(delay * 2, ROUND_BACKFILL_MAX_DELAY_MS));
+        void runRoundBackfill(token, Math.min(delay * 2, RETRY_MAX_DELAY_MS));
       }, delay);
     };
 
@@ -127,33 +166,32 @@ export function useScreenData() {
       if (disposed || backfillRoundId === roundId) return;
       stopRoundBackfill();
       backfillRoundId = roundId;
-      void runRoundBackfill(backfillToken, ROUND_BACKFILL_INITIAL_DELAY_MS);
+      void runRoundBackfill(backfillToken, RETRY_INITIAL_DELAY_MS);
     };
 
-    const refreshState = createSingleFlight(async () => {
+    refreshState = createRefresh(async () => {
+      const next = await fetchScreenState(eventId);
       if (disposed) return;
-      try {
-        const next = await fetchScreenState(eventId);
-        if (disposed) return;
-        setState(next);
-        if (next.mode === 'reveal' && next.round_id && !knownRoundIds.has(next.round_id)) {
-          startRoundBackfill(next.round_id);
-        } else {
-          stopRoundBackfill();
-        }
-      } catch {
-        // 失败时保留上一次成功数据
+      const prevVersion = latestDataVersion;
+      latestDataVersion = next.data_version;
+      setState(next);
+      // 数据版本变了（做过全量恢复）：已缓存的活动、名单、轮次都可能属于旧数据，全部重拉。
+      if (prevVersion !== null && next.data_version !== null && next.data_version !== prevVersion) {
+        stopRoundBackfill();
+        void refreshEvent();
+        void refreshParticipants();
+        void refreshRounds();
+      }
+      if (next.mode === 'reveal' && next.round_id && !isRoundLoaded(next.round_id)) {
+        startRoundBackfill(next.round_id);
+      } else {
+        stopRoundBackfill();
       }
     });
 
-    const refreshSegments = createSingleFlight(async () => {
-      if (disposed) return;
-      try {
-        const next = await fetchSegmentLabels();
-        if (!disposed) setSegmentLabels(next);
-      } catch {
-        // 失败时保留上一次成功数据
-      }
+    const refreshSegments = createRefresh(async () => {
+      const next = await fetchSegmentLabels();
+      if (!disposed) setSegmentLabels(next);
     });
 
     const refreshAll = () => Promise.all([
@@ -235,11 +273,7 @@ export function useScreenData() {
 
     return () => {
       disposed = true;
-      refreshEvent.cancelPending();
-      refreshParticipants.cancelPending();
-      refreshRounds.cancelPending();
-      refreshState.cancelPending();
-      refreshSegments.cancelPending();
+      for (const stop of retryStops) stop();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -250,6 +284,15 @@ export function useScreenData() {
       closeSse();
     };
   }, [eventId]);
+
+  // 轮次与大屏状态属于同一份数据才交给视图：恢复后旧轮次不会冒充同 ID 的新轮次显示出来。
+  const rounds = useMemo(() => {
+    const stateVersion = state?.data_version ?? null;
+    if (roundsData.dataVersion !== null && stateVersion !== null && roundsData.dataVersion !== stateVersion) {
+      return EMPTY_ROUNDS.list;
+    }
+    return roundsData.list;
+  }, [roundsData, state]);
 
   return { eventId, event, names, rounds, segmentLabels, state, ready };
 }
