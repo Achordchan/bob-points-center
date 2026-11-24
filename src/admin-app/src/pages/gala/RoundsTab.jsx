@@ -560,7 +560,14 @@ export default function RoundsTab({
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
-      <ScreenControlCard eventId={eventId} me={me} segments={segments} rounds={rounds} />
+      <ScreenControlCard
+        eventId={eventId}
+        galaVersion={galaVersion}
+        me={me}
+        segments={segments}
+        rounds={rounds}
+        onError={handleError}
+      />
       {pendingDraw && (
         <Alert
           type="warning"

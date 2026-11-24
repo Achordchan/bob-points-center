@@ -17,7 +17,10 @@ const STATE_POLL_INTERVAL_MS = 30_000;
 const PARTICIPANTS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const INITIAL_RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-const MAX_ROUND_BACKFILL_ATTEMPTS = 3;
+// 揭晓的轮次不在已加载列表里时补拉轮次：失败后按指数退避一直重试（封顶 30 秒），直到拿到或大屏离开这一轮。
+// 不设次数上限：接口临时故障恢复后，大屏要能自己补上，而不是停在等待动画里。
+const ROUND_BACKFILL_INITIAL_DELAY_MS = 2_000;
+const ROUND_BACKFILL_MAX_DELAY_MS = 30_000;
 
 function parseSseJson(raw) {
   if (typeof raw !== 'string' || !raw) return null;
@@ -53,7 +56,9 @@ export function useScreenData() {
     let retryDelay = INITIAL_RECONNECT_DELAY_MS;
     let needsReconnectRefresh = false;
     const knownRoundIds = new Set();
-    const roundBackfillAttempts = new Map();
+    let backfillRoundId = null;
+    let backfillTimer = null;
+    let backfillToken = 0;
 
     const refreshEvent = createSingleFlight(async () => {
       if (disposed) return;
@@ -84,7 +89,6 @@ export function useScreenData() {
           for (const item of next) {
             if (item && item.id) {
               knownRoundIds.add(item.id);
-              roundBackfillAttempts.delete(item.id);
             }
           }
           setRounds(next);
@@ -94,6 +98,38 @@ export function useScreenData() {
       }
     });
 
+    // 每次停止或换轮都换一个令牌：旧循环醒来发现令牌不对就退出，同一时刻只有一个补拉循环。
+    const stopRoundBackfill = () => {
+      backfillToken += 1;
+      backfillRoundId = null;
+      if (backfillTimer !== null) {
+        clearTimeout(backfillTimer);
+        backfillTimer = null;
+      }
+    };
+
+    const runRoundBackfill = async (token, delay) => {
+      if (disposed || token !== backfillToken) return;
+      await refreshRounds();
+      if (disposed || token !== backfillToken) return;
+      if (knownRoundIds.has(backfillRoundId)) {
+        stopRoundBackfill();
+        return;
+      }
+      backfillTimer = setTimeout(() => {
+        backfillTimer = null;
+        void runRoundBackfill(token, Math.min(delay * 2, ROUND_BACKFILL_MAX_DELAY_MS));
+      }, delay);
+    };
+
+    // 同一轮已在补拉（请求中或等待退避）时不重复启动；换了一轮则从头开始。
+    const startRoundBackfill = (roundId) => {
+      if (disposed || backfillRoundId === roundId) return;
+      stopRoundBackfill();
+      backfillRoundId = roundId;
+      void runRoundBackfill(backfillToken, ROUND_BACKFILL_INITIAL_DELAY_MS);
+    };
+
     const refreshState = createSingleFlight(async () => {
       if (disposed) return;
       try {
@@ -101,11 +137,9 @@ export function useScreenData() {
         if (disposed) return;
         setState(next);
         if (next.mode === 'reveal' && next.round_id && !knownRoundIds.has(next.round_id)) {
-          const attempts = roundBackfillAttempts.get(next.round_id) || 0;
-          if (attempts < MAX_ROUND_BACKFILL_ATTEMPTS) {
-            roundBackfillAttempts.set(next.round_id, attempts + 1);
-            void refreshRounds();
-          }
+          startRoundBackfill(next.round_id);
+        } else {
+          stopRoundBackfill();
         }
       } catch {
         // 失败时保留上一次成功数据
@@ -210,6 +244,7 @@ export function useScreenData() {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      stopRoundBackfill();
       clearInterval(statePollTimer);
       clearInterval(participantsTimer);
       closeSse();

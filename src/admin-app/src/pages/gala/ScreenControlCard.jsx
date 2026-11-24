@@ -21,7 +21,7 @@ function formatRoundOptionLabel(round, segmentLabelMap) {
   return title ? `${base} · ${title}` : base;
 }
 
-export default function ScreenControlCard({ eventId, me, segments = [], rounds = [] }) {
+export default function ScreenControlCard({ eventId, galaVersion, me, segments = [], rounds = [], onError }) {
   const { message } = AntApp.useApp();
   const canView = hasPermission(me, 'gala:view');
   const canOperate = hasPermission(me, 'gala:operate');
@@ -152,7 +152,8 @@ export default function ScreenControlCard({ eventId, me, segments = [], rounds =
     if (!canOperate || !eventId || submittingRef.current) return;
     if (mode === 'reveal' && !validSelectedRoundId) return;
 
-    const body = { event_id: eventId, mode };
+    // 带回读到轮次列表时的数据版本：全量恢复后同一个轮次 ID 可能已是另一轮，服务端会拒绝（409 gala_data_changed）。
+    const body = { event_id: eventId, mode, gala_version: typeof galaVersion === 'string' ? galaVersion : '' };
     if (mode === 'rolling' && selectedSegment) {
       body.segment = selectedSegment;
     }
@@ -178,7 +179,9 @@ export default function ScreenControlCard({ eventId, me, segments = [], rounds =
       if (!mountedRef.current || Number(targetEventId) !== Number(currentEventIdRef.current)) {
         return;
       }
-      message.error(galaErrorText(err));
+      // 交给页面统一处理：数据版本变化时整页刷新（轮次列表随之重载），其余错误弹提示。
+      if (typeof onError === 'function') onError(err);
+      else message.error(galaErrorText(err));
     } finally {
       if (mountedRef.current && Number(targetEventId) === Number(currentEventIdRef.current)) {
         submittingRef.current = false;

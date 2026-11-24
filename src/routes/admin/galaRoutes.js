@@ -31,6 +31,7 @@ import {
   serializeDrawResult,
   serializeGrantResult,
   parseGalaVersion,
+  readGalaDataVersion,
   updateGalaEvent,
   updateGalaPool,
 } from '../../services/galaService.js';
@@ -216,7 +217,11 @@ export function registerAdminGalaRoutes(router) {
     // 订阅端收到重复的同一轮次不会有副作用。通知走进程内订阅表，只送达本实例的连接（与其他实时事件相同）。
     publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
     try {
-      const screen = revealRoundIfRolling(data.event_id, data.id);
+      // 只揭晓滚动开始后、同一份数据里新抽出的轮次：重试早已抽完的旧轮次不会打断滚动（见 revealRoundIfRolling）。
+      const screen = revealRoundIfRolling(data.event_id, data.id, {
+        segment: data.segment,
+        dataVersion: typeof result.generation === 'string' ? result.generation : null,
+      });
       if (screen) {
         publishMallRealtimeEvent('gala_screen', { event_id: screen.event_id, version: screen.version, scopes: ['screen'] });
       }
@@ -227,8 +232,10 @@ export function registerAdminGalaRoutes(router) {
     res.json({ ok: true, data });
   }));
 
-  router.get('/gala/screen/state', requireAdminSession(), handle(async (req, res) => {
-    const data = getGalaScreenState(req.query?.event_id);
+  router.get('/gala/screen/state', requireAdminSession(), handle(async (req, res, db) => {
+    getGalaScreenState(req.query?.event_id); // 先校验活动 ID，非法参数不碰数据库
+    // 带上当前数据版本：全量恢复后，恢复前设置的大屏状态作废、回到待机。
+    const data = getGalaScreenState(req.query?.event_id, { currentDataVersion: await readGalaDataVersion(db) });
     res.json({ ok: true, data });
   }));
 
@@ -239,6 +246,7 @@ export function registerAdminGalaRoutes(router) {
       mode: b.mode,
       segment: b.segment,
       roundId: b.round_id,
+      expectedVersion: b.gala_version,
     });
     publishMallRealtimeEvent('gala_screen', { event_id: data.event_id, version: data.version, scopes: ['screen'] });
     res.json({ ok: true, data });

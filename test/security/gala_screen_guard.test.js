@@ -309,3 +309,33 @@ test('7. galaRoutes.js 抽签处理器在 try/catch 内调用 revealRoundIfRolli
     "POST /gala/screen/state 处理器必须发布 'gala_screen' 且带 scopes: ['screen']",
   );
 });
+
+test('8. 大屏控制带回数据版本：卡片提交 gala_version、版本错误交给页面刷新，状态接口按数据版本校验与作废', () => {
+  const cardCode = stripJsComments(readRepoFile('src/admin-app/src/pages/gala/ScreenControlCard.jsx'));
+  assert.match(cardCode, /gala_version\s*:/, '控制卡片提交必须带 gala_version');
+  assert.match(cardCode, /onError\s*\(\s*err\s*\)/, '控制卡片出错必须交给页面的 onError 处理（版本变化时整页刷新）');
+
+  const roundsTabCode = stripJsComments(readRepoFile('src/admin-app/src/pages/gala/RoundsTab.jsx'));
+  const cardUse = roundsTabCode.slice(roundsTabCode.indexOf('<ScreenControlCard'));
+  const cardTag = cardUse.slice(0, cardUse.indexOf('/>'));
+  assert.match(cardTag, /galaVersion=\{galaVersion\}/, 'RoundsTab 必须把 galaVersion 传给控制卡片');
+  assert.match(cardTag, /onError=\{handleError\}/, 'RoundsTab 必须把 handleError 传给控制卡片');
+
+  const routesSource = readRepoFile('src/routes/admin/galaRoutes.js');
+  const postHandler = extractRouteBlock(routesSource, "router.post('/gala/screen/state'");
+  assert.match(postHandler, /expectedVersion\s*:\s*b\.gala_version/, 'POST /gala/screen/state 必须把 gala_version 交给服务层核对');
+  const getHandler = extractRouteBlock(routesSource, "router.get('/gala/screen/state'");
+  assert.match(getHandler, /currentDataVersion\s*:\s*await\s+readGalaDataVersion\(/, 'GET /gala/screen/state 必须按当前数据版本作废旧状态');
+  const drawHandler = extractRouteBlock(routesSource, "router.post('/gala/rounds/draw'");
+  assert.match(drawHandler, /revealRoundIfRolling\([^)]*dataVersion/, '抽签后自动揭晓必须带上数据版本');
+});
+
+test('9. 大屏补拉揭晓轮次没有永久次数上限：失败后指数退避（封顶）持续重试，卸载时清理定时器', () => {
+  const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
+  assert.doesNotMatch(hookCode, /MAX_ROUND_BACKFILL_ATTEMPTS|roundBackfillAttempts/, '不得保留会永久耗尽的补拉次数上限');
+  assert.match(hookCode, /ROUND_BACKFILL_MAX_DELAY_MS/, '补拉退避必须有封顶');
+  assert.match(hookCode, /Math\.min\(\s*delay\s*\*\s*2\s*,\s*ROUND_BACKFILL_MAX_DELAY_MS\s*\)/, '补拉必须指数退避');
+  assert.match(hookCode, /setTimeout\(/);
+  const cleanup = hookCode.slice(hookCode.lastIndexOf('disposed = true'));
+  assert.match(cleanup, /stopRoundBackfill\(\)/, '卸载时必须停止补拉循环');
+});

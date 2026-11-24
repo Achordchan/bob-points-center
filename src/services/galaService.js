@@ -236,6 +236,17 @@ async function enterGalaWrite(tx, generation, changedCode = 'round_changed') {
   return current;
 }
 
+// 给不走 inTx 的年会写入用（如大屏展示状态）：在调用方的事务里拿恢复互斥的共享锁，
+// 核对页面带回的数据版本，版本变了说明期间做过全量恢复，按 gala_data_changed 拒绝。返回当前版本。
+export async function enterGalaVersionedWrite(tx, expectedVersion) {
+  return await enterGalaWrite(tx, parseGalaVersion(expectedVersion), 'gala_data_changed');
+}
+
+// 读当前数据版本（不加锁）：只用于判断展示状态是否已过期，不用于保护写入。
+export async function readGalaDataVersion(db) {
+  return await readGalaVersion(db);
+}
+
 /** 均匀随机抽取 count 个（部分 Fisher-Yates），使用 CSPRNG。 */
 // 从 [0, n) 里均匀抽 count 个不重复的位置（稀疏 Fisher–Yates，只记录被交换过的位置）。
 // 与 pickRandom 对 [0..n) 的结果逐位相同，但不分配长度为 n 的数组。
