@@ -21,6 +21,785 @@ import {
   toPositiveInt,
 } from './shared.js';
 import { computeAnnouncementContentHash } from '../../services/announcementAccessService.js';
+import {
+  GALA_DRAW_SEGMENTS, GALA_MAX_DRAW_COUNT, GALA_MAX_POOLS_TOTAL, GALA_MAX_RESERVED_SLOTS, GALA_PAYOUT_LOCK, GALA_RESET_LOCK, GALA_SEGMENTS, bumpGalaRestoreGeneration,
+  isOperableGalaUserid,
+} from '../../services/galaService.js';
+import { GALA_PAYOUT_REASON_PREFIX, galaPayoutWinnerId } from '../../services/ledgerService.js';
+
+// 年会表按外键依赖排列（父表在前）。导入时按此顺序插入，overwrite 按逆序清空。
+export const GALA_BACKUP_TABLES = [
+  { name: 'gala_events', columns: ['id', 'title', 'event_date', 'status', 'total_budget', 'enabled_segments', 'created_by', 'created_name', 'created_at', 'updated_at'], defaults: { status: 'draft', total_budget: 0, enabled_segments: JSON.stringify(Object.keys(GALA_SEGMENTS)) } },
+  { name: 'gala_pools', columns: ['id', 'event_id', 'name', 'sponsor', 'budget', 'spent', 'is_reserved', 'created_at', 'updated_at'], defaults: { spent: 0, is_reserved: 0 } },
+  { name: 'gala_participants', columns: ['id', 'event_id', 'userid', 'name_snapshot', 'table_no', 'source', 'joined_at'], defaults: { source: 'admin' } },
+  { name: 'gala_rounds', columns: ['id', 'event_id', 'segment', 'round_no', 'title', 'prize_type', 'pool_id', 'amount_each', 'draw_count', 'exclude_previous_winners', 'status', 'created_by', 'created_name', 'created_at', 'granted_at'], defaults: { prize_type: 'none', amount_each: 0, exclude_previous_winners: 1, status: 'drawn' } },
+  { name: 'gala_round_winners', columns: ['id', 'round_id', 'event_id', 'userid', 'name_snapshot', 'display_order', 'pool_id', 'amount', 'is_reserved', 'awarded_at', 'award_cancelled_at', 'ledger_id', 'award_error', 'created_at'], defaults: { display_order: 0, amount: 0, is_reserved: 0, award_cancelled_at: null } },
+  { name: 'gala_reserved_slots', columns: ['id', 'event_id', 'segment', 'round_no', 'userid', 'pool_id', 'amount', 'note', 'status', 'used_round_id', 'created_by', 'created_at', 'updated_at'], defaults: { amount: 0, status: 'pending' } },
+];
+
+// 含年会数据的全量备份格式号，写在 _meta.galaFormat。
+export const GALA_BACKUP_FORMAT = 1;
+// 备份带了本版本不认识的年会格式号（更新版本导出）：返回 true 时导入必须在写库前拒绝。
+export function isUnsupportedGalaFormat(meta) {
+  return meta?.galaFormat != null && meta.galaFormat !== GALA_BACKUP_FORMAT;
+}
+// 备份元数据表明它是含年会数据的格式：带 galaFormat，或导出时的表清单里列了年会表。
+export function requiresGalaTables(meta) {
+  if (meta?.galaFormat != null) return true;
+  const listed = meta?.tables && typeof meta.tables === 'object' ? Object.keys(meta.tables) : [];
+  return GALA_BACKUP_TABLES.some((t) => listed.includes(t.name));
+}
+
+// 全量导出在 _meta.tables 里记了每张表的行数（早于年会格式号的旧版导出也有），返回错误描述列表：
+// - _meta.tables 列出的每张表，数组长度都必须与记录一致（被截短的账户、流水、名单等都会被发现）。
+//   旧格式同样核对它实际记下的行数：不强制它提供新字段，但被截短的中奖记录不能让待发的轮次被补成已完成；
+// - 当前格式（_meta.galaFormat）还要求 required 里的表必须有行数记录（默认六张年会表、流水和账户；覆盖导入传入全部全量表）。
+// 流水被截短时，资金校验会把缺失的流水当成用户重置后已删除的合法状态；账户被截短时，覆盖会清掉已到账的余额，
+// 而中奖记录仍是已发放，重试发币也不会补回。导出前已重置的用户不受影响：那时记录的行数本来就不含已删数据。
+// 更早、没有行数记录的旧备份不检查。
+export function findGalaRowCountErrors(backupData, meta, { required = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'] } = {}) {
+  const current = meta?.galaFormat != null;
+  const listed = meta?.tables && typeof meta.tables === 'object' && !Array.isArray(meta.tables) ? meta.tables : {};
+  const errors = [];
+  if (current) {
+    for (const name of required) {
+      if (!Object.hasOwn(listed, name)) errors.push(`${name} 缺少导出时的行数记录`);
+    }
+  }
+  for (const [name, expected] of Object.entries(listed)) {
+    const actual = Array.isArray(backupData?.[name]) ? backupData[name].length : 0;
+    if (!Number.isSafeInteger(expected) || expected < 0) {
+      errors.push(`${name} 的导出行数记录无效`);
+    } else if (actual !== expected) {
+      errors.push(`${name} 有 ${actual} 行，导出时为 ${expected} 行`);
+    }
+  }
+  return errors;
+}
+
+// 发币轮的正数奖励已全部到账（或因用户重置取消）、却仍是 drawn：旧版本在最后一笔到账后、发放收尾前退出就会留下这种数据。
+// 导入时补成 granted（完成时间取最后一笔到账或取消时间，没有则取轮次创建时间），与在线“最后一笔到账即完成”一致。
+// 无币轮不动。原地改写行对象，返回补齐的轮次数。
+export function completeFinishedCoinRounds(backupData) {
+  const rounds = Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [];
+  const winners = Array.isArray(backupData?.gala_round_winners) ? backupData.gala_round_winners : [];
+  const pending = new Set();
+  const lastPaid = new Map();
+  for (const w of winners) {
+    const key = Number(w?.round_id);
+    if (w?.awarded_at == null) {
+      if (w?.award_cancelled_at == null && Number(w?.amount) > 0) {
+        pending.add(key);
+      } else if (w?.award_cancelled_at != null && Number.isFinite(Number(w.award_cancelled_at))) {
+        lastPaid.set(key, Math.max(lastPaid.get(key) || 0, Number(w.award_cancelled_at)));
+      }
+    } else if (Number.isFinite(Number(w.awarded_at))) {
+      lastPaid.set(key, Math.max(lastPaid.get(key) || 0, Number(w.awarded_at)));
+    }
+  }
+  let changed = 0;
+  for (const r of rounds) {
+    if (!r || typeof r !== 'object' || r.prize_type !== 'coin' || (r.status ?? 'drawn') !== 'drawn' || r.granted_at != null) continue;
+    if (pending.has(Number(r.id))) continue;
+    r.status = 'granted';
+    r.granted_at = lastPaid.get(Number(r.id)) ?? (r.created_at ?? Math.floor(Date.now() / 1000));
+    changed += 1;
+  }
+  return changed;
+}
+
+// 写库前整理年会行，返回错误描述列表。当前格式的备份必须带全部列（见下方）；
+// 轮次的 exclude_previous_winners 晚于年会表引入，按格式分别处理：
+// - 当前格式（_meta.galaFormat）导出时一定带这一列：缺失或取值不是 0/1 都是损坏的备份，拒绝，不推断。
+//   否则缺失的值会被推断成 0，跨轮重复中奖校验反而放过本该拒绝的数据。
+// - 旧格式备份：缺失时与升级迁移同一口径推断。某轮有人在同一活动同一环节更早的轮次里已中过奖，
+//   说明那一轮当时关闭了排除开关，记为 0；否则记为 1。推断值原地写回行对象，后续校验与写库用同一个值。
+//   轮次号无效的行不参与推断（随后的引用校验会拒绝）；按轮次号分组，同号的异常数据互不视为“更早”。
+export function prepareGalaRoundFlags(backupData, meta) {
+  const errors = [];
+  // 当前格式的导出（SELECT *）每行都带全部列。缺列说明备份被改过：导入会给缺的列套默认值，
+  // 例如有限额、关闭了部分环节的活动恢复成不限预算、全部环节开启，所以写库前拒绝，只对旧格式补默认值。
+  if (meta?.galaFormat != null) {
+    for (const t of GALA_BACKUP_TABLES) {
+      const rows = Array.isArray(backupData?.[t.name]) ? backupData[t.name] : [];
+      for (const row of rows) {
+        const missing = row && typeof row === 'object' ? t.columns.filter((c) => !Object.hasOwn(row, c)) : t.columns;
+        if (missing.length) errors.push(`${t.name}#${row?.id} 缺少列 ${missing.join(', ')}（当前格式的备份必须带全部列）`);
+        if (errors.length >= 20) return errors;
+      }
+    }
+  }
+  const rounds = (Array.isArray(backupData?.gala_rounds) ? backupData.gala_rounds : [])
+    .filter((r) => r && typeof r === 'object');
+  for (const r of rounds) {
+    const v = r.exclude_previous_winners;
+    if (v != null && ![0, 1, '0', '1'].includes(v)) {
+      errors.push(`gala_rounds#${r.id} 的 exclude_previous_winners=${v} 只能是 0 或 1`);
+    } else if (v == null && meta?.galaFormat != null) {
+      errors.push(`gala_rounds#${r.id} 缺少 exclude_previous_winners（当前格式的备份必须带这一列）`);
+    }
+  }
+  if (errors.length || meta?.galaFormat != null) return errors;
+  if (!rounds.some((r) => r.exclude_previous_winners == null)) return errors;
+  const winnersByRound = new Map();
+  for (const w of Array.isArray(backupData?.gala_round_winners) ? backupData.gala_round_winners : []) {
+    const key = Number(w?.round_id);
+    if (!winnersByRound.has(key)) winnersByRound.set(key, []);
+    winnersByRound.get(key).push(String(w?.userid));
+  }
+  // 活动+环节 → 轮次号 → 该号下的轮次
+  const bySegment = new Map();
+  for (const r of rounds) {
+    const no = Number(r.round_no);
+    if (!Number.isSafeInteger(no) || no < 1) continue;
+    const key = `${Number(r.event_id)}:${r.segment}`;
+    if (!bySegment.has(key)) bySegment.set(key, new Map());
+    const byNo = bySegment.get(key);
+    if (!byNo.has(no)) byNo.set(no, []);
+    byNo.get(no).push(r);
+  }
+  for (const byNo of bySegment.values()) {
+    const earlier = new Set();
+    for (const no of [...byNo.keys()].sort((a, b) => a - b)) {
+      const batch = byNo.get(no);
+      for (const r of batch) {
+        if (r.exclude_previous_winners != null) continue;
+        const ws = winnersByRound.get(Number(r.id)) || [];
+        r.exclude_previous_winners = ws.some((u) => earlier.has(u)) ? 0 : 1;
+      }
+      for (const r of batch) for (const u of winnersByRound.get(Number(r.id)) || []) earlier.add(u);
+    }
+  }
+  return errors;
+}
+
+// 全量覆盖清空年会表但保留已入账的真实年会付款流水（is_gala_payout = 1）时，
+// 把中奖记录序列推进到这些真实年会付款的 GALA_W<id> 之后，避免新抽出的中奖记录与已归档的年会付款撞号。
+// 不根据普通/历史第三方 GALA_W 流水（is_gala_payout = 0）推进序列：旧第三方接口曾允许任意长数字后缀，
+// 若按它们跳号会直接耗尽中奖记录序列。
+const WINNER_SEQ_PAST_GALA_PAYOUT_REFS_SQL = `DO $$
+DECLARE
+  seq regclass := pg_get_serial_sequence('gala_round_winners', 'id')::regclass;
+  mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('gala_round_winners', 'id')::regclass);
+  ref NUMERIC := (
+    SELECT MAX(substring(ref_id FROM 7)::numeric)
+      FROM ledger
+     WHERE is_gala_payout = 1
+       AND ref_id ~ '^GALA_W[1-9][0-9]{0,15}$'
+       AND substring(ref_id FROM 7)::numeric <= 9007199254740991
+  );
+  cur NUMERIC := COALESCE((SELECT MAX(id)::numeric FROM gala_round_winners), 0);
+BEGIN
+  IF ref IS NULL OR ref <= cur THEN RETURN; END IF;
+  IF ref + 1 > mx THEN
+    EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+    PERFORM nextval(seq);
+  ELSE
+    EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, ref + 1);
+  END IF;
+END $$`;
+
+const BIGINT_MAX = 9223372036854775807n;
+function isExactLedgerId(v) {
+  if (typeof v === 'number') return Number.isSafeInteger(v) && v > 0;
+  if (typeof v !== 'string' || !/^[1-9][0-9]{0,18}$/.test(v)) return false;
+  return BigInt(v) <= BIGINT_MAX;
+}
+
+function parseLedgerGalaPayoutFlag(v) {
+  if (v === undefined || v === null) return null;
+  if (v === 1 || v === '1' || v === true) return 1;
+  if (v === 0 || v === '0' || v === false) return 0;
+  return 'invalid';
+}
+
+function couldPayWinner(row, w) {
+  return String(row?.userid) === String(w?.userid) && Number(row?.delta) === Number(w?.amount);
+}
+
+// 覆盖前生成的恢复点能否通过导入时的年会校验：在年会表、流水、账户的副本上跑同一套整理与校验
+// （prepareGalaRoundFlags → completeFinishedCoinRounds → findGalaFundingErrors），不改动快照本身。
+// 整理步骤只改写轮次行（排除开关推断、补齐完成状态），所以只复制 gala_rounds 的行；其余表（含可能很大的流水、账户）
+// 按只读引用传入，不在全库锁内整份复制。
+export function findRecoveryPointGalaErrors(snapshotData) {
+  const names = [...GALA_BACKUP_TABLES.map((t) => t.name), 'ledger', 'accounts'];
+  const copy = Object.fromEntries(names.map((n) => [n, Array.isArray(snapshotData?.[n]) ? snapshotData[n] : []]));
+  copy.gala_rounds = copy.gala_rounds.map((r) => (r && typeof r === 'object' ? { ...r } : r));
+  const flagErrors = prepareGalaRoundFlags(copy, { galaFormat: GALA_BACKUP_FORMAT });
+  if (flagErrors.length) return flagErrors;
+  completeFinishedCoinRounds(copy);
+  return findGalaFundingErrors(copy);
+}
+
+export function findGalaFundingErrors(backupData) {
+  const errors = [];
+  const asList = (v) => (Array.isArray(v) ? v : []);
+  const hasGala = GALA_BACKUP_TABLES.some((t) => backupData?.[t.name] != null);
+  const winnersList = asList(backupData?.gala_round_winners);
+  const winners = new Map(winnersList.map((w) => [Number(w?.id), w]));
+
+  if (!hasGala) return errors;
+  const ledgerRows = asList(backupData?.ledger);
+  for (const row of ledgerRows) {
+    const flag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
+    if (flag === 'invalid') {
+      errors.push(`ledger#${row?.id} 的 is_gala_payout=${row?.is_gala_payout} 只能是 0 或 1`);
+    } else if (flag === 1 && galaPayoutWinnerId(row) == null) {
+      errors.push(`ledger#${row?.id} 标记为年会付款（is_gala_payout=1），但不是有效的 GALA_W 正数入账`);
+    }
+  }
+  // 只索引中奖记录 ledger_id 实际引用到的流水（按精确十进制字符串比较，兼容完整 BIGINT 范围）。
+  const referencedLedgerIds = new Set();
+  for (const w of winnersList) {
+    if (isExactLedgerId(w?.ledger_id)) referencedLedgerIds.add(String(w.ledger_id));
+  }
+  const ledgerById = new Map();
+  if (winnersList.length > 0) {
+    for (const r of ledgerRows) {
+      if (isExactLedgerId(r?.id) && referencedLedgerIds.has(String(r.id))) {
+        ledgerById.set(String(r.id), r);
+      }
+    }
+  }
+  for (const row of (winnersList.length > 0 ? ledgerRows : [])) {
+    const flag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
+    const wid = galaPayoutWinnerId(row);
+    if (wid == null) continue;
+    const w = winners.get(wid);
+    if (!w) continue;
+    if (isExactLedgerId(w.ledger_id) && isExactLedgerId(row?.id) && String(w.ledger_id) === String(row.id)) {
+      if (flag === 0) {
+        errors.push(`ledger#${row?.id} 标记为非年会流水（is_gala_payout=0），却被中奖记录 ${row.ref_id} 作为付款凭据引用`);
+      } else if (String(row.userid) !== String(w.userid) || Number(row.delta) !== Number(w.amount)) {
+        errors.push(`ledger#${row?.id} 的收款人或金额与中奖记录 ${row.ref_id} 不一致`);
+      }
+    } else if (flag === 1) {
+      if (w.awarded_at == null) {
+        errors.push(`ledger#${row?.id} 是 ${row.ref_id} 的年会发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
+      }
+    } else if (flag === null && w.awarded_at == null && w.award_cancelled_at == null && couldPayWinner(row, w)) {
+      // 旧格式备份无 is_gala_payout 列时保留兼容核对；明确标记 is_gala_payout=0 的历史同名普通流水不再误判。
+      errors.push(`ledger#${row?.id} 像是 ${row.ref_id} 的发放流水，但对应中奖记录未标记发放，恢复后会重复发放`);
+    }
+  }
+  // 零金额中奖（无币轮）从不发放也不取消奖励：awarded_at、award_cancelled_at、ledger_id 都必须为空。
+  for (const w of winnersList) {
+    if (Number(w?.amount) === 0 && (w?.awarded_at != null || w?.ledger_id != null || w?.award_cancelled_at != null)) {
+      errors.push(`gala_round_winners#${w?.id} 是零金额中奖记录，却带有发放时间、取消时间或付款凭据（awarded_at/award_cancelled_at/ledger_id 必须为空）`);
+    } else if (w?.award_cancelled_at != null && (w?.awarded_at != null || w?.ledger_id != null)) {
+      errors.push(`gala_round_winners#${w?.id} 已发放或带付款凭据，不能同时标记奖励已取消`);
+    }
+  }
+  // 一条流水只能支付一笔奖励：即使流水已被用户重置删除，两条中奖记录也不能共用同一个付款凭据。
+  const winnerByLedger = new Map();
+  for (const w of winnersList) {
+    if (w?.ledger_id == null || !isExactLedgerId(w.ledger_id)) continue;
+    const key = String(w.ledger_id);
+    if (winnerByLedger.has(key)) {
+      errors.push(`gala_round_winners#${w.id} 与 #${winnerByLedger.get(key)} 共用付款凭据 ledger_id ${w.ledger_id}`);
+    } else {
+      winnerByLedger.set(key, w.id);
+    }
+  }
+  for (const w of winnersList) {
+    if (w?.ledger_id == null || !isExactLedgerId(w.ledger_id)) continue;
+    const linked = ledgerById.get(String(w.ledger_id));
+    if (linked && galaPayoutWinnerId(linked) !== Number(w.id)) {
+      errors.push(`gala_round_winners#${w.id} 的 ledger_id ${w.ledger_id} 指向的不是它自己的发放流水`);
+    }
+  }
+  // 已发放、付款流水也在备份里的奖励，收款人的账户必须同在这份备份里。
+  const accountUsers = new Set(asList(backupData?.accounts).map((a) => String(a?.userid)));
+  for (const w of winnersList) {
+    if (w?.awarded_at == null || !isExactLedgerId(w?.ledger_id) || !(Number(w.amount) > 0)) continue;
+    if (!ledgerById.has(String(w.ledger_id))) continue;
+    if (!accountUsers.has(String(w.userid))) {
+      errors.push(`gala_round_winners#${w.id} 已发放且付款流水在备份里，但备份缺少收款人 ${w.userid} 的账户，无法确认余额已含这笔奖励`);
+    }
+  }
+
+  // 恢复出的名单、待发中奖记录、待用名额之后都要按同一个 userid 操作（移出名单、发放、兑现名额），
+  // 必须符合在线入口的标识规则（见 isOperableGalaUserid：不去首尾空白、不超长等）。不裁剪修复，直接拒绝并报告位置。
+  const checkUserid = (table, row) => {
+    if (!isOperableGalaUserid(row?.userid)) errors.push(`${table}#${row?.id} 的 userid 无法按名单接口原样操作（首尾空白、超长或为空）`);
+  };
+  for (const p of asList(backupData?.gala_participants)) checkUserid('gala_participants', p);
+  for (const w of winnersList) if (w?.awarded_at == null && w?.award_cancelled_at == null) checkUserid('gala_round_winners', w);
+  for (const slot of asList(backupData?.gala_reserved_slots)) if ((slot?.status ?? 'pending') === 'pending') checkUserid('gala_reserved_slots', slot);
+
+  // 金额类字段先做与在线写入相同的安全整数校验：后续校验和发币都用 Number，
+  // 超出安全整数范围的值会被悄悄改写，导致数据库里存的和实际扣减、入账的不是同一个数。
+  const safeInt = (v) => (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) && Number.isSafeInteger(Number(v)) && Number(v) >= 0;
+  const MONEY_FIELDS = {
+    gala_events: ['total_budget'],
+    gala_pools: ['budget', 'spent'],
+    gala_rounds: ['amount_each'],
+    gala_round_winners: ['amount'],
+    gala_reserved_slots: ['amount'],
+  };
+  for (const [table, fields] of Object.entries(MONEY_FIELDS)) {
+    for (const row of asList(backupData?.[table])) {
+      for (const f of fields) {
+        if (row?.[f] == null) continue;
+        if (!safeInt(row[f])) errors.push(`${table}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的非负整数`);
+      }
+    }
+  }
+  // 年会表自身的标识符必须是安全整数；付款凭据 ledger_id 允许精确十进制字符串覆盖完整 PostgreSQL BIGINT 范围。
+  const ID_FIELDS = ['id', 'event_id', 'pool_id', 'round_id', 'used_round_id'];
+  for (const t of GALA_BACKUP_TABLES) {
+    for (const row of asList(backupData?.[t.name])) {
+      for (const f of ID_FIELDS) {
+        if (row?.[f] == null) continue;
+        if (!safeInt(row[f]) || Number(row[f]) <= 0) errors.push(`${t.name}#${row?.id} 的 ${f}=${row[f]} 不是安全范围内的正整数`);
+      }
+    }
+  }
+  for (const w of winnersList) {
+    if (w?.ledger_id != null && !isExactLedgerId(w.ledger_id)) {
+      errors.push(`gala_round_winners#${w?.id} 的 ledger_id=${w.ledger_id} 不是可原样恢复的正整数（数字须在安全整数内，更大的 id 须是十进制字符串且不超过 BIGINT）`);
+    }
+    if (w?.award_cancelled_at != null && (!safeInt(w.award_cancelled_at) || Number(w.award_cancelled_at) <= 0)) {
+      errors.push(`gala_round_winners#${w?.id} 的 award_cancelled_at=${w.award_cancelled_at} 不是安全范围内的正整数`);
+    }
+  }
+  // 抽签人数与轮次号按在线抽签的范围校验：已分配额 = 单价 × 抽签人数，负数或超大值会让账面倒扣或溢出；
+  // 轮次号写入 INTEGER 列。
+  const intIn = (v, min, max) => (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v)))
+    && Number.isSafeInteger(Number(v)) && Number(v) >= min && Number(v) <= max;
+  for (const r of asList(backupData?.gala_rounds)) {
+    if (!intIn(r?.draw_count, 1, GALA_MAX_DRAW_COUNT)) errors.push(`gala_rounds#${r?.id} 的 draw_count=${r?.draw_count} 不在 1~${GALA_MAX_DRAW_COUNT} 之间`);
+    if (!intIn(r?.round_no, 1, 2147483647)) errors.push(`gala_rounds#${r?.id} 的 round_no=${r?.round_no} 不是有效轮次号`);
+  }
+  // 环节开关原样写入 TEXT 列，读取时解析失败会被当成“全部停用”：必须是认识的环节键组成的 JSON 数组。
+  for (const e of asList(backupData?.gala_events)) {
+    if (e?.enabled_segments == null) continue;
+    let list = null;
+    try {
+      list = typeof e.enabled_segments === 'string' ? JSON.parse(e.enabled_segments) : null;
+    } catch {
+      list = null;
+    }
+    if (!Array.isArray(list) || list.some((k) => typeof k !== 'string' || !Object.hasOwn(GALA_SEGMENTS, k))) {
+      errors.push(`gala_events#${e?.id} 的 enabled_segments 不是有效的环节列表`);
+    }
+  }
+  for (const table of ['gala_pools', 'gala_round_winners']) {
+    for (const row of asList(backupData?.[table])) {
+      if (row?.is_reserved != null && ![0, 1, '0', '1'].includes(row.is_reserved)) {
+        errors.push(`${table}#${row?.id} 的 is_reserved=${row.is_reserved} 只能是 0 或 1`);
+      }
+    }
+  }
+  if (errors.length) return errors;
+
+  const events = new Map(asList(backupData?.gala_events).map((e) => [Number(e?.id), e]));
+  const pools = new Map(asList(backupData?.gala_pools).map((p) => [Number(p?.id), p]));
+  const rounds = new Map(asList(backupData?.gala_rounds).map((r) => [Number(r?.id), r]));
+  const hasEvent = (id) => events.has(Number(id));
+  const poolOk = (poolId, eventId, reserved) => {
+    const pool = pools.get(Number(poolId));
+    if (!pool || Number(pool.event_id) !== Number(eventId)) return false;
+    return reserved == null || (Number(pool.is_reserved) === 1) === reserved;
+  };
+
+  for (const table of ['gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) {
+    for (const row of asList(backupData?.[table])) {
+      if (!hasEvent(row?.event_id)) errors.push(`${table}#${row?.id} 引用的活动 ${row?.event_id} 不在备份中`);
+    }
+  }
+  for (const r of rounds.values()) {
+    // 轮次只能由在线抽签产生，环节必须是可抽签的环节：否则发币时会给一个在线永远抽不出来的轮次付款。
+    if (!GALA_DRAW_SEGMENTS.has(String(r?.segment))) {
+      errors.push(`gala_rounds#${r?.id} 的环节 ${r?.segment} 不可抽签`);
+    }
+    // 与在线抽签一致：无币轮没有奖池、单价为 0；发币轮必须挂同一活动的员工奖池且单价为正。
+    // 否则无币轮也会被计入已分配额，永久占用员工预算。
+    const prize = r?.prize_type ?? 'none';
+    if (prize === 'none') {
+      if (r?.pool_id != null || Number(r?.amount_each || 0) !== 0) {
+        errors.push(`gala_rounds#${r?.id} 是无币轮，却带奖池或单价`);
+      }
+    } else if (prize === 'coin') {
+      if (r?.pool_id == null || !poolOk(r.pool_id, r.event_id, false)) {
+        errors.push(`gala_rounds#${r?.id} 引用的奖池 ${r?.pool_id} 不是同一活动的员工奖池`);
+      } else if (!(Number(r?.amount_each) > 0)) {
+        errors.push(`gala_rounds#${r?.id} 是发币轮，单价必须大于 0`);
+      }
+    } else {
+      errors.push(`gala_rounds#${r?.id} 的奖品类型 ${prize} 无效`);
+    }
+  }
+
+  // 活动总预算：与 createGalaPool/updateGalaPool 相同，总预算大于 0 时员工奖池预算之和不能超出。
+  const employeeBudget = new Map();
+  for (const p of pools.values()) {
+    if (Number(p?.is_reserved) === 1) continue;
+    const key = Number(p?.event_id);
+    employeeBudget.set(key, (employeeBudget.get(key) || 0) + Number(p?.budget || 0));
+  }
+  for (const [eventId, total] of employeeBudget) {
+    const cap = Number(events.get(eventId)?.total_budget || 0);
+    if (cap > 0 && total > cap) errors.push(`gala_events#${eventId} 员工奖池预算合计 ${total} 超过活动总预算 ${cap}`);
+  }
+  // 与在线创建/修改奖池相同（GALA_MAX_POOLS_TOTAL）：同一活动员工奖池、预留奖池的预算合计各不超过安全整数的一半。
+  // 活动详情按 Number 汇总两类奖池的预算、已分配额和支出（支出不超过预算、已分配额不超过员工奖池预算），
+  // 这样所有汇总都仍是安全整数。用 BigInt 精确求和。
+  const budgetSum = new Map();
+  for (const p of pools.values()) {
+    if (!safeInt(p?.budget)) continue;
+    const key = `${Number(p?.event_id)}:${Number(p?.is_reserved) === 1 ? 1 : 0}`;
+    budgetSum.set(key, (budgetSum.get(key) || 0n) + BigInt(String(p.budget)));
+  }
+  for (const [key, total] of budgetSum) {
+    if (total > BigInt(GALA_MAX_POOLS_TOTAL)) {
+      const [eventId, reserved] = key.split(':');
+      errors.push(`gala_events#${eventId} 的${reserved === '1' ? '预留' : '员工'}奖池预算合计 ${total} 超过上限 ${GALA_MAX_POOLS_TOTAL}`);
+    }
+  }
+  // 员工奖池的已分配额（各轮 单价 × 抽签人数）不能超过预算：在线抽签按这个口径准入，
+  // 也是非超管看到的账面，恢复出超额的数据会让公开账面为负。
+  const allocated = new Map();
+  for (const r of rounds.values()) {
+    if (r?.pool_id == null) continue;
+    const key = Number(r.pool_id);
+    allocated.set(key, (allocated.get(key) || 0) + Number(r?.amount_each || 0) * Number(r?.draw_count || 0));
+  }
+  for (const [poolId, total] of allocated) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool?.is_reserved) !== 1 && total > Number(pool?.budget || 0)) {
+      errors.push(`gala_pools#${poolId} 的已分配额 ${total} 超过预算 ${Number(pool?.budget || 0)}`);
+    }
+  }
+  // 每轮中奖人数不能超过抽签人数：用户重置会删掉未发放的记录，所以少于可以，多于不行。
+  const winnersPerRound = new Map();
+  for (const w of winnersList) {
+    const key = Number(w?.round_id);
+    winnersPerRound.set(key, (winnersPerRound.get(key) || 0) + 1);
+  }
+  for (const [roundId, n] of winnersPerRound) {
+    const round = rounds.get(roundId);
+    if (round && n > Number(round?.draw_count || 0)) {
+      errors.push(`gala_rounds#${roundId} 有 ${n} 条中奖记录，超过抽签人数 ${Number(round?.draw_count || 0)}`);
+    }
+  }
+  // 每轮最多一个预留中奖人、一个已使用名额（在线抽签每轮只消费一个名额）。
+  const reservedPerRound = new Map();
+  for (const w of winnersList) {
+    if (Number(w?.is_reserved) !== 1) continue;
+    const key = Number(w?.round_id);
+    reservedPerRound.set(key, (reservedPerRound.get(key) || 0) + 1);
+  }
+  for (const [roundId, n] of reservedPerRound) {
+    if (n > 1) errors.push(`gala_rounds#${roundId} 有 ${n} 条预留中奖记录，每轮最多 1 条`);
+  }
+  const slotKeys = new Map();
+  for (const sl of asList(backupData?.gala_reserved_slots)) {
+    if (sl?.status !== 'used') continue;
+    const key = `${Number(sl?.event_id)}:${sl?.segment}:${Number(sl?.round_no)}`;
+    if (slotKeys.has(key)) errors.push(`gala_reserved_slots#${sl?.id} 与 #${slotKeys.get(key)} 是同一轮的已使用名额，每轮最多 1 个`);
+    else slotKeys.set(key, sl?.id);
+  }
+  // 与在线创建相同：每场活动未取消的预留名额不超过上限。
+  const slotsPerEvent = new Map();
+  for (const sl of asList(backupData?.gala_reserved_slots)) {
+    if ((sl?.status ?? 'pending') === 'cancelled') continue;
+    const key = Number(sl?.event_id);
+    slotsPerEvent.set(key, (slotsPerEvent.get(key) || 0) + 1);
+  }
+  for (const [eventId, n] of slotsPerEvent) {
+    if (n > GALA_MAX_RESERVED_SLOTS) errors.push(`gala_events#${eventId} 有 ${n} 个未取消的预留名额，超过上限 ${GALA_MAX_RESERVED_SLOTS}`);
+  }
+
+  // 已使用名额按“轮次:用户”建索引、预留中奖记录同样建索引，两个方向的对应校验都是线性的。
+  const usedSlotsByRoundUser = new Map();
+  for (const sl of asList(backupData?.gala_reserved_slots)) {
+    if (sl?.status !== 'used') continue;
+    const key = `${Number(sl?.used_round_id)}:${String(sl?.userid)}`;
+    if (!usedSlotsByRoundUser.has(key)) usedSlotsByRoundUser.set(key, []);
+    usedSlotsByRoundUser.get(key).push(sl);
+  }
+  const reservedWinnerKeys = new Set(winnersList
+    .filter((w) => Number(w?.is_reserved) === 1)
+    .map((w) => `${Number(w?.round_id)}:${String(w?.userid)}`));
+  const anyWinnerKeys = new Set(winnersList.map((w) => `${Number(w?.round_id)}:${String(w?.userid)}`));
+  // 已发奖励必须已计入奖池支出，否则恢复后奖池还能再发一遍。
+  const awardedByPool = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at == null || w?.pool_id == null) continue;
+    const key = Number(w.pool_id);
+    awardedByPool.set(key, (awardedByPool.get(key) || 0) + Number(w.amount || 0));
+  }
+  for (const [poolId, total] of awardedByPool) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool.spent || 0) < total) {
+      errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 小于已发奖励合计 ${total}`);
+    }
+  }
+  // 轮次的完成状态必须与待发记录一致，且 status 与 granted_at 必须同时成立或同时为空：
+  // 有任何待发记录却是 granted，会显示整轮完成；granted 却没有完成时间、或 drawn 却带完成时间，状态自相矛盾。
+  const pendingCount = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || !(Number(w?.amount) > 0)) continue;
+    const key = Number(w?.round_id);
+    pendingCount.set(key, (pendingCount.get(key) || 0) + 1);
+  }
+  for (const r of rounds.values()) {
+    const status = r?.status ?? 'drawn';
+    if (!['drawn', 'granted'].includes(status)) {
+      errors.push(`gala_rounds#${r?.id} 的状态 ${status} 无效`);
+      continue;
+    }
+    const hasGrantedAt = r?.granted_at != null;
+    // 无币轮从不发放（在线发放接口拒绝无币轮）：只能是 drawn 且没有发放完成时间，否则恢复后会显示一轮无法发生的“已发币”。
+    if (r?.prize_type !== 'coin' && (status !== 'drawn' || hasGrantedAt)) {
+      errors.push(`gala_rounds#${r?.id} 是无币轮，却标记了发放完成（状态必须为 drawn、发放完成时间为空）`);
+      continue;
+    }
+    if ((status === 'granted') !== hasGrantedAt) {
+      errors.push(`gala_rounds#${r?.id} 的状态 ${status} 与发放完成时间${hasGrantedAt ? '（已填写）' : '（为空）'}不一致`);
+      continue;
+    }
+    const pending = pendingCount.get(Number(r?.id)) || 0;
+    if (status === 'granted' && pending > 0) {
+      errors.push(`gala_rounds#${r?.id} 已标记整轮发放完成，但还有 ${pending} 条奖励待发`);
+    } else if (status === 'drawn' && r?.prize_type === 'coin' && pending === 0) {
+      // 反方向：发币轮已没有待发奖励却仍是 drawn，恢复后会一直显示未发完。导入时先由 completeFinishedCoinRounds 补齐。
+      errors.push(`gala_rounds#${r?.id} 是发币轮且奖励已全部到账，却未标记整轮发放完成`);
+    }
+  }
+  // 员工奖池：实际支出 + 待发普通奖励不能超过已分配额（在线时普通奖励都出自已分配的名额，这一关系恒成立）。
+  // 否则恢复后按“预算 − 已分配额”准入的抽签会承诺超过实际余额的奖励。已分配额 ≤ 预算另有校验。
+  // 员工奖池的余额必须够付已有的待发普通奖励，否则恢复后这些奖励必定发放失败。
+  const pendingByPool = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || Number(w?.is_reserved) === 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
+    const key = Number(w.pool_id);
+    pendingByPool.set(key, (pendingByPool.get(key) || 0) + Number(w.amount));
+  }
+  for (const [poolId, total] of pendingByPool) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool?.is_reserved) !== 1 && Number(pool.spent || 0) + total > Number(pool.budget || 0)) {
+      errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 加待发奖励 ${total} 超过预算 ${Number(pool.budget || 0)}`);
+    }
+  }
+  // 预留奖池：已支出加待发的预留奖励不能超过预算（与在线改预算的下限一致），否则恢复后这些奖励必定发放失败。
+  const pendingReservedByPool = new Map();
+  for (const w of winnersList) {
+    if (w?.awarded_at != null || w?.award_cancelled_at != null || Number(w?.is_reserved) !== 1 || w?.pool_id == null || !(Number(w?.amount) > 0)) continue;
+    const key = Number(w.pool_id);
+    pendingReservedByPool.set(key, (pendingReservedByPool.get(key) || 0) + Number(w.amount));
+  }
+  for (const [poolId, total] of pendingReservedByPool) {
+    const pool = pools.get(poolId);
+    if (pool && Number(pool?.is_reserved) === 1 && Number(pool.spent || 0) + total > Number(pool.budget || 0)) {
+      errors.push(`gala_pools#${poolId} 的支出 ${Number(pool.spent || 0)} 加待发预留奖励 ${total} 超过预算 ${Number(pool.budget || 0)}`);
+    }
+  }
+  for (const p of pools.values()) {
+    if (Number(p?.is_reserved) === 1) continue;
+    const key = Number(p?.id);
+    const owed = Number(p?.spent || 0) + (pendingByPool.get(key) || 0);
+    if (owed > (allocated.get(key) || 0)) {
+      errors.push(`gala_pools#${key} 的支出加待发奖励 ${owed} 超过已分配额 ${allocated.get(key) || 0}`);
+    }
+  }
+
+  for (const w of winnersList) {
+    const round = rounds.get(Number(w?.round_id));
+    if (!round || Number(round.event_id) !== Number(w?.event_id)) {
+      errors.push(`gala_round_winners#${w?.id} 的轮次不存在或不属于同一活动`);
+      continue;
+    }
+    const reserved = Number(w?.is_reserved) === 1;
+    // 预留中奖记录必须对应一条已使用的预留名额（同轮次、同一人、同奖池、同金额），
+    // 否则残缺备份可以凭空恢复出一笔预留奖励，发给错误的人或错误的金额。
+    if (reserved) {
+      const match = (usedSlotsByRoundUser.get(`${Number(w.round_id)}:${String(w.userid)}`) || []).some((sl) => Number(sl.used_round_id) === Number(w.round_id)
+        && String(sl.segment) === String(round.segment)
+        && Number(sl.round_no) === Number(round.round_no)
+        && String(sl.userid) === String(w.userid)
+        && (sl.pool_id == null ? null : Number(sl.pool_id)) === (w.pool_id == null ? null : Number(w.pool_id))
+        && Number(sl.amount || 0) === Number(w.amount || 0));
+      if (!match) errors.push(`gala_round_winners#${w?.id} 是预留中奖记录，但找不到对应的已使用预留名额`);
+    }
+    // 已发放的正数奖励必须带 ledger_id 作为付款凭据。用户重置会删除流水但保留 ledger_id，
+    // 所以只要求 ledger_id 存在，不要求对应流水仍在备份里；完全没有凭据的“已发放”会让这笔奖励永远补发不了。
+    if (w?.awarded_at != null && Number(w?.amount) > 0 && w?.ledger_id == null) {
+      errors.push(`gala_round_winners#${w?.id} 标记已发放但没有 ledger_id，无法证明已付款`);
+    }
+    // 反过来：带付款凭据却没有 awarded_at，恢复后会被当成待发奖励再付一次（对应流水可能已被用户重置删除）。
+    if (w?.awarded_at == null && w?.ledger_id != null) {
+      errors.push(`gala_round_winners#${w?.id} 有付款凭据 ledger_id ${w.ledger_id} 却未标记发放，恢复后会重复发放`);
+    }
+    // 预留记录的金额与本轮普通奖励一致（发币轮为单价、无币轮为 0），奖池是预留奖池（金额为 0 时不挂奖池）：
+    // 金额不同会让预留对象的余额变化与其他中奖人不同。
+    if (reserved) {
+      const expectAmount = round.prize_type === 'coin' ? Number(round.amount_each || 0) : 0;
+      if (Number(w?.amount || 0) !== expectAmount || (expectAmount === 0 && w?.pool_id != null)) {
+        errors.push(`gala_round_winners#${w?.id} 是预留中奖记录，金额或奖池与轮次 ${round.id} 的本轮奖励不一致`);
+        continue;
+      }
+    }
+    // 普通中奖记录的奖池与金额必须和所属轮次的配置一致。
+    if (!reserved) {
+      const coin = round.prize_type === 'coin';
+      const expectPool = coin ? Number(round.pool_id) : null;
+      const expectAmount = coin ? Number(round.amount_each || 0) : 0;
+      const gotPool = w?.pool_id == null ? null : Number(w.pool_id);
+      if (gotPool !== expectPool || Number(w?.amount || 0) !== expectAmount) {
+        errors.push(`gala_round_winners#${w?.id} 的奖池或金额与轮次 ${round.id} 的配置不一致`);
+        continue;
+      }
+    }
+    if (w?.pool_id != null && !poolOk(w.pool_id, w.event_id, reserved)) {
+      errors.push(`gala_round_winners#${w?.id} 引用的奖池 ${w.pool_id} 不是同一活动的${reserved ? '预留' : '员工'}奖池`);
+    } else if (Number(w?.amount) > 0 && w?.pool_id == null) {
+      // 已发和待发的正数奖励都必须有出处：已发的没有奖池，就是一笔不在任何预算里的支出，
+      // 恢复后奖池账面会少算这笔钱（预留奖池可以借此超发）。
+      errors.push(`gala_round_winners#${w?.id} 的奖励 ${w?.amount} 缺少同一活动的${reserved ? '预留' : '员工'}奖池`);
+    }
+  }
+  // 待用名额的轮次号必须大于该活动该环节已抽的最大轮次，否则恢复后永远用不到，
+  // 却会把对应的人一直排除在普通抽签之外（与在线创建时的 round_already_drawn 一致）。
+  const maxDrawn = new Map();
+  for (const r of rounds.values()) {
+    const key = `${Number(r?.event_id)}:${r?.segment}`;
+    maxDrawn.set(key, Math.max(maxDrawn.get(key) || 0, Number(r?.round_no || 0)));
+  }
+  // 与在线创建相同：同一活动同一环节，一个人只能有一个未取消的名额，且不能已在该环节中过奖。
+  // 否则关闭“排除已中奖者”时两个名额都会兑现，或名额到时因已中奖而作废。
+  const segmentWinners = new Set();
+  const segmentNormalWinners = new Set();
+  for (const w of winnersList) {
+    const r = rounds.get(Number(w?.round_id));
+    if (!r) continue;
+    const key = `${Number(r.event_id)}:${r.segment}:${String(w?.userid)}`;
+    segmentWinners.add(key);
+    if (Number(w?.is_reserved) !== 1) segmentNormalWinners.add(key);
+  }
+  // 轮次自身的排除规则：开启“排除本环节已中奖者”的一轮，中奖人不能在同一活动同一环节更早的轮次里中过奖。
+  // 否则同一人会在恢复后两轮都拿到奖励，而在线抽签不可能产生这样的数据。
+  const roundsBySegment = new Map();
+  for (const r of rounds.values()) {
+    const key = `${Number(r?.event_id)}:${r?.segment}`;
+    if (!roundsBySegment.has(key)) roundsBySegment.set(key, []);
+    roundsBySegment.get(key).push(r);
+  }
+  const winnersByRound = new Map();
+  for (const w of winnersList) {
+    const key = Number(w?.round_id);
+    if (!winnersByRound.has(key)) winnersByRound.set(key, []);
+    winnersByRound.get(key).push(w);
+  }
+  for (const list of roundsBySegment.values()) {
+    list.sort((a, b) => Number(a?.round_no) - Number(b?.round_no));
+    const earlier = new Set();
+    for (const r of list) {
+      const ws = winnersByRound.get(Number(r?.id)) || [];
+      if (Number(r?.exclude_previous_winners ?? 1) === 1) {
+        for (const w of ws) {
+          if (earlier.has(String(w?.userid))) {
+            errors.push(`gala_round_winners#${w?.id} 在第 ${r?.round_no} 轮再次中奖，但该轮开启了排除本环节已中奖者`);
+          }
+        }
+      }
+      for (const w of ws) earlier.add(String(w?.userid));
+    }
+  }
+  // 在线抽签对持有该活动任一未取消名额的人，在所有环节都排除出普通候选（名额用掉后依然是未取消状态）。
+  // 所以已用名额兑现之后（中奖记录 id 更大的轮次），持有人在该活动任何环节都不可能再有普通中奖记录。
+  const normalWinsByEventUser = new Map();
+  for (const w of winnersList) {
+    if (Number(w?.is_reserved) === 1) continue;
+    const r = rounds.get(Number(w?.round_id));
+    if (!r) continue;
+    const key = `${Number(r.event_id)}:${String(w?.userid)}`;
+    if (!normalWinsByEventUser.has(key)) normalWinsByEventUser.set(key, []);
+    normalWinsByEventUser.get(key).push(Number(r.id));
+  }
+  // 待用名额的持有人必须在同一活动的名单里：在线创建要求先入名单，移出名单时名额同时作废。
+  // 不在名单里的待用名额恢复后，只要在预定轮次前重新导入此人就会兑现。已使用、已取消的名额是历史记录，不受此限。
+  const enrolled = new Set(asList(backupData?.gala_participants).map((p) => `${Number(p?.event_id)}:${String(p?.userid)}`));
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') !== 'pending') continue;
+    if (!enrolled.has(`${Number(slot?.event_id)}:${String(slot?.userid)}`)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人不在同一活动的参与名单里`);
+    }
+  }
+  const liveSlotsByUser = new Map();
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    if ((slot?.status ?? 'pending') === 'cancelled') continue;
+    const key = `${Number(slot?.event_id)}:${slot?.segment}:${String(slot?.userid)}`;
+    liveSlotsByUser.set(key, (liveSlotsByUser.get(key) || 0) + 1);
+  }
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    const status = slot?.status ?? 'pending';
+    if (status === 'cancelled') continue;
+    const key = `${Number(slot?.event_id)}:${slot?.segment}:${String(slot?.userid)}`;
+    // 唯一性覆盖所有未取消的名额（含已使用）：两个已使用名额意味着同一人在同一环节拿了两次预留奖励。
+    if ((liveSlotsByUser.get(key) || 0) > 1) {
+      errors.push(`gala_reserved_slots#${slot?.id} 的持有人在同一活动同一环节还有别的未取消名额`);
+    } else if (status === 'used' && segmentNormalWinners.has(key)) {
+      // 在线抽签始终把持有未取消名额的人排除在普通候选之外（与排除开关无关），创建名额时也要求本环节没中过奖：
+      // 已用名额的持有人在本环节只能有那一条预留中奖记录。
+      errors.push(`gala_reserved_slots#${slot?.id} 已使用名额的持有人在同一活动同一环节还有普通中奖记录`);
+    } else if (status === 'pending' && segmentWinners.has(key)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的持有人已在同一活动同一环节中过奖`);
+    } else if (status === 'used' && slot?.used_round_id != null
+      && (normalWinsByEventUser.get(`${Number(slot?.event_id)}:${String(slot?.userid)}`) || [])
+        .some((roundId) => roundId > Number(slot.used_round_id))) {
+      errors.push(`gala_reserved_slots#${slot?.id} 已使用名额的持有人在名额兑现之后又在同一活动的普通抽签中中奖`);
+    }
+  }
+  for (const slot of asList(backupData?.gala_reserved_slots)) {
+    const pending = (slot?.status ?? 'pending') === 'pending';
+    // 与在线创建相同：待用名额必须落在可抽签的环节、轮次号为正整数，否则永远用不到，
+    // 却会把对应的人一直排除在普通抽签之外。
+    if (pending && (!GALA_DRAW_SEGMENTS.has(String(slot?.segment)) || !Number.isSafeInteger(Number(slot?.round_no)) || Number(slot?.round_no) < 1)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的环节 ${slot?.segment} 或轮次 ${slot?.round_no} 无效`);
+    } else if (pending
+      && Number(slot?.round_no) <= (maxDrawn.get(`${Number(slot?.event_id)}:${slot?.segment}`) || 0)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额的第 ${slot?.round_no} 轮已经抽过`);
+    }
+    if (slot?.pool_id != null && !poolOk(slot.pool_id, slot.event_id, true)) {
+      errors.push(`gala_reserved_slots#${slot?.id} 引用的奖池 ${slot.pool_id} 不是同一活动的预留奖池`);
+    } else if (pending && slot?.pool_id == null) {
+      // 待用名额中奖时按本轮单价从预留奖池付款，必须指定预留奖池。
+      errors.push(`gala_reserved_slots#${slot?.id} 待用名额缺少同一活动的预留奖池`);
+    } else if (slot?.status === 'used' && Number(slot?.amount) > 0 && slot?.pool_id == null) {
+      errors.push(`gala_reserved_slots#${slot?.id} 的名额奖励 ${slot?.amount} 缺少同一活动的预留奖池`);
+    }
+    if (slot?.status === 'used' && slot?.used_round_id == null) {
+      errors.push(`gala_reserved_slots#${slot?.id} 已使用却没有关联轮次`);
+    }
+    if (slot?.used_round_id != null) {
+      const used = rounds.get(Number(slot.used_round_id));
+      if (!used || Number(used.event_id) !== Number(slot.event_id)) {
+        errors.push(`gala_reserved_slots#${slot?.id} 引用的轮次 ${slot.used_round_id} 不在备份的同一活动中`);
+      } else if (String(used.segment) !== String(slot?.segment) || Number(used.round_no) !== Number(slot?.round_no)) {
+        errors.push(`gala_reserved_slots#${slot?.id} 预定的是 ${slot?.segment} 第 ${slot?.round_no} 轮，却记在轮次 ${used.id}（${used.segment} 第 ${used.round_no} 轮）上`);
+      } else if (slot?.status === 'used'
+        && Number(slot?.amount || 0) !== (String(used.prize_type) === 'coin' ? Number(used.amount_each || 0) : 0)) {
+        // 已使用名额记下的奖励必须等于关联轮次的奖励（发币轮为单价、无币轮为 0），与中奖记录是否还在无关：
+        // 用户重置后中奖记录可以合法消失，名额金额仍是超管看到的历史奖励。
+        errors.push(`gala_reserved_slots#${slot?.id} 已使用名额的奖励 ${Number(slot?.amount || 0)} 与轮次 ${used.id} 的奖励不一致`);
+      } else if (slot?.status === 'used') {
+        // 已使用的名额占本轮一个位置。对应的预留中奖记录只会因用户重置被删掉，那时本轮一定空出一个位置；
+        // 记录不在、位置却被别人占满，说明这一位被换成了普通中奖人，恢复后会从员工奖池发给错误的人。
+        // 名额持有人在本轮以普通中奖记录出现，同样是被改了标记：恢复后会从员工奖池给预留对象发币。
+        const key = `${Number(used.id)}:${String(slot?.userid)}`;
+        const hasWinner = reservedWinnerKeys.has(key);
+        if (!hasWinner && anyWinnerKeys.has(key)) {
+          errors.push(`gala_reserved_slots#${slot?.id} 已使用，但持有人在轮次 ${used.id} 里是普通中奖记录`);
+        } else if (!hasWinner && (winnersPerRound.get(Number(used.id)) || 0) >= Number(used.draw_count || 0)) {
+          errors.push(`gala_reserved_slots#${slot?.id} 已使用，但轮次 ${used.id} 里没有它的中奖记录且名额已被占满`);
+        }
+      }
+    }
+  }
+  return errors;
+}
 
 export function registerAdminBackupRoutes(router) {
 
@@ -61,6 +840,12 @@ export function registerAdminBackupRoutes(router) {
     'red_packet_items',
     'auction_activities',
     'auction_bids',
+    'gala_events',
+    'gala_pools',
+    'gala_participants',
+    'gala_rounds',
+    'gala_round_winners',
+    'gala_reserved_slots',
     'content_faq',
     'content_announcements',
     'content_announcement_revisions',
@@ -73,6 +858,19 @@ export function registerAdminBackupRoutes(router) {
     'admin_user_roles',
     'system_settings',
   ];
+
+  // 全量恢复拿不到表锁时整体重试（见导入处说明）。只有加锁这一步抛出的 restoreLockBusy 会重试，
+  // 它发生在恢复写入任何数据之前，重试不会重复执行副作用。
+  async function runWithRestoreLockRetry(db, fn, { attempts = 60 } = {}) {
+    for (let i = 1; ; i += 1) {
+      try {
+        return await runInTransaction(db, fn);
+      } catch (err) {
+        if (!err?.restoreLockBusy || i >= attempts) throw err;
+        await new Promise((resolve) => { setTimeout(resolve, Math.min(50 * i, 500)); });
+      }
+    }
+  }
 
   async function dumpTable(db, tableName) {
     try {
@@ -264,6 +1062,8 @@ export function registerAdminBackupRoutes(router) {
           mode,
           filename,
           exportedAt: now.toISOString(),
+          // 含年会数据的全量格式：导入时要求六张年会表齐全（见 requiresGalaTables）。
+          ...(mode === 'full' ? { galaFormat: GALA_BACKUP_FORMAT } : {}),
           tables: Object.fromEntries(tables.map((t) => [t, data[t]?.length ?? 0])),
           secretsRedacted: true,
         },
@@ -366,6 +1166,16 @@ export function registerAdminBackupRoutes(router) {
       return res.status(400).json({ error: `不支持的备份版本: ${backup._meta?.version}` });
     }
 
+    // 年会数据格式号：本版本只认识 GALA_BACKUP_FORMAT。更新版本导出的备份可能带本版本不知道的年会字段或规则，
+    // 按旧规则补默认值写入会恢复出错误的数据，写库前拒绝。
+    if (isUnsupportedGalaFormat(backup._meta)) {
+      await failHistory('失败', { reason: 'unsupported_gala_format', galaFormat: backup._meta.galaFormat });
+      return res.status(400).json({
+        error: `不支持的年会备份格式: ${backup._meta.galaFormat}`,
+        reason: 'unsupported_gala_format',
+      });
+    }
+
     const backupMode = backup._meta?.mode === 'full' ? 'full' : 'settings';
     const isSettingsRecoveryPoint = backupMode === 'settings'
       && backup._meta?.purpose === 'pre_import_recovery_point';
@@ -374,6 +1184,12 @@ export function registerAdminBackupRoutes(router) {
     }
     if (isSettingsRecoveryPoint && mode !== 'overwrite') {
       return res.status(400).json({ error: '设置自动恢复点仅允许覆盖导入' });
+    }
+    // 全量自动恢复点同样只能覆盖导入：合并不会回滚新增数据，还会跳过全部年会表，无法撤销之前的导入。
+    const isFullRecoveryPoint = backupMode === 'full'
+      && backup._meta?.purpose === 'pre_import_recovery_point';
+    if (isFullRecoveryPoint && mode !== 'overwrite') {
+      return res.status(400).json({ error: '全量自动恢复点仅允许覆盖导入' });
     }
     const backupData = backup.data;
     const v1ExcludedTables = new Set([
@@ -402,6 +1218,8 @@ export function registerAdminBackupRoutes(router) {
     // 例外：拍卖表与外部账号表晚于备份版本号引入，早于该功能的旧全量备份（v1 或对应功能之前的 v2）
     // 都不含这些表，不能因此拒绝旧备份恢复；仍需校验快照内的关联数据完整性。
     const optionalFullTables = new Set(['auction_activities', 'auction_bids', 'external_accounts']);
+    // 年会表同理：早于年会功能的全量备份不含这些表；含其一则下面要求六张齐全。
+    for (const table of GALA_BACKUP_TABLES) optionalFullTables.add(table.name);
     const expectedTables = versionTables.filter((name) => !optionalFullTables.has(name));
     if (mode === 'overwrite') {
       const missingTables = expectedTables.filter((name) => backupData[name] == null);
@@ -412,6 +1230,88 @@ export function registerAdminBackupRoutes(router) {
           missingTables,
           backupMode,
         });
+      }
+    }
+
+    // 年会表晚于拍卖引入：早于年会功能的旧备份可以一张都没有；只要含其中任意一张，就必须六张齐全，
+    // 否则会恢复出有中奖记录却无奖池/活动、或有发放流水却无幂等记录的残缺账目。
+    // 新版全量格式（_meta.galaFormat，或 _meta.tables 里列了年会表）确知包含年会数据：整组缺失同样拒绝，
+    // 不能当成旧备份去覆盖清空在线的中奖记录和付款凭据。
+    // 合并导入不导入年会表（年会数据只随全量覆盖恢复，见下方导入处），年会数据本身不做资金校验；
+    // 但合并靠备份里的中奖记录和流水识别年会付款与收款人（见流水、账户处的检查），当前格式的备份
+    // 这几张表必须完整：行数与导出记录一致（被截短的中奖记录或流水会让付款流水、含奖励的余额漏检）。
+    if (backupMode === 'full' && mode !== 'overwrite' && backup?._meta?.galaFormat != null) {
+      const countErrors = findGalaRowCountErrors(backupData, backup?._meta);
+      if (countErrors.length) {
+        await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
+        return res.status(400).json({
+          error: `年会数据行数与导出记录不一致，已拒绝导入：${countErrors.slice(0, 5).join('；')}`,
+          errors: countErrors,
+          backupMode,
+        });
+      }
+    }
+    if (backupMode === 'full' && mode === 'overwrite') {
+      const present = GALA_BACKUP_TABLES.filter((t) => backupData[t.name] != null).map((t) => t.name);
+      if ((present.length > 0 || requiresGalaTables(backup?._meta)) && present.length < GALA_BACKUP_TABLES.length) {
+        const missingTables = GALA_BACKUP_TABLES.map((t) => t.name).filter((n) => !present.includes(n));
+        await failHistory('失败', { reason: 'incomplete_gala_tables', missingTables, backupMode });
+        return res.status(400).json({ error: `年会数据必须整组导入，缺失: ${missingTables.join(', ')}`, missingTables, backupMode });
+      }
+      // 覆盖导入上线前的旧版全量备份（完全不含六张年会表）时，仍会清空在线库的六张年会表（及其他缺省可选表）：要求显式确认。
+      if (present.length === 0 && req.body?.confirm_clear_gala !== true) {
+        const extraClearedTables = [...GALA_BACKUP_TABLES.map((t) => t.name), 'auction_activities', 'auction_bids', 'external_accounts']
+          .filter((n) => backupData[n] == null);
+        await failHistory('失败', { reason: 'confirm_clear_gala_required', extraClearedTables, backupMode });
+        return res.status(400).json({
+          error: `该旧版全量备份不含年会数据表，覆盖导入仍会清空在线库的额外数据表（${extraClearedTables.join(', ')}）；请确认后传 confirm_clear_gala=true 再导入`,
+          reason: 'confirm_clear_gala_required',
+          extraClearedTables,
+          backupMode,
+        });
+      }
+      // 当前格式的覆盖导入：各表行数必须与导出时记在 _meta.tables 里的一致（见 findGalaRowCountErrors）。
+      // 被截短的数组（例如名单变成 []、中奖记录变成 []）在没有其他引用时校验发现不了：覆盖会恢复出残缺的活动，
+      // 随后的完成状态补齐还会把原本待发的发币轮当成已发完。当前格式只有整库导出，没有按活动的部分备份。
+      {
+        const countErrors = findGalaRowCountErrors(backupData, backup?._meta, {
+          required: [...new Set([...FULL_TABLES, ...GALA_BACKUP_TABLES.map((t) => t.name)])],
+        });
+        if (countErrors.length) {
+          await failHistory('失败', { reason: 'gala_row_count_mismatch', errors: countErrors, backupMode });
+          return res.status(400).json({
+            error: `年会数据行数与导出记录不一致，已拒绝导入：${countErrors.slice(0, 5).join('；')}`,
+            errors: countErrors,
+            backupMode,
+          });
+        }
+      }
+      // 轮次的排除开关：当前格式必须带齐，旧格式按中奖记录推断并写回（见 prepareGalaRoundFlags）。
+      {
+        const flagErrors = prepareGalaRoundFlags(backupData, backup?._meta);
+        if (flagErrors.length) {
+          await failHistory('失败', { reason: 'invalid_gala_round_flags', errors: flagErrors.slice(0, 20), backupMode });
+          return res.status(400).json({
+            error: `年会轮次数据不完整，已拒绝导入：${flagErrors.slice(0, 5).join('；')}`,
+            errors: flagErrors.slice(0, 20),
+            backupMode,
+          });
+        }
+      }
+      // 奖励已全部到账却仍是 drawn 的发币轮补成完成（见 completeFinishedCoinRounds）。
+      completeFinishedCoinRounds(backupData);
+      // 引用与资金关系校验（见 findGalaFundingErrors）：子记录必须引用备份内同一活动的父记录，
+      // 未发放的正数奖励必须挂在类型一致的奖池上，员工奖池不超活动总预算，发放流水与幂等闸门一致。
+      {
+        const galaFundingErrors = findGalaFundingErrors(backupData);
+        if (galaFundingErrors.length) {
+          await failHistory('失败', { reason: 'invalid_gala_funding', errors: galaFundingErrors.slice(0, 20), backupMode });
+          return res.status(400).json({
+            error: `年会数据引用或资金关系不完整，已拒绝导入：${galaFundingErrors.slice(0, 5).join('；')}`,
+            errors: galaFundingErrors.slice(0, 20),
+            backupMode,
+          });
+        }
       }
     }
 
@@ -451,7 +1351,35 @@ export function registerAdminBackupRoutes(router) {
       return backupData[tableName];
     };
 
+    // 把序列推进到表内最大 ID 之后。setval 不随事务回滚：全量恢复在推进之后仍可能被后面的核对拒绝，
+    // 那时在线库的序号已被推到备份里的 ID（可能接近安全整数上限）。全量恢复改用 ALTER SEQUENCE … RESTART，
+    // 它随事务回滚；全量恢复已用 EXCLUSIVE 锁住所有表，序列上的锁不会挡到别人。设置类导入不锁表，保持原样。
     const bumpSerial = async (tx, tableName) => {
+      if (mode !== 'overwrite' && !(Array.isArray(backupData[tableName]) && backupData[tableName].length > 0)) {
+        return;
+      }
+      if (backupMode === 'full') {
+        await tx.exec(
+          // 已用到序列上限（年会表、流水为最大安全整数）的表照常恢复，序列停在“已用尽”：之后新建报序列耗尽，
+          // 不会再分出重复的 ID。RESTART 之后同一事务里的 nextval 随事务回滚，恢复失败时在线序列不变。
+          `DO $$
+           DECLARE
+             seq regclass := pg_get_serial_sequence('${tableName}', 'id')::regclass;
+             mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('${tableName}', 'id')::regclass);
+             -- 先转 numeric 再加一：INTEGER/BIGINT 列的最大 ID 已到类型上限时，直接 +1 会先整数溢出，到不了耗尽分支。
+             target NUMERIC := COALESCE((SELECT MAX(id)::numeric FROM ${tableName}), 1) + 1;
+           BEGIN
+             IF target > mx THEN
+               EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+               PERFORM nextval(seq);
+             ELSE
+               EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
+             END IF;
+           END $$`,
+          [],
+        );
+        return;
+      }
       await tx.exec(
         `SELECT setval(pg_get_serial_sequence('${tableName}', 'id'), COALESCE((SELECT MAX(id) FROM ${tableName}), 1), true)`,
         [],
@@ -724,7 +1652,19 @@ export function registerAdminBackupRoutes(router) {
 
         const ledger = requireArray('ledger') || [];
         ledger.forEach((row, index) => {
-          if (!row?.id || !row?.userid) pushPreflight('ledger', index, '缺少 id/userid');
+          if (!row?.id || !row?.userid) {
+            pushPreflight('ledger', index, '缺少 id/userid');
+          } else if (!isExactLedgerId(row.id)) {
+            // 流水 id 必须原样可写：数字只接受安全整数（更大的 JSON 数字解析时已被舍入，可能撞上别的流水）；
+            // 升级前的库可能已有超过安全整数的 BIGINT 流水 id，导出时是十进制字符串，按原值恢复（见流水导入处的序列处理）。
+            pushPreflight('ledger', index, `id=${row.id} 不是可原样恢复的正整数（数字须在安全整数内，更大的 id 须是十进制字符串且不超过 BIGINT）`);
+          }
+          const galaFlag = parseLedgerGalaPayoutFlag(row?.is_gala_payout);
+          if (galaFlag === 'invalid') {
+            pushPreflight('ledger', index, `is_gala_payout=${row?.is_gala_payout} 只能是 0 或 1`);
+          } else if (galaFlag === 1 && galaPayoutWinnerId(row) == null) {
+            pushPreflight('ledger', index, '标记 is_gala_payout=1 的流水必须是有效的 GALA_W 正数入账');
+          }
         });
 
         const redeems = requireArray('redeems') || [];
@@ -816,17 +1756,14 @@ export function registerAdminBackupRoutes(router) {
       });
     }
 
-    // 覆盖导入前自动生成恢复点，防止中途失败后无回滚文件。
+    // 导入前自动生成恢复点，防止中途失败后无回滚文件。
+    // 全量覆盖（overwrite）的恢复点在导入事务内、锁住所有表之后生成：与覆盖写入处在同一个禁止并发写入的区间，
+    // 快照之后不会再有发币等写入提交而既被覆盖、又不在恢复点里（锁重试也不会拉大这个窗口）。
+    // 设置类导入与全量合并（merge）不清空表：在事务前用 REPEATABLE READ READ ONLY 快照生成恢复点并落盘，
+    // 不在 EXCLUSIVE 表锁内读取、序列化和写盘整库，避免大库或慢磁盘阻塞无关的发币、下单和注册。
     let recoveryPoint = null;
-    try {
-      const tablesToSnapshot = backupMode === 'full'
-        ? FULL_TABLES
-        : SETTINGS_RECOVERY_TABLES;
-      const snapshotData = await dumpTablesConsistently(
-        db,
-        tablesToSnapshot,
-        { keepSecrets: true },
-      );
+    let recoveryHistory = null;
+    const saveRecoveryPoint = (tablesToSnapshot, snapshotData) => {
       const stampDate = new Date();
       const recoveryFilename = buildBackupFilename(backupMode);
       const recoveryPayload = {
@@ -836,6 +1773,7 @@ export function registerAdminBackupRoutes(router) {
           filename: recoveryFilename,
           exportedAt: stampDate.toISOString(),
           purpose: 'pre_import_recovery_point',
+          ...(backupMode === 'full' ? { galaFormat: GALA_BACKUP_FORMAT } : {}),
           importMode: mode,
           sourceFilename: requestedFilename || null,
           secretsRedacted: false,
@@ -850,7 +1788,7 @@ export function registerAdminBackupRoutes(router) {
         mode: backupMode,
         tables: recoveryPayload._meta.tables,
       };
-      await appendBackupHistory(db, req, {
+      recoveryHistory = {
         action: '导出',
         mode: backupMode,
         filename: recoveryFilename,
@@ -863,8 +1801,15 @@ export function registerAdminBackupRoutes(router) {
           secretsRedacted: false,
           sensitive: true,
         },
-      });
-    } catch (err) {
+      };
+    };
+    const flushRecoveryHistory = async () => {
+      if (!recoveryHistory) return;
+      const entry = recoveryHistory;
+      recoveryHistory = null;
+      await appendBackupHistory(db, req, entry);
+    };
+    const recoveryPointFailed = async (err) => {
       await failHistory('失败', {
         reason: 'recovery_point_failed',
         message: String(err?.message || err),
@@ -874,13 +1819,87 @@ export function registerAdminBackupRoutes(router) {
       return res.status(500).json({
         error: `导入前自动快照失败，已中止导入: ${String(err?.message || err)}`,
       });
+    };
+    if (backupMode !== 'full') {
+      try {
+        const snapshotData = await dumpTablesConsistently(db, SETTINGS_RECOVERY_TABLES, { keepSecrets: true });
+        saveRecoveryPoint(SETTINGS_RECOVERY_TABLES, snapshotData);
+        await flushRecoveryHistory();
+      } catch (err) {
+        return await recoveryPointFailed(err);
+      }
+    } else if (mode !== 'overwrite') {
+      try {
+        const mergeSnapshot = await dumpTablesConsistently(db, FULL_TABLES, { keepSecrets: true });
+        saveRecoveryPoint(FULL_TABLES, mergeSnapshot);
+        await flushRecoveryHistory();
+      } catch (err) {
+        return await recoveryPointFailed(err);
+      }
     }
 
     const importedRoleIdMap = new Map();
 
     try {
-      const report = await runInTransaction(db, async (tx) => {
-        await lockAdminAccountProtection(tx);
+      const report = await runWithRestoreLockRetry(db, async (tx) => {
+        // 全量恢复的每一把前置锁（账号保护锁、年会写入锁、表锁）都设等待上限，超时整体回滚后重试：
+        // 例如抽签持有年会共享锁、正等在活动行上时，恢复不会无限等待，也就不会一直占着账号保护锁，
+        // 让外部账号注册等无关操作跟着卡住。
+        const busy = async (step) => {
+          try {
+            return await step();
+          } catch (err) {
+            if (err?.code === '55P03') throw Object.assign(new Error('restore_tables_busy'), { restoreLockBusy: true, cause: err });
+            throw err;
+          }
+        };
+        if (backupMode === 'full') await tx.exec("SET LOCAL lock_timeout = '500ms'");
+        await busy(() => lockAdminAccountProtection(tx));
+        if (backupMode === 'full' && mode === 'overwrite') {
+          await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]));
+          await busy(() => bumpGalaRestoreGeneration(tx));
+          await busy(() => tx.exec(`LOCK TABLE ${FULL_TABLES.join(', ')} IN EXCLUSIVE MODE`));
+          await tx.exec('SET LOCAL lock_timeout = DEFAULT');
+          // 表已全部锁住：此刻的数据就是覆盖前最后的已提交状态，在这里生成恢复点。
+          let snapshotData;
+          try {
+            snapshotData = {};
+            for (const tableName of FULL_TABLES) {
+              // eslint-disable-next-line no-await-in-loop
+              snapshotData[tableName] = redactBackupSecrets(tableName, await dumpTable(tx, tableName), { keepSecrets: true });
+            }
+          } catch (err) {
+            throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
+          }
+          // 覆盖会清空在线数据，之后唯一的退路就是这个恢复点：它必须能通过同样的年会校验重新导入。
+          const recoveryErrors = findRecoveryPointGalaErrors(snapshotData);
+          if (recoveryErrors.length) {
+            throw Object.assign(new Error('recovery_point_not_importable'), { recoveryPointInvalid: true, errors: recoveryErrors });
+          }
+          try {
+            saveRecoveryPoint(FULL_TABLES, snapshotData);
+          } catch (err) {
+            throw Object.assign(new Error(String(err?.message || err)), { recoveryPointFailed: true, cause: err });
+          }
+        } else if (backupMode === 'full') {
+          // 合并模式跳过六张年会表，只对本次实际写入的非年会表加锁；
+          // 涉及账户或流水写入时需读取中奖记录核对收款人与付款凭据，先拿年会写入锁与重置锁。
+          const galaTableSet = new Set(GALA_BACKUP_TABLES.map((t) => t.name));
+          const hasAccountRows = Array.isArray(backupData.accounts) && backupData.accounts.length > 0;
+          const hasLedgerRows = Array.isArray(backupData.ledger) && backupData.ledger.length > 0;
+          if (hasAccountRows || hasLedgerRows) {
+            await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]));
+            await busy(() => tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]));
+          }
+          const mergeTables = FULL_TABLES.filter((t) => !galaTableSet.has(t)
+            && ((Array.isArray(backupData[t]) && backupData[t].length > 0)
+              || (t === 'content_announcement_revisions' && backupVersion === 1
+                && Array.isArray(backupData.content_announcements) && backupData.content_announcements.length > 0)));
+          if (mergeTables.length > 0) {
+            await busy(() => tx.exec(`LOCK TABLE ${mergeTables.join(', ')} IN EXCLUSIVE MODE`));
+          }
+          await tx.exec('SET LOCAL lock_timeout = DEFAULT');
+        }
         const report = {};
         let failedTable = null;
         let failedIndex = null;
@@ -1362,6 +2381,7 @@ export function registerAdminBackupRoutes(router) {
             const rows = Array.isArray(backupData.users) ? backupData.users : null;
             if (rows && mode === 'overwrite') {
               const deleteOrder = [
+                ...[...GALA_BACKUP_TABLES].reverse().map((t) => t.name),
                 'admin_user_roles',
                 'auction_bids',
                 'auction_activities',
@@ -1540,6 +2560,59 @@ export function registerAdminBackupRoutes(router) {
           // accounts
           {
             const rows = requireArray('accounts') || [];
+            // 合并按备份覆盖账户余额，而年会表不随合并导入，目标库的中奖记录无法和备份余额核对：
+            // - 已到账的奖励：备份余额可能不含它，覆盖后中奖记录和流水仍显示已付、余额却少了这笔，awarded_at 又挡住补发；
+            // - 待发的奖励：备份可能来自发币之后，余额已含这笔奖励，目标库却仍是待发，之后再发一次就加了两遍。
+            // 无法确认余额来源，凡是目标库有年会奖励（已到账或待发）的账户，只放行不改变当前余额的合并。
+            // 此时备份里的年会数据不会写入，查到的都是目标库原有的记录；表已在事务开头锁住。
+            if (mode !== 'overwrite' && rows.length) {
+              const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
+              // 重置前的余额快照会把已删的奖励加回来，发币后的余额快照会让待发奖励再付一次，更早的快照会少掉已到账的奖励；
+              // 全量覆盖清空六张年会表后仍保留的真实发奖流水（is_gala_payout = 1）同理：中奖记录已不在，但目标库流水仍显示奖励已付。
+              // 只要余额会变就无法核对，拒绝。
+              const paidRows = uids.length ? await tx.all(
+                `SELECT t.userid, a.balance
+                   FROM (
+                     SELECT userid FROM gala_round_winners
+                      WHERE amount > 0 AND award_cancelled_at IS NULL AND userid = ANY(?::text[])
+                     UNION
+                     SELECT userid FROM ledger
+                      WHERE is_gala_payout = 1 AND userid = ANY(?::text[])
+                   ) t
+                   LEFT JOIN accounts a ON a.userid = t.userid
+                  ORDER BY t.userid`,
+                [uids, uids],
+              ) : [];
+              const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
+              // 来源备份里的年会收款人同样保护：他们的备份余额可能含一笔年会奖励，而年会表不随合并导入，
+              // 目标库不会有对应的中奖记录（付款流水另有检查，只放行目标库已有完全相同的一行）。
+              // 来源收款人按备份里的正数中奖记录、以及真实年会付款流水（is_gala_payout=1 或旧格式同名流水）识别。
+              const sourcePayees = new Set([
+                ...(requireArray('gala_round_winners') || []).filter((w) => Number(w?.amount) > 0 && w?.award_cancelled_at == null && w?.userid != null).map((w) => String(w.userid)),
+                ...(requireArray('ledger') || []).filter((r) => {
+                  if (r?.userid == null) return false;
+                  const f = parseLedgerGalaPayoutFlag(r?.is_gala_payout);
+                  return f === 1 || (f === null && galaPayoutWinnerId(r) != null);
+                }).map((r) => String(r.userid)),
+              ]);
+              const guarded = new Map(paidRows.map((p) => [String(p.userid), p.balance]));
+              const sourceOnly = uids.filter((u) => sourcePayees.has(u) && !guarded.has(u));
+              if (sourceOnly.length) {
+                const cur = new Map((await tx.all('SELECT userid, balance FROM accounts WHERE userid = ANY(?::text[])', [sourceOnly]))
+                  .map((a) => [String(a.userid), a.balance]));
+                for (const u of sourceOnly) guarded.set(u, cur.get(u) ?? null);
+              }
+              // 按原值精确比较（余额是整数，数据库可能以字符串返回 BIGINT）：余额相同就不改变任何东西，照常合并，
+              // 例如把刚导出的全量备份原样合并回原库。
+              const sameBalance = (a, b) => String(a ?? 0) === String(b ?? 0);
+              const blocked = [...guarded]
+                .filter(([u, balance]) => !sameBalance(incoming.get(u)?.balance, balance))
+                .map(([userid]) => ({ userid }))
+                .slice(0, 20);
+              if (blocked.length) {
+                throw new Error(`合并导入会改变有年会奖励（目标库已到账或待发、或来源备份里的奖励）的账户余额（${blocked.map((r) => r.userid).join(', ')}），无法确认备份余额与这些奖励一致，已拒绝导入`);
+              }
+            }
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
@@ -1650,16 +2723,74 @@ export function registerAdminBackupRoutes(router) {
           // ledger
           {
             const rows = requireArray('ledger') || [];
+            // 合并不能把目标库已有中奖记录的付款凭据重新挂回流水：用户重置删了流水、清零了余额但保留 ledger_id，
+            // 备份若带回那条原流水（而余额不随之恢复），会出现流水显示入账、余额却没有的账目。
+            // 此时备份里的年会数据还没写入，查到的都是目标库原有的中奖记录；凭据当前指向不存在的流水才算重新挂回。
+            if (mode !== 'overwrite' && rows.length) {
+              const ids = [...new Set(rows.filter((r) => isExactLedgerId(r?.id)).map((r) => String(r.id)))];
+              const relinked = ids.length ? await tx.all(
+                `SELECT w.id, w.ledger_id FROM gala_round_winners w
+                  WHERE w.ledger_id = ANY(?::bigint[])
+                    AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.id = w.ledger_id)
+                  ORDER BY w.id LIMIT 20`,
+                [ids],
+              ) : [];
+              if (relinked.length) {
+                throw new Error(`合并导入会把已重置用户的年会付款流水重新挂回中奖记录（${relinked.map((r) => `#${r.id}→ledger#${r.ledger_id}`).join(', ')}），余额无法随之核对，已拒绝导入`);
+              }
+              // 年会付款流水不能单独合并：年会表不随合并导入，这些流水在目标库会失去与中奖记录的关联。
+              // 识别按来源标记 is_gala_payout=1、旧格式下的命名约定（GALA_W<id>、年会奖励·、入账），以及备份中奖记录 ledger_id 引用到的流水。
+              // 目标库已有完全相同的一行（同 ID、收款人、金额、引用号、原因，且已是年会付款流水）才放行。
+              const linkedIds = new Set((requireArray('gala_round_winners') || [])
+                .filter((w) => isExactLedgerId(w?.ledger_id))
+                .map((w) => String(w.ledger_id)));
+              const payoutRows = rows.filter((r) => {
+                const f = parseLedgerGalaPayoutFlag(r?.is_gala_payout);
+                return f === 1
+                  || (f === null && galaPayoutWinnerId(r) != null)
+                  || (isExactLedgerId(r?.id) && linkedIds.has(String(r.id)));
+              });
+              if (payoutRows.length) {
+                const payoutIds = [...new Set(payoutRows.filter((r) => isExactLedgerId(r?.id)).map((r) => String(r.id)))];
+                const targetRows = new Map((payoutIds.length ? await tx.all(
+                  'SELECT id, userid, delta, ref_id, reason, is_gala_payout FROM ledger WHERE id = ANY(?::bigint[])',
+                  [payoutIds],
+                ) : []).map((r) => [String(r.id), r]));
+                const same = (a, b) => String(a ?? '') === String(b ?? '');
+                const unmatched = payoutRows.filter((r) => {
+                  const t = isExactLedgerId(r?.id) ? targetRows.get(String(r.id)) : null;
+                  return !t
+                    || Number(t.is_gala_payout) !== 1
+                    || !same(t.userid, r.userid)
+                    || !same(t.delta, r.delta)
+                    || !same(t.ref_id, r.ref_id)
+                    || !same(t.reason, r.reason ?? '');
+                }).slice(0, 20);
+                if (unmatched.length) {
+                  throw new Error(`合并导入不导入年会表，备份里的年会付款流水（ledger#${unmatched.map((r) => r?.id).join(', ledger#')}）在目标库没有完全相同的记录，导入后会失去与中奖记录的关联、对非超管公开，已拒绝导入；年会数据请用覆盖导入恢复`);
+                }
+              }
+            }
+            const importedWinnerLedgerIds = new Set(
+              (mode === 'overwrite' ? (requireArray('gala_round_winners') || []) : [])
+                .filter((w) => isExactLedgerId(w?.ledger_id))
+                .map((w) => String(w.ledger_id)),
+            );
             let count = 0;
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
               if (!row?.userid || !row?.id) continue;
+              const parsedFlag = parseLedgerGalaPayoutFlag(row.is_gala_payout);
+              const isGalaPayout = parsedFlag === 1
+                || (parsedFlag === null && importedWinnerLedgerIds.has(String(row.id)))
+                ? 1
+                : 0;
               try {
                 // eslint-disable-next-line no-await-in-loop
                 await execOrThrow(
                   tx,
-                  'INSERT INTO ledger(id, userid, delta, reason, ref_id, created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
-                  [row.id, row.userid, row.delta, row.reason ?? '', row.ref_id ?? null, row.created_at ?? nowTs()],
+                  'INSERT INTO ledger(id, userid, delta, reason, ref_id, is_gala_payout, created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',
+                  [row.id, row.userid, row.delta, row.reason ?? '', row.ref_id ?? null, isGalaPayout, row.created_at ?? nowTs()],
                   `ledger[${i}]`,
                 );
                 count++;
@@ -1668,6 +2799,9 @@ export function registerAdminBackupRoutes(router) {
               }
             }
             try {
+              if (mode === 'overwrite' || rows.length > 0) {
+                await tx.exec(`DO $$ BEGIN IF (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass) < 9223372036854775807 THEN EXECUTE format('ALTER SEQUENCE %s NO MAXVALUE', pg_get_serial_sequence('ledger', 'id')); END IF; END $$`, []);
+              }
               await bumpSerial(tx, 'ledger');
             } catch (err) {
               markAndThrow('ledger', null, err);
@@ -2222,6 +3356,114 @@ export function registerAdminBackupRoutes(router) {
             }
             report.auction_bids = count;
           }
+
+          // 年会（父表在前）。只随全量覆盖恢复：合并导入不导入年会表，目标库的年会数据保持原样。
+          // 中奖记录的 awarded_at 是发币幂等闸门、ledger_id 是付款凭据，跨库合并无法确认它们和目标库的流水、余额对得上。
+          {
+            const hasGala = GALA_BACKUP_TABLES.some((t) => requireArray(t.name) !== null);
+            if (hasGala && mode !== 'overwrite') report.gala_skipped = GALA_BACKUP_TABLES.map((t) => t.name);
+            if (hasGala && mode === 'overwrite') {
+              for (const table of [...GALA_BACKUP_TABLES].reverse()) {
+                // eslint-disable-next-line no-await-in-loop
+                await execOrThrow(tx, `DELETE FROM ${table.name}`, [], `${table.name} overwrite delete`);
+              }
+            }
+            for (const table of (mode === 'overwrite' ? GALA_BACKUP_TABLES : [])) {
+              const rows = requireArray(table.name) || [];
+              let count = 0;
+              const placeholders = table.columns.map((_, i) => `$${i + 1}`).join(',');
+              for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (!(Number(row?.id) > 0)) {
+                  // 缺主键的行不能静默跳过：覆盖导入已清表，跳过就等于悄悄丢掉一条奖励或名单。
+                  markAndThrow(table.name, i, new Error('缺少有效主键 id'));
+                }
+                try {
+                  // eslint-disable-next-line no-await-in-loop
+                  await execOrThrow(
+                    tx,
+                    // 不吞冲突：预检之后并发写入的同 ID 记录、或备份内部的重复 ID 都必须让整个导入回滚，
+                    // 否则子表会挂到目标库中不相关的活动/奖池/轮次上。
+                    `INSERT INTO ${table.name}(${table.columns.join(', ')}) VALUES(${placeholders})`,
+                    table.columns.map((col) => (row[col] === undefined ? (table.defaults?.[col] ?? null) : row[col])),
+                    `${table.name}[${i}]`,
+                  );
+                  count++;
+                } catch (err) {
+                  markAndThrow(table.name, i, err);
+                }
+              }
+              // 覆盖已清空年会表：即使这张表备份里没有行，也要把序列重置回起点，否则旧库里接近上限的序列
+              // 会让恢复后的第一次新建（例如抽签写中奖记录）因序列耗尽失败。
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await bumpSerial(tx, table.name);
+                // eslint-disable-next-line no-await-in-loop
+                if (table.name === 'gala_round_winners') await tx.exec(WINNER_SEQ_PAST_GALA_PAYOUT_REFS_SQL, []);
+              } catch (err) {
+                markAndThrow(table.name, null, err);
+              }
+              report[table.name] = count;
+            }
+            if (mode === 'overwrite' || (Array.isArray(backupData.ledger) && backupData.ledger.length > 0)) {
+              // 中奖记录保留的 ledger_id（用户重置后流水已删、引用仍在）不能在目标库里指向别人的流水或普通流水。
+              const mismatched = await tx.all(
+                `SELECT w.id, w.ledger_id FROM gala_round_winners w JOIN ledger l ON l.id = w.ledger_id
+                  WHERE l.ref_id IS DISTINCT FROM ('GALA_W' || w.id::text)
+                     OR l.userid IS DISTINCT FROM w.userid
+                     OR l.delta IS DISTINCT FROM w.amount
+                     OR l.is_gala_payout <> 1
+                     OR NOT starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                  ORDER BY w.id LIMIT 20`,
+                [],
+              );
+              if (mismatched.length) {
+                throw new Error(`年会中奖记录的 ledger_id 指向了不属于它的流水（${mismatched.map((r) => `#${r.id}→${r.ledger_id}`).join(', ')}），已拒绝导入`);
+              }
+              // 整库再核对一次“待发中奖记录已有真实年会发放流水”：历史普通流水（is_gala_payout = 0）或已取消奖励不在此列。
+              const paidPending = await tx.all(
+                `SELECT w.id, l.id AS ledger_row FROM gala_round_winners w
+                   JOIN ledger l ON l.ref_id = ('GALA_W' || w.id::text)
+                  WHERE w.awarded_at IS NULL AND w.award_cancelled_at IS NULL
+                    AND l.is_gala_payout = 1
+                    AND l.delta > 0
+                    AND starts_with(COALESCE(l.reason, ''), '${GALA_PAYOUT_REASON_PREFIX}')
+                    AND l.userid = w.userid AND l.delta = w.amount
+                  ORDER BY w.id LIMIT 20`,
+                [],
+              );
+              if (paidPending.length) {
+                throw new Error(`年会中奖记录尚未发放，库里却已有它的发放流水（${paidPending.map((r) => `#${r.id}←ledger#${r.ledger_row}`).join(', ')}），已拒绝导入`);
+              }
+              // 用户重置删掉的流水 id 仍被中奖记录引用：把流水序列推进到这些 id 之后（只升不降），
+              // 免得之后新发的流水恰好复用这个 id，变成“指向别人流水”的引用。
+              const keptLedger = await tx.get('SELECT MAX(ledger_id)::text AS m FROM gala_round_winners', []);
+              if (keptLedger?.m) await execOrThrow(
+                tx,
+                `DO $$
+                 DECLARE
+                   seq regclass := pg_get_serial_sequence('ledger', 'id')::regclass;
+                   mx BIGINT := (SELECT seqmax FROM pg_sequence WHERE seqrelid = pg_get_serial_sequence('ledger', 'id')::regclass);
+                   target NUMERIC;
+                 BEGIN
+                   SELECT GREATEST(
+                            COALESCE(pg_sequence_last_value(seq)::numeric, 0),
+                            COALESCE((SELECT MAX(id)::numeric FROM ledger), 0),
+                            COALESCE((SELECT MAX(ledger_id)::numeric FROM gala_round_winners), 0)
+                          ) + 1
+                     INTO target;
+                   IF target > mx THEN
+                     EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, mx);
+                     PERFORM nextval(seq);
+                     RETURN;
+                   END IF;
+                   EXECUTE format('ALTER SEQUENCE %s RESTART WITH %s', seq, target);
+                 END $$`,
+                [],
+                'ledger sequence bump',
+              );
+            }
+          }
         }
 
         // 防御：事务内若有未统计表也算成功报告
@@ -2234,17 +3476,26 @@ export function registerAdminBackupRoutes(router) {
       delete report._failedTable;
       delete report._failedIndex;
 
-      await appendBackupHistory(db, req, {
-        action: '导入',
-        mode,
-        filename: requestedFilename,
-        status: '完成',
-        details: {
-          backupMode,
-          report,
-          recoveryPoint,
-        },
-      });
+      // 走到这里导入事务已经提交，数据库已恢复。之后的登记只是记录：失败也不能报告“导入失败”，
+      // 否则调用方可能再执行一次覆盖导入。登记失败单独告警，并照常返回成功结果和恢复点文件名。
+      let historyWarning = null;
+      try {
+        await flushRecoveryHistory();
+        await appendBackupHistory(db, req, {
+          action: '导入',
+          mode,
+          filename: requestedFilename,
+          status: '完成',
+          details: {
+            backupMode,
+            report,
+            recoveryPoint,
+          },
+        });
+      } catch (histErr) {
+        historyWarning = `导入已完成，但写入备份历史失败：${String(histErr?.message || histErr)}`;
+        console.error('[backup] import committed but history append failed', histErr);
+      }
       publishMallRealtimeFullRefresh('backup_import');
       return res.json({
         ok: true,
@@ -2252,8 +3503,21 @@ export function registerAdminBackupRoutes(router) {
         backupMode,
         report,
         recoveryPoint,
+        ...(historyWarning ? { historyWarning } : {}),
       });
     } catch (err) {
+      if (err?.recoveryPointFailed) return await recoveryPointFailed(err.cause || err);
+      if (err?.recoveryPointInvalid) {
+        const errors = err.errors.slice(0, 20);
+        await failHistory('失败', { reason: 'recovery_point_not_importable', errors, backupMode, mode });
+        return res.status(409).json({
+          error: `在线库的年会数据有异常，覆盖前生成的恢复点无法重新导入，已中止覆盖（在线数据未改动）：${errors.slice(0, 5).join('；')}`,
+          errors,
+          backupMode,
+        });
+      }
+      // 恢复点已在事务内写好（之后的导入步骤失败）：照常登记，便于下载还原；登记失败不掩盖原始错误。
+      await flushRecoveryHistory().catch((histErr) => console.error('[backup] recovery point history append failed', histErr));
       const message = String(err?.message || err);
       // 从错误消息解析失败表/行
       let failedTable = null;

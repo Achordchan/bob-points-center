@@ -1,6 +1,8 @@
 import { Pool } from 'pg';
 import { ensureAdminRoles } from '../services/adminPermissionService.js';
 import { computeAnnouncementContentHash } from '../services/announcementAccessService.js';
+import { galaSchemaSql } from './galaSchema.js';
+import { GALA_PAYOUT_LOCK, GALA_RESET_LOCK } from '../services/galaService.js';
 
 const nowExpr = 'EXTRACT(EPOCH FROM NOW())::bigint';
 const schemaSql = `
@@ -28,7 +30,9 @@ CREATE TABLE IF NOT EXISTS ledger (
   delta BIGINT NOT NULL,
   reason TEXT NOT NULL,
   ref_id TEXT,
+  is_gala_payout SMALLINT NOT NULL DEFAULT 0,
   created_at BIGINT NOT NULL DEFAULT (${nowExpr}),
+  CONSTRAINT chk_ledger_gala_payout CHECK (is_gala_payout IN (0, 1)),
   FOREIGN KEY (userid) REFERENCES users(userid) ON DELETE CASCADE
 );
 
@@ -761,6 +765,27 @@ export async function initDb(input) {
   const db = new PgDb(pool);
   await db.get('SELECT 1');
   await db.exec(schemaSql);
+  // 年会表的创建与旧库升级放在同一个事务里、先拿迁移锁：多个实例首次上线同时建表时，
+  // CREATE … IF NOT EXISTS 在并发下仍可能撞上系统表唯一约束，串行后后到的实例只会看到已存在。
+  await db.transaction(async (tx) => {
+    await tx.get("SELECT pg_advisory_xact_lock(hashtext('bob.gala.migration')) AS locked");
+    // 滚动发布时旧实例仍在抽签、发币：迁移要碰多张年会表（建索引、补列、回填），加表锁的顺序与在线写入不同，
+    // 交错时会死锁。先拿在线写入的两把全局锁的排他锁（顺序与抽签相同：先恢复互斥、再重置互斥），
+    // 等进行中的年会写入和用户重置提交后再动表，迁移期间新的写入排队。
+    await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_PAYOUT_LOCK]);
+    await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
+    await tx.exec(galaSchemaSql);
+    // 早期建出的 gala_round_winners 没有 is_reserved 取值约束，补上（幂等）。
+    await tx.exec(`DO $$ BEGIN
+      -- 同上，与补列串行；按 conrelid 限定目标表，别的 schema 里的同名约束不算数。
+      PERFORM pg_advisory_xact_lock(hashtext('bob.gala.migration'));
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                      WHERE conname = 'chk_gala_round_winners_reserved'
+                        AND conrelid = 'gala_round_winners'::regclass) THEN
+        ALTER TABLE gala_round_winners ADD CONSTRAINT chk_gala_round_winners_reserved CHECK (is_reserved IN (0, 1));
+      END IF;
+    END $$`);
+  });
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'dingtalk'");
   await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
   // 手机号唯一：外部账号一人一号；钉钉侧不上报手机号，历史数据保持 NULL。

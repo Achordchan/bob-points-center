@@ -3,6 +3,7 @@
  * 已有 FK CASCADE 的表仍显式删除，便于返回计数与兼容历史数据。
  */
 import { purgeUserAuctionBids } from './auctionService.js';
+import { GALA_RESET_LOCK } from './galaService.js';
 
 function asList(userids) {
   return (Array.isArray(userids) ? userids : [userids])
@@ -47,6 +48,31 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
        FOR UPDATE`,
     [...targets, ...targets, ...targets],
   );
+  // 与年会抽签串行（抽签是唯一写入中奖记录的地方）：抽签在锁活动行之前拿 GALA_RESET_LOCK 的共享锁，
+  // 这里拿排他锁。抽签先拿到，清理等它提交后再删除新写入的未发放中奖记录；清理先拿到，抽签等清理提交后
+  // 才读参与者，此时目标用户已不在名单里。用全局锁而不是锁活动行：清理开始后才创建的活动也被覆盖。
+  await tx.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [GALA_RESET_LOCK]);
+  // 年会发币的加锁顺序是「轮次 → 中奖记录 → 奖池 → 账户」，这里同样先锁涉及的轮次（排他：等进行中的到账、
+  // 失败回写、收尾都提交，之后它们排在清理后面），再锁未发放的正数中奖记录、再锁账户：
+  // 并发发币要么在清理前完成（随后流水被删、余额清零），要么等清理提交后发现待发奖励已取消而跳过，
+  // 不会给已重置的账户补发旧奖励。抽签已被上面的排他锁挡住，期间不会出现新的待发记录。
+  await tx.all(
+    `SELECT id FROM gala_rounds
+      WHERE id IN (
+        SELECT round_id FROM gala_round_winners
+         WHERE userid IN (${placeholders}) AND awarded_at IS NULL AND award_cancelled_at IS NULL AND amount > 0
+      )
+      ORDER BY id
+      FOR UPDATE`,
+    targets,
+  );
+  await tx.all(
+    `SELECT id FROM gala_round_winners
+      WHERE userid IN (${placeholders}) AND awarded_at IS NULL AND award_cancelled_at IS NULL AND amount > 0
+      ORDER BY id
+      FOR UPDATE`,
+    targets,
+  );
   await tx.all(
     `SELECT userid FROM accounts WHERE userid IN (${placeholders}) ORDER BY userid FOR UPDATE`,
     targets,
@@ -81,6 +107,44 @@ export async function purgeUserBusinessData(tx, userids, { protectUserids = [] }
   counts.user_dingtalk_profiles = await del(
     tx,
     `DELETE FROM user_dingtalk_profiles WHERE userid IN (${placeholders})`,
+    targets,
+  );
+  // 保留历史抽签结果（无币轮不占金额，原样保留；否则已领实物奖的用户重置后再入名单会在同环节重复中奖，
+  // 重放旧轮次也会少一位中奖人）。待发的正数奖励仅标记为已取消，不再给重置后的账户补发。
+  const cancelledWinners = await tx.all(
+    `UPDATE gala_round_winners
+        SET award_cancelled_at = unixepoch(), award_error = NULL
+      WHERE userid IN (${placeholders})
+        AND awarded_at IS NULL
+        AND award_cancelled_at IS NULL
+        AND amount > 0
+      RETURNING round_id, amount`,
+    targets,
+  );
+  counts.gala_round_winners_unawarded = cancelledWinners.length;
+  // 取消的可能正是某轮最后一笔待发奖励：与发放收尾同一口径（没有待发的正数奖励即整轮完成），在同一事务里补标完成。
+  // 这些轮次在开头已被这里排他锁住，进行中的到账都已提交、新的到账在等这里，所以下面这条语句的快照
+  // 就是最终的待发状态；之后的发放收尾等这里提交后再数，状态已是 granted，条件更新不再生效。
+  const touchedRounds = [...new Set(cancelledWinners.filter((w) => Number(w.amount) > 0).map((w) => Number(w.round_id)))]
+    .sort((a, b) => a - b);
+  counts.gala_rounds_completed = 0;
+  if (touchedRounds.length > 0) {
+    counts.gala_rounds_completed = await del(
+      tx,
+      `UPDATE gala_rounds r SET status = 'granted', granted_at = unixepoch()
+        WHERE r.id = ANY(?::bigint[]) AND r.status = 'drawn'
+          AND NOT EXISTS (
+            SELECT 1 FROM gala_round_winners w
+             WHERE w.round_id = r.id AND w.awarded_at IS NULL AND w.award_cancelled_at IS NULL AND w.amount > 0
+          )`,
+      [touchedRounds],
+    );
+  }
+  counts.gala_participants = await del(tx, `DELETE FROM gala_participants WHERE userid IN (${placeholders})`, targets);
+  counts.gala_reserved_slots_cancelled = await del(
+    tx,
+    `UPDATE gala_reserved_slots SET status = 'cancelled', updated_at = unixepoch()
+      WHERE userid IN (${placeholders}) AND status = 'pending'`,
     targets,
   );
   // 拍卖在押出价：置为失效并回退竞拍最高价指针（不退款入账，余额随后清零）。

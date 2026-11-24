@@ -1,4 +1,4 @@
-import { deductBob, grantBob } from './ledgerService.js';
+import { GALA_PAYOUT_REF_PREFIX, deductBob, grantBob } from './ledgerService.js';
 import { confirmRedeem } from './redeemService.js';
 import { getUserName, sendOrQueueNotify } from './notifyOpsService.js';
 import { getUserDetail } from './dingtalkService.js';
@@ -21,7 +21,18 @@ export async function getTrustedAccountOptions(db, cfg, userid) {
   return { userid: uid, name, createUser };
 }
 
+// 年会发放的引用号格式是 GALA_W<正整数>（与 galaPayoutWinnerId 的识别规则一致）。外部发币（单发、批量、后台批量）
+// 只拒绝恰好是这个格式的引用号；GALA_WEEKLY_2026 这类既有批次号不可能被识别为年会流水，照常放行。
+export const RESERVED_REF_ID_ERROR = 'reserved refId prefix';
+const GALA_PAYOUT_REF_RE = new RegExp(`^${GALA_PAYOUT_REF_PREFIX}[1-9][0-9]*$`);
+export function assertExternalRefIdAllowed(refId) {
+  if (refId != null && GALA_PAYOUT_REF_RE.test(String(refId))) {
+    throw new Error(RESERVED_REF_ID_ERROR);
+  }
+}
+
 async function trustedGrant(db, cfg, { userid, amount, reason, refId }) {
+  assertExternalRefIdAllowed(refId);
   if (!Number.isInteger(Number(amount)) || Number(amount) <= 0) throw new Error('amount must be positive integer');
   const account = await getTrustedAccountOptions(db, cfg, userid);
   return await grantBob(db, { ...account, amount, reason, refId });
@@ -53,6 +64,7 @@ export async function grantWithNotify(db, cfg, { userid, amount, reason, refId, 
 }
 
 export async function grantBatchWithNotify(db, cfg, { userids, amount, reason, refId, awaitNotify } = {}) {
+  assertExternalRefIdAllowed(refId);
   const ids = Array.isArray(userids) ? userids : [];
   const results = [];
   for (const userid of ids) {

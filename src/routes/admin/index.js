@@ -44,7 +44,9 @@ import {
   saveCharityProject,
 } from '../../services/charityService.js';
 import { normalizeMallProductInput } from '../../services/mallService.js';
-import { adminDeductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify } from '../../services/bobOpsService.js';
+import {
+  RESERVED_REF_ID_ERROR, adminDeductBatchWithNotify, grantBatchWithNotify, redeemConfirmWithNotify,
+} from '../../services/bobOpsService.js';
 import { toBool } from '../../services/notifyOpsService.js';
 import { sendRobotPrivateText } from '../../services/robotNotifyService.js';
 import {
@@ -108,6 +110,7 @@ import { registerAdminContentRoutes } from './contentRoutes.js';
 import { registerAdminSettingsRoutes } from './settingsRoutes.js';
 import { registerAdminBackupRoutes } from './backupRoutes.js';
 import { registerAdminAuctionRoutes } from './auctionRoutes.js';
+import { registerAdminGalaRoutes } from './galaRoutes.js';
 
 import {
   ADMIN_OAUTH_COOKIE,
@@ -1166,7 +1169,11 @@ export function adminRouter() {
           [userid],
         )
         : null;
-      const ledgerResult = await listLedgerRecords(db, { userid, page: 1, pageSize: 120 });
+      // 年会发放流水（GALA_W）只给超级管理员看：若只藏预留那一笔，公开中奖名单里“唯独没有发放流水”的人就是预留对象，
+      // 所以普通管理员一律看不到任何人的年会发放流水（余额照常，含这些奖励）。
+      const ledgerResult = await listLedgerRecords(db, {
+        userid, page: 1, pageSize: 120, hideGalaAwards: req.adminAccess?.isSuperAdmin !== true,
+      });
       const ledger = ledgerResult.data || [];
       const redeems = await db.all(
         `SELECT r.exchange_id, r.userid, r.product_id, r.product_name, r.bob_amount, r.fulfilled_at, r.created_at,
@@ -2004,7 +2011,8 @@ export function adminRouter() {
       }
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(message === RESERVED_REF_ID_ERROR ? 400 : 500).json({ error: message });
     }
   });
 
@@ -2101,6 +2109,7 @@ export function adminRouter() {
   // ── 备份管理 ──────────────────────────────────────────────────────────────
   registerAdminBackupRoutes(router);
   registerAdminAuctionRoutes(router);
+  registerAdminGalaRoutes(router);
 
   return router;
 }

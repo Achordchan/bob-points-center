@@ -53,10 +53,15 @@ test('自动恢复点使用一致性快照并保持公告恢复顺序', () => {
     backupRoutesSource,
     /SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/,
   );
+  // 设置类导入：事务前用一致性快照生成恢复点
   assert.match(
     backupRoutesSource,
-    /const snapshotData = await dumpTablesConsistently\([\s\S]*?tablesToSnapshot[\s\S]*?keepSecrets: true/,
+    /const snapshotData = await dumpTablesConsistently\(db, SETTINGS_RECOVERY_TABLES, \{ keepSecrets: true \}\)/,
   );
+  // 全量恢复：在导入事务内、锁住全部表之后生成恢复点，与覆盖写入处在同一个禁止并发写入的区间
+  const lockAt = backupRoutesSource.indexOf('LOCK TABLE ${FULL_TABLES.join');
+  const fullSnapAt = backupRoutesSource.indexOf('saveRecoveryPoint(FULL_TABLES, snapshotData)');
+  assert.ok(lockAt > 0 && fullSnapAt > lockAt);
   const announcements = backupRoutesSource.indexOf('// content_faq / content_announcements / system_versions');
   const revisions = backupRoutesSource.indexOf('// content_announcement_revisions');
   const acknowledgements = backupRoutesSource.indexOf('// content_announcement_acknowledgements');
