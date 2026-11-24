@@ -2567,14 +2567,21 @@ export function registerAdminBackupRoutes(router) {
             // 此时备份里的年会数据不会写入，查到的都是目标库原有的记录；表已在事务开头锁住。
             if (mode !== 'overwrite' && rows.length) {
               const uids = [...new Set(rows.map((r) => (r?.userid == null ? '' : String(r.userid))).filter(Boolean))];
-              // 重置前的余额快照会把已删的奖励加回来，发币后的余额快照会让待发奖励再付一次，更早的快照会少掉已到账的奖励：
+              // 重置前的余额快照会把已删的奖励加回来，发币后的余额快照会让待发奖励再付一次，更早的快照会少掉已到账的奖励；
+              // 全量覆盖清空六张年会表后仍保留的真实发奖流水（is_gala_payout = 1）同理：中奖记录已不在，但目标库流水仍显示奖励已付。
               // 只要余额会变就无法核对，拒绝。
               const paidRows = uids.length ? await tx.all(
-                `SELECT w.userid, MAX(a.balance) AS balance
-                   FROM gala_round_winners w LEFT JOIN accounts a ON a.userid = w.userid
-                  WHERE w.amount > 0 AND w.award_cancelled_at IS NULL AND w.userid = ANY(?::text[])
-                  GROUP BY w.userid ORDER BY w.userid`,
-                [uids],
+                `SELECT t.userid, a.balance
+                   FROM (
+                     SELECT userid FROM gala_round_winners
+                      WHERE amount > 0 AND award_cancelled_at IS NULL AND userid = ANY(?::text[])
+                     UNION
+                     SELECT userid FROM ledger
+                      WHERE is_gala_payout = 1 AND userid = ANY(?::text[])
+                   ) t
+                   LEFT JOIN accounts a ON a.userid = t.userid
+                  ORDER BY t.userid`,
+                [uids, uids],
               ) : [];
               const incoming = new Map(rows.filter((r) => r?.userid != null).map((r) => [String(r.userid), r]));
               // 来源备份里的年会收款人同样保护：他们的备份余额可能含一笔年会奖励，而年会表不随合并导入，

@@ -1334,3 +1334,11 @@ test('全量自动恢复点无条件锁定覆盖模式，旧版无年会表全�
   assert.match(uiSrc, /confirm_clear_gala: true/);
 });
 
+test('合并导入受保护账户集合包含目标库真实年会发奖流水（is_gala_payout = 1）收款人', async () => {
+  const { readFileSync } = await import('node:fs');
+  const backupSrc = readFileSync(new URL('../../src/routes/admin/backupRoutes.js', import.meta.url), 'utf8');
+  const guardBlock = backupSrc.match(/if \(mode !== 'overwrite' && rows\.length\) \{[\s\S]*?const incoming = new Map/)?.[0] || '';
+  assert.match(guardBlock, /FROM gala_round_winners[\s\S]*?amount > 0 AND award_cancelled_at IS NULL/);
+  assert.match(guardBlock, /UNION[\s\S]*?FROM ledger[\s\S]*?is_gala_payout = 1/);
+});
+

@@ -2311,6 +2311,32 @@ async function realRestoreChecks(cfg) {
       assert.ok(!tokRefs.some((ref) => realRefIds.has(ref)), '清空年会表后，bob_token 仍看不到保留的真实年会付款流水');
       assert.ok(tokRefs.includes('GALA_W99999') && tokRefs.includes('GALA_W1234567890123456789'), 'bob_token 照常看到普通 GALA_W 流水');
       console.log('✓ 覆盖空年会表后真实年会付款流水仍对非超管与 bob_token 隐藏，普通 GALA_W 流水照常可见且不污染序列');
+
+      // 6b) 目标库已清空六张年会表（无中奖记录），仅保留 is_gala_payout=1 的真实发奖流水：
+      //     此时用不含年会数据的老备份做合并导入，改变该收款人余额的必须拒绝，余额不变的则允许。
+      assert.equal(Number((await tdb.get('SELECT COUNT(*) AS n FROM gala_round_winners')).n), 0);
+      assert.ok(Number((await tdb.get('SELECT COUNT(*) AS n FROM ledger WHERE userid = ? AND is_gala_payout = 1', [paidTarget])).n) > 0);
+      const paidBal = await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidTarget]);
+      const curBalNum = Number(paidBal?.balance ?? 0);
+      const oldNoGala = structuredClone(bad);
+      for (const name of ['ledger', 'gala_events', 'gala_pools', 'gala_participants', 'gala_rounds', 'gala_round_winners', 'gala_reserved_slots']) {
+        oldNoGala.data[name] = [];
+      }
+      oldNoGala.data.accounts = [{ userid: paidTarget, balance: curBalNum === 0 ? 1 : 0, updated_at: now }];
+      recount(oldNoGala);
+      const beforeOldMerge = await snapshot();
+      r = await call('POST', '/backup/import', { backup: oldNoGala, mode: 'merge' });
+      assert.notEqual(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.ok(JSON.stringify(r.body).includes('有年会奖励（'), JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await snapshot(), beforeOldMerge);
+      assert.deepEqual(await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidTarget]), paidBal, '余额不变');
+      const sameBalMerge = structuredClone(oldNoGala);
+      sameBalMerge.data.accounts = [{ userid: paidTarget, balance: curBalNum, updated_at: now }];
+      recount(sameBalMerge);
+      r = await call('POST', '/backup/import', { backup: sameBalMerge, mode: 'merge' });
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+      assert.deepEqual(await tdb.get('SELECT balance FROM accounts WHERE userid = ?', [paidTarget]), paidBal);
+      console.log('✓ 目标库仅有 is_gala_payout=1 流水而无中奖记录时，合并导入改变余额被拒绝、余额不变则允许');
     }
     // 7) 超过 JS 安全整数的流水 id 与年会付款凭据（ledger_id）：导出为十进制字符串，覆盖恢复按原值写回，
     //    流水序列保持 BIGINT 完整范围，之后新流水照常分配
