@@ -11,6 +11,7 @@ const pages = {
   orders: lazy(() => import('./pages/Orders.jsx')),
   commerce: lazy(() => import('./pages/Commerce.jsx')),
   activities: lazy(() => import('./pages/Activities.jsx')),
+  gala: lazy(() => import('./pages/Gala.jsx')),
   messages: lazy(() => import('./pages/Messages.jsx')),
   content: lazy(() => import('./pages/ContentOps.jsx')),
   integrations: lazy(() => import('./pages/Integrations.jsx')),
@@ -77,7 +78,7 @@ export default function AdminApp() {
 
   useEffect(() => {
     if (!me || activeKey === 'myOperations' || canAccessNav(me, activeKey)) return;
-    const fallback = ['dashboard', 'users', 'orders', 'commerce', 'activities', 'messages', 'content', 'integrations', 'audit'].find((key) => canAccessNav(me, key));
+    const fallback = ['dashboard', 'users', 'orders', 'commerce', 'activities', 'gala', 'messages', 'content', 'integrations', 'audit'].find((key) => canAccessNav(me, key));
     setActiveKey(fallback || 'myOperations');
   }, [activeKey, me]);
 

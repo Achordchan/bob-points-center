@@ -463,6 +463,12 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
        (SELECT COUNT(*) FROM gala_rounds WHERE event_id = ?) AS rounds`,
     [id, id],
   );
+  const nextRoundRows = await db.all(
+    'SELECT segment, COALESCE(MAX(round_no), 0)::bigint + 1 AS next_no FROM gala_rounds WHERE event_id = ? GROUP BY segment',
+    [id],
+  );
+  const nextRoundNos = {};
+  for (const r of nextRoundRows) nextRoundNos[r.segment] = Number(r.next_no);
   const allocated = await allocatedByPool(db, pools.filter((p) => Number(p.is_reserved) === 0).map((p) => p.id));
   const visiblePools = pools.map((p) => serializePool(p, { allocated: allocated.get(Number(p.id)) || 0, includeReserved }));
   const publicPools = visiblePools.filter((p) => p.is_reserved === 0);
@@ -472,15 +478,25 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     pools_allocated: publicPools.reduce((s, p) => s + p.allocated, 0),
   };
   if (includeReserved) budgetSummary.pools_spent = publicPools.reduce((s, p) => s + p.spent, 0);
-  return {
+  const detail = {
     ...serializeEvent(event),
     pools: visiblePools,
     budget_summary: budgetSummary,
     participant_count: Number(counts?.participants || 0),
     round_count: Number(counts?.rounds || 0),
+    next_round_nos: nextRoundNos,
     // 本活动所有写接口（改活动、奖池、名单、抽签、预留）都要原样带回，见 inTx。
     gala_version: await readGalaVersion(db),
   };
+  if (includeReserved) {
+    const reservedCount = await db.get(
+      "SELECT COUNT(*) AS n FROM gala_reserved_slots WHERE event_id = ? AND status <> 'cancelled'",
+      [id],
+    );
+    detail.reserved_slots_used = Number(reservedCount?.n || 0);
+    detail.reserved_slots_limit = GALA_MAX_RESERVED_SLOTS;
+  }
+  return detail;
 }
 
 // ---------------------------------------------------------------- 奖池
