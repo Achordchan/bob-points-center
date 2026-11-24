@@ -1,15 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 const MAX_SPHERE_CARDS = 120;
-const SWAP_INTERVAL_MS = 2000;
+const SWAP_INTERVAL_MS = 2500;
 const SWAP_BATCH_SIZE = 10;
-const HIGHLIGHT_INTERVAL_MS = 120;
-const REDUCED_HIGHLIGHT_INTERVAL_MS = 480;
-const DEFAULT_SPEED_RPS = 0.6;
+const MAX_CONCURRENT_FLASH = 3;
+const FLASH_RISE_MS = 180;
+const FLASH_FADE_MS = 400;
+const FLASH_TOTAL_MS = FLASH_RISE_MS + FLASH_FADE_MS;
+const FLASH_TICK_MS = 260;
+const REDUCED_FLASH_TICK_MS = 640;
+const DEFAULT_SPEED_RPS = 0.65;
 const REDUCED_SPEED_RPS = 0.08;
-const DEFAULT_RADIUS_PX = 350;
-const DEFAULT_DECELERATE_MS = 1500;
-const REDUCED_DECELERATE_MS = 320;
+const RAMP_START_FACTOR = 0.12;
+const DEFAULT_RADIUS_PX = 420;
+const DEFAULT_DECELERATE_MS = 1200;
+const REDUCED_DECELERATE_MS = 240;
 const GOLDEN_ANGLE_RAD = Math.PI * (3 - Math.sqrt(5));
 const RAD_TO_DEG = 180 / Math.PI;
 
@@ -89,6 +94,7 @@ function computeFibonacciSlots(count, radius) {
 export default function NameSphere({
   names,
   speed = DEFAULT_SPEED_RPS,
+  rampUpMs = 0,
   highlight = false,
   decelerating = false,
   decelerateKey = null,
@@ -103,16 +109,17 @@ export default function NameSphere({
 
   const [activeIndices, setActiveIndices] = useState(() => pickInitialIndices(totalCount));
 
-  const stageRef = useRef(null);
   const sphereRef = useRef(null);
   const cardRefs = useRef([]);
   const speedRef = useRef(speed);
+  const rampUpMsRef = useRef(rampUpMs);
   const deceleratingRef = useRef(decelerating);
   const decelerateKeyRef = useRef(decelerateKey);
   const decelerateMsRef = useRef(decelerateDurationMs);
   const decelTriggerRef = useRef(decelerating);
 
   speedRef.current = speed;
+  rampUpMsRef.current = rampUpMs;
   decelerateMsRef.current = decelerateDurationMs;
 
   if (decelerating !== deceleratingRef.current || decelerateKey !== decelerateKeyRef.current) {
@@ -144,17 +151,18 @@ export default function NameSphere({
   useEffect(() => {
     if (cardCount === 0) return undefined;
     const sphereEl = sphereRef.current;
-    const stageEl = stageRef.current;
-    if (!sphereEl || !stageEl) return undefined;
+    if (!sphereEl) return undefined;
 
     let reducedMotion = getReducedMotionPreference();
     let mediaQuery = null;
     let rafId = 0;
     let lastTime = 0;
+    let rampStartTime = null;
     let angleY = 0;
     let elapsed = 0;
     let decelStartTime = null;
     let isDecelActive = false;
+    let opacityDirty = false;
 
     const handleMotionChange = (evt) => {
       reducedMotion = Boolean(evt.matches);
@@ -170,6 +178,9 @@ export default function NameSphere({
     }
 
     const step = (now) => {
+      if (rampStartTime === null) {
+        rampStartTime = now;
+      }
       const dt = lastTime ? Math.min((now - lastTime) / 1000, 0.05) : 0;
       lastTime = now;
 
@@ -182,14 +193,18 @@ export default function NameSphere({
       } else if (isDecelActive) {
         isDecelActive = false;
         decelStartTime = null;
-        stageEl.style.transform = 'scale3d(1, 1, 1)';
-        stageEl.style.opacity = '1';
+        if (opacityDirty) {
+          sphereEl.style.opacity = '1';
+          opacityDirty = false;
+        }
       }
 
       const baseRps = reducedMotion
         ? Math.min(speedRef.current, REDUCED_SPEED_RPS)
         : speedRef.current;
+
       let speedFactor = 1;
+      let scale = 1;
 
       if (isDecelActive && decelStartTime !== null) {
         const duration = reducedMotion
@@ -197,27 +212,35 @@ export default function NameSphere({
           : decelerateMsRef.current;
         const progress = duration > 0 ? Math.min(1, (now - decelStartTime) / duration) : 1;
         const inv = 1 - progress;
+        const easeOut = 1 - inv * inv * inv;
         speedFactor = inv * inv;
-        const shrinkEase = progress * progress * progress;
-        const scale = Math.max(0.24, 1 - 0.76 * shrinkEase);
-        const opacity = Math.max(0, 1 - Math.pow(progress, 1.35));
-        stageEl.style.transform = `scale3d(${scale.toFixed(4)}, ${scale.toFixed(4)}, 1)`;
-        stageEl.style.opacity = opacity.toFixed(4);
+        scale = Math.max(0.12, 1 - 0.88 * easeOut);
+        const opacity = Math.max(0, 1 - Math.pow(progress, 1.45));
+        sphereEl.style.opacity = opacity.toFixed(4);
+        opacityDirty = true;
+      } else if (!reducedMotion && rampUpMsRef.current > 0) {
+        const rampProgress = Math.min(1, (now - rampStartTime) / rampUpMsRef.current);
+        speedFactor = RAMP_START_FACTOR + (1 - RAMP_START_FACTOR) * rampProgress * rampProgress;
       }
 
       const angularVelocityDeg = baseRps * 360 * speedFactor;
       angleY = (angleY + angularVelocityDeg * dt) % 360;
       elapsed += dt * speedFactor;
 
-      const tiltAmp = reducedMotion ? 4 : 13;
-      const tiltX = Math.sin(elapsed * 0.55) * tiltAmp;
-      sphereEl.style.transform = `rotateX(${tiltX.toFixed(2)}deg) rotateY(${angleY.toFixed(2)}deg)`;
+      const tiltAmp = reducedMotion ? 3 : 10;
+      const tiltX = Math.sin(elapsed * 0.5) * tiltAmp;
+
+      if (scale < 0.9999) {
+        const s = scale.toFixed(4);
+        sphereEl.style.transform = `scale3d(${s}, ${s}, ${s}) rotateX(${tiltX.toFixed(2)}deg) rotateY(${angleY.toFixed(2)}deg)`;
+      } else {
+        sphereEl.style.transform = `rotateX(${tiltX.toFixed(2)}deg) rotateY(${angleY.toFixed(2)}deg)`;
+      }
 
       rafId = window.requestAnimationFrame(step);
     };
 
-    stageEl.style.transform = 'scale3d(1, 1, 1)';
-    stageEl.style.opacity = '1';
+    sphereEl.style.opacity = '1';
     rafId = window.requestAnimationFrame(step);
 
     return () => {
@@ -235,47 +258,64 @@ export default function NameSphere({
   }, [cardCount]);
 
   useEffect(() => {
-    const clearHighlights = (indices) => {
-      for (const idx of indices) {
-        const el = cardRefs.current[idx];
-        if (el) el.classList.remove('gs-sphere-card-hot');
+    const clearAllFlashes = () => {
+      for (let i = 0; i < cardRefs.current.length; i += 1) {
+        const el = cardRefs.current[i];
+        if (el) el.classList.remove('gs-sphere-card-flash');
       }
     };
 
     if (!highlight || decelerating || cardCount === 0) {
-      for (let i = 0; i < cardRefs.current.length; i += 1) {
-        const el = cardRefs.current[i];
-        if (el) el.classList.remove('gs-sphere-card-hot');
-      }
+      clearAllFlashes();
       return undefined;
     }
 
-    let hotIndices = [];
+    const activeFlashes = new Map();
     const reduced = getReducedMotionPreference();
-    const intervalMs = reduced ? REDUCED_HIGHLIGHT_INTERVAL_MS : HIGHLIGHT_INTERVAL_MS;
+    const tickMs = reduced ? REDUCED_FLASH_TICK_MS : FLASH_TICK_MS;
+    const maxActive = Math.min(MAX_CONCURRENT_FLASH, cardCount);
 
-    const tick = () => {
-      clearHighlights(hotIndices);
-      const pickCount = Math.min(cardCount, 1 + Math.floor(Math.random() * 3));
-      const picked = new Set();
-      let guard = 0;
-      while (picked.size < pickCount && guard < 24) {
-        picked.add(Math.floor(Math.random() * cardCount));
-        guard += 1;
+    const triggerFlash = () => {
+      if (activeFlashes.size >= maxActive) return;
+
+      let picked = -1;
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        const candidate = Math.floor(Math.random() * cardCount);
+        if (!activeFlashes.has(candidate)) {
+          picked = candidate;
+          break;
+        }
       }
-      hotIndices = Array.from(picked);
-      for (const idx of hotIndices) {
-        const el = cardRefs.current[idx];
-        if (el) el.classList.add('gs-sphere-card-hot');
-      }
+      if (picked < 0) return;
+
+      const cardEl = cardRefs.current[picked];
+      if (!cardEl) return;
+
+      cardEl.classList.add('gs-sphere-card-flash');
+
+      const offTimer = setTimeout(() => {
+        const currentEl = cardRefs.current[picked];
+        if (currentEl) currentEl.classList.remove('gs-sphere-card-flash');
+      }, FLASH_RISE_MS);
+
+      const doneTimer = setTimeout(() => {
+        activeFlashes.delete(picked);
+      }, FLASH_TOTAL_MS);
+
+      activeFlashes.set(picked, { offTimer, doneTimer });
     };
 
-    tick();
-    const timer = setInterval(tick, intervalMs);
+    triggerFlash();
+    const intervalId = setInterval(triggerFlash, tickMs);
 
     return () => {
-      clearInterval(timer);
-      clearHighlights(hotIndices);
+      clearInterval(intervalId);
+      for (const entry of activeFlashes.values()) {
+        clearTimeout(entry.offTimer);
+        clearTimeout(entry.doneTimer);
+      }
+      activeFlashes.clear();
+      clearAllFlashes();
     };
   }, [highlight, decelerating, cardCount]);
 
@@ -288,9 +328,13 @@ export default function NameSphere({
   }
 
   return (
-    <div className="gs-sphere-wrap">
-      <div className="gs-sphere-halo" aria-hidden="true" />
-      <div ref={stageRef} className="gs-sphere-stage">
+    <div className={decelerating ? 'gs-sphere-wrap gs-sphere-wrap-decelerating' : 'gs-sphere-wrap'}>
+      <div
+        className="gs-sphere-halo"
+        style={decelerating ? { animationDuration: `${decelerateDurationMs}ms` } : undefined}
+        aria-hidden="true"
+      />
+      <div className="gs-sphere-viewport">
         <div ref={sphereRef} className="gs-sphere-body">
           {slots.map((slot, idx) => {
             const name = safeNames[activeIndices[idx]] || '';
@@ -306,12 +350,12 @@ export default function NameSphere({
                     cardRefs.current[idx] = el;
                   }}
                 >
-                  <span className="gs-sphere-card-face gs-sphere-card-front">
-                    {name}
-                  </span>
-                  <span className="gs-sphere-card-face gs-sphere-card-back" aria-hidden="true">
-                    {name}
-                  </span>
+                  <div className="gs-sphere-card-face gs-sphere-card-front">
+                    <span className="gs-sphere-card-text">{name}</span>
+                  </div>
+                  <div className="gs-sphere-card-face gs-sphere-card-back" aria-hidden="true">
+                    <span className="gs-sphere-card-text">{name}</span>
+                  </div>
                 </div>
               </div>
             );

@@ -2,26 +2,51 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import NameSphere from './NameSphere.jsx';
 
-const WAITING_SPEED_RPS = 0.6;
-const DECELERATE_DURATION_MS = 1500;
-const REDUCED_DECELERATE_MS = 280;
-const CARD_STAGGER_MS = 350;
+const WAITING_SPEED_RPS = 0.65;
+const DECELERATE_DURATION_MS = 1200;
+const REDUCED_DECELERATE_MS = 240;
+const POST_SPHERE_PAUSE_MS = 200;
+const REDUCED_PAUSE_MS = 40;
+const HEADER_ENTER_MS = 400;
+const REDUCED_HEADER_ENTER_MS = 160;
+const CARD_STAGGER_MS = 250;
 const REDUCED_CARD_STAGGER_MS = 24;
-const CARD_ANIM_MS = 480;
-const REDUCED_CARD_ANIM_MS = 180;
-const GRID_MAX_WIDTH = 1728;
-const GRID_MAX_HEIGHT = 720;
+const CARD_ANIM_MS = 420;
+const REDUCED_CARD_ANIM_MS = 160;
+const CONFETTI_DELAY_MS = 300;
+const CONFETTI_VOLLEY_INTERVAL_MS = 250;
+const STAGE_INNER_WIDTH = 1760;
+const GRID_MAX_HEIGHT = 636;
+const MIN_SCREEN_FONT_SIZE = 28;
 
-const CONFETTI_COLORS = [
-  '#fff1b8',
-  '#f5c76b',
-  '#d99626',
-  '#e63946',
-  '#ff5464',
-  '#ffd166',
+const CONFETTI_COLORS = ['#F6D58E', '#C9973B', '#C8102E', '#FFF4DC'];
+
+const CONFETTI_VOLLEYS = [
+  {
+    offsetMs: 0,
+    particleCount: 100,
+    angle: 60,
+    spread: 62,
+    startVelocity: 50,
+    origin: { x: 0.04, y: 0.92 },
+  },
+  {
+    offsetMs: CONFETTI_VOLLEY_INTERVAL_MS,
+    particleCount: 100,
+    angle: 120,
+    spread: 62,
+    startVelocity: 50,
+    origin: { x: 0.96, y: 0.92 },
+  },
+  {
+    offsetMs: CONFETTI_VOLLEY_INTERVAL_MS * 2,
+    particleCount: 110,
+    angle: 90,
+    spread: 66,
+    startVelocity: 52,
+    origin: { x: 0.5, y: 0.96 },
+  },
 ];
-
-const CONFETTI_VOLLEY_OFFSETS_MS = [0, 480, 960, 1440, 1920, 2400];
 
 function getReducedMotionPreference() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -30,91 +55,144 @@ function getReducedMotionPreference() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
+function normalizeTitleKey(text) {
+  return String(text || '').replace(/[\s·•・\-—_]+/g, '').trim();
+}
+
+function resolveRevealHeading(round, segmentTitle) {
+  const roundLabel = `第 ${round.round_no} 轮`;
+  const defaultKicker = `${segmentTitle} · ${roundLabel}`;
+  const fallbackTitle = `${segmentTitle} ${roundLabel}`;
+  const rawTitle = typeof round.title === 'string' ? round.title.trim() : '';
+
+  if (!rawTitle) {
+    return { kicker: '', title: fallbackTitle };
+  }
+
+  const normRaw = normalizeTitleKey(rawTitle);
+  const normSeg = normalizeTitleKey(segmentTitle);
+  const normRound = normalizeTitleKey(roundLabel);
+  const normFull = normalizeTitleKey(fallbackTitle);
+
+  if (normRaw === normFull) {
+    return { kicker: '', title: rawTitle };
+  }
+  if (normRaw === normSeg) {
+    return { kicker: roundLabel, title: rawTitle };
+  }
+  if (normRaw === normRound) {
+    return { kicker: segmentTitle, title: rawTitle };
+  }
+  return { kicker: defaultKicker, title: rawTitle };
+}
+
 function computeWinnerLayout(count) {
   if (count <= 1) {
-    return { cols: 1, cardW: 720, cardH: 256, gapX: 0, gapY: 0, fontSize: 112, radius: 28, tier: 'hero' };
+    return { cols: 1, cardW: 900, cardH: 300, gap: 0, fontSize: 160, tier: 'hero' };
   }
   if (count === 2) {
-    return { cols: 2, cardW: 560, cardH: 216, gapX: 48, gapY: 36, fontSize: 84, radius: 24, tier: 'large' };
+    return { cols: 2, cardW: 640, cardH: 240, gap: 32, fontSize: 92, tier: 'large' };
   }
   if (count === 3) {
-    return { cols: 3, cardW: 480, cardH: 196, gapX: 40, gapY: 32, fontSize: 72, radius: 22, tier: 'large' };
+    return { cols: 3, cardW: 520, cardH: 220, gap: 32, fontSize: 80, tier: 'large' };
   }
-  if (count === 4) {
-    return { cols: 2, cardW: 500, cardH: 184, gapX: 44, gapY: 36, fontSize: 72, radius: 22, tier: 'large' };
-  }
-  if (count <= 6) {
-    return { cols: 3, cardW: 460, cardH: 174, gapX: 36, gapY: 32, fontSize: 64, radius: 20, tier: 'medium' };
-  }
-  if (count <= 8) {
-    return { cols: 4, cardW: 382, cardH: 156, gapX: 28, gapY: 28, fontSize: 56, radius: 18, tier: 'medium' };
+  if (count <= 5) {
+    return { cols: 5, cardW: 328, cardH: 180, gap: 28, fontSize: 58, tier: 'medium' };
   }
   if (count <= 10) {
-    return { cols: 5, cardW: 318, cardH: 150, gapX: 26, gapY: 28, fontSize: 50, radius: 18, tier: 'medium' };
+    return { cols: 5, cardW: 328, cardH: 168, gap: 28, fontSize: 54, tier: 'medium' };
   }
-  if (count <= 15) {
-    return { cols: 5, cardW: 312, cardH: 136, gapX: 24, gapY: 24, fontSize: 44, radius: 16, tier: 'normal' };
+  if (count <= 12) {
+    const gap = 28;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
+    return { cols: 6, cardW, cardH: 148, gap, fontSize: 46, tier: 'normal' };
   }
-  if (count <= 24) {
-    return { cols: 6, cardW: 262, cardH: 118, gapX: 22, gapY: 22, fontSize: 38, radius: 14, tier: 'normal' };
+  if (count <= 18) {
+    const gap = 28;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
+    return { cols: 6, cardW, cardH: 136, gap, fontSize: 42, tier: 'normal' };
   }
-  if (count <= 35) {
-    return { cols: 7, cardW: 224, cardH: 102, gapX: 18, gapY: 18, fontSize: 34, radius: 14, tier: 'compact' };
+  if (count <= 21) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
+    return { cols: 7, cardW, cardH: 128, gap, fontSize: 38, tier: 'compact' };
+  }
+  if (count <= 28) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
+    return { cols: 7, cardW, cardH: 116, gap, fontSize: 36, tier: 'compact' };
+  }
+  if (count <= 32) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 112, gap, fontSize: 34, tier: 'compact' };
+  }
+  if (count <= 40) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 102, gap, fontSize: 32, tier: 'compact' };
   }
   if (count <= 48) {
-    return { cols: 8, cardW: 198, cardH: 90, gapX: 16, gapY: 16, fontSize: 30, radius: 12, tier: 'compact' };
-  }
-  if (count <= 60) {
-    return { cols: 10, cardW: 158, cardH: 82, gapX: 14, gapY: 16, fontSize: 26, radius: 12, tier: 'dense' };
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 86, gap, fontSize: 30, tier: 'dense' };
   }
 
-  const cols = Math.min(12, Math.ceil(Math.sqrt(count * 2.1)));
+  const cols = 8;
+  const gap = 24;
   const rows = Math.ceil(count / cols);
-  const gapX = 12;
-  const gapY = 12;
-  const cardW = Math.max(116, Math.floor((GRID_MAX_WIDTH - (cols - 1) * gapX) / cols));
-  const cardH = Math.max(58, Math.floor((GRID_MAX_HEIGHT - (rows - 1) * gapY) / rows));
-  const fontSize = Math.max(18, Math.min(26, Math.floor(cardH * 0.36)));
-  return { cols, cardW, cardH, gapX, gapY, fontSize, radius: 10, tier: 'dense' };
+  const cardW = Math.floor((STAGE_INNER_WIDTH - (cols - 1) * gap) / cols);
+  const cardH = Math.max(58, Math.floor((GRID_MAX_HEIGHT - (rows - 1) * gap) / rows));
+  const fontSize = Math.max(MIN_SCREEN_FONT_SIZE, Math.min(30, Math.floor(cardH * 0.44)));
+  return { cols, cardW, cardH, gap, fontSize, tier: 'dense' };
 }
 
-function computeAdjustedFontSize(name, baseFontSize) {
-  const len = typeof name === 'string' ? name.length : 0;
-  if (len <= 4) return baseFontSize;
-  if (len <= 6) return Math.max(16, Math.round(baseFontSize * 0.82));
-  if (len <= 9) return Math.max(15, Math.round(baseFontSize * 0.68));
-  return Math.max(14, Math.round(baseFontSize * 0.56));
+function estimateVisualUnits(text) {
+  const str = String(text || '');
+  let units = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    units += code <= 0x7f ? 0.62 : 1.06;
+  }
+  return Math.max(1, units);
 }
 
-function fireSideConfetti(isMajor) {
-  const particleCount = isMajor ? 48 : 30;
-  const spread = isMajor ? 66 : 56;
-  const startVelocity = isMajor ? 58 : 48;
+function computeAdjustedFontSize(name, layout) {
+  const horizontalPadding = layout.tier === 'hero' ? 96 : 36;
+  const availWidth = Math.max(80, layout.cardW - horizontalPadding);
+  const units = estimateVisualUnits(name);
+  if (units * layout.fontSize <= availWidth) {
+    return layout.fontSize;
+  }
+  return Math.max(MIN_SCREEN_FONT_SIZE, Math.floor(availWidth / units));
+}
 
+function chunkIntoRows(items, cols) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const rows = [];
+  for (let i = 0; i < items.length; i += cols) {
+    rows.push(
+      items.slice(i, i + cols).map((name, offset) => ({
+        name,
+        index: i + offset,
+      })),
+    );
+  }
+  return rows;
+}
+
+function fireConfettiVolley(volley) {
   try {
     confetti({
-      particleCount,
-      angle: 58,
-      spread,
-      startVelocity,
-      origin: { x: 0.01, y: 0.68 },
+      particleCount: volley.particleCount,
+      angle: volley.angle,
+      spread: volley.spread,
+      startVelocity: volley.startVelocity,
+      origin: volley.origin,
       colors: CONFETTI_COLORS,
-      ticks: 220,
-      gravity: 0.92,
-      scalar: 1.15,
-      zIndex: 9999,
-      disableForReducedMotion: true,
-    });
-    confetti({
-      particleCount,
-      angle: 122,
-      spread,
-      startVelocity,
-      origin: { x: 0.99, y: 0.68 },
-      colors: CONFETTI_COLORS,
-      ticks: 220,
-      gravity: 0.92,
-      scalar: 1.15,
+      gravity: 1,
+      ticks: 250,
+      scalar: 1.1,
       zIndex: 9999,
       disableForReducedMotion: true,
     });
@@ -194,11 +272,21 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
 
     const isReduced = getReducedMotionPreference();
     const decelMs = isReduced ? REDUCED_DECELERATE_MS : DECELERATE_DURATION_MS;
+    const pauseMs = isReduced ? REDUCED_PAUSE_MS : POST_SPHERE_PAUSE_MS;
+    const headerMs = isReduced ? REDUCED_HEADER_ENTER_MS : HEADER_ENTER_MS;
     const staggerMs = isReduced ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
-    const animMs = isReduced ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
+    const cardAnimMs = isReduced ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
 
     setActiveRoundId(matchedRoundId);
     setPhase('decelerating');
+
+    schedule(() => {
+      setPhase('pause');
+    }, decelMs);
+
+    schedule(() => {
+      setPhase('header');
+    }, decelMs + pauseMs);
 
     schedule(() => {
       const count = winnersCountRef.current;
@@ -208,83 +296,58 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
       }
 
       setPhase('revealing');
-      const totalCardsMs = (count - 1) * staggerMs + animMs;
+      const lastCardFinishMs = (count - 1) * staggerMs + cardAnimMs;
 
       schedule(() => {
         setPhase('revealed');
         if (isReduced) return;
-        CONFETTI_VOLLEY_OFFSETS_MS.forEach((offset, idx) => {
+        for (const volley of CONFETTI_VOLLEYS) {
           schedule(() => {
-            const isMajor = idx === 0 || idx === CONFETTI_VOLLEY_OFFSETS_MS.length - 1;
-            fireSideConfetti(isMajor);
-          }, offset);
-        });
-      }, totalCardsMs);
-    }, decelMs);
+            fireConfettiVolley(volley);
+          }, volley.offsetMs);
+        }
+      }, lastCardFinishMs + CONFETTI_DELAY_MS);
+    }, decelMs + pauseMs + headerMs);
 
     return cleanup;
-  }, [targetRoundId, matchedRoundId]);
+  }, [matchedRoundId]);
 
   const layout = useMemo(() => computeWinnerLayout(winners.length), [winners.length]);
-  const gridWidth = layout.cols * layout.cardW + Math.max(0, layout.cols - 1) * layout.gapX;
-  const totalRows = winners.length > 0 ? Math.ceil(winners.length / layout.cols) : 0;
+  const winnerRows = useMemo(() => chunkIntoRows(winners, layout.cols), [winners, layout.cols]);
 
   const staggerMs = reducedMotion ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
-  const animMs = reducedMotion ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
+  const cardAnimMs = reducedMotion ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
 
-  const waitingSegmentTitle = (state?.segment && segmentLabels?.[state.segment]) || '幸运揭晓';
   const segmentTitle = matchedRound
     ? ((matchedRound.segment && segmentLabels?.[matchedRound.segment])
       || matchedRound.segment_label
       || '幸运抽取')
-    : waitingSegmentTitle;
+    : '';
 
+  const heading = useMemo(() => {
+    if (!matchedRound) return { kicker: '', title: '' };
+    return resolveRevealHeading(matchedRound, segmentTitle);
+  }, [matchedRound, segmentTitle]);
+
+  const titleFontSize = heading.title.length > 12 ? 96 : 104;
   const showPrize = Boolean(matchedRound && matchedRound.prize_type === 'coin');
   const isCurrentRoundActive = Boolean(matchedRound) && activeRoundId === matchedRound.id;
-  const showWinners = isCurrentRoundActive && (phase === 'revealing' || phase === 'revealed');
-  const showSphere = !showWinners;
+  const showSphere = !isCurrentRoundActive || phase === 'waiting' || phase === 'decelerating';
   const isDecelerating = isCurrentRoundActive && phase === 'decelerating';
+  const showHeader = isCurrentRoundActive && (phase === 'header' || phase === 'revealing' || phase === 'revealed');
+  const showWinners = isCurrentRoundActive && (phase === 'revealing' || phase === 'revealed');
 
   return (
     <section className="gs-reveal">
-      <div className="gs-reveal-glow" aria-hidden="true" />
+      {isCurrentRoundActive ? (
+        <div key={`pulse-${activeRoundId}`} className="gs-reveal-pulse" aria-hidden="true">
+          <div className="gs-reveal-pulse-dim" />
+          <div className="gs-reveal-pulse-bright" />
+        </div>
+      ) : null}
 
-      <header className="gs-reveal-header">
-        {matchedRound ? (
-          <>
-            <div className="gs-reveal-meta-row">
-              <span className="gs-reveal-rule" aria-hidden="true" />
-              <h1 className="gs-reveal-meta">
-                <span className="gs-reveal-segment">{segmentTitle}</span>
-                <span className="gs-reveal-dot" aria-hidden="true"> · </span>
-                <span className="gs-reveal-round-no">第 {matchedRound.round_no} 轮</span>
-                {matchedRound.title ? (
-                  <>
-                    <span className="gs-reveal-dot" aria-hidden="true"> · </span>
-                    <span className="gs-reveal-round-title">{matchedRound.title}</span>
-                  </>
-                ) : null}
-              </h1>
-              <span className="gs-reveal-rule" aria-hidden="true" />
-            </div>
-
-            {showPrize ? (
-              <p className="gs-reveal-prize">每人 {matchedRound.amount_each} BOB</p>
-            ) : null}
-          </>
-        ) : (
-          <div className="gs-reveal-meta-row">
-            <span className="gs-reveal-rule" aria-hidden="true" />
-            <h1 className="gs-reveal-meta">
-              <span className="gs-reveal-segment">{waitingSegmentTitle}</span>
-            </h1>
-            <span className="gs-reveal-rule" aria-hidden="true" />
-          </div>
-        )}
-      </header>
-
-      <div className="gs-reveal-stage">
-        {showSphere ? (
+      {showSphere ? (
+        <div className="gs-reveal-sphere-layer">
           <NameSphere
             names={names}
             speed={WAITING_SPEED_RPS}
@@ -293,54 +356,77 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
             decelerateKey={activeRoundId}
             decelerateDurationMs={DECELERATE_DURATION_MS}
           />
-        ) : null}
+        </div>
+      ) : null}
 
-        {showWinners ? (
-          winners.length === 0 ? (
-            <div className="gs-reveal-empty">本轮暂无中奖人</div>
-          ) : (
-            <div
-              key={activeRoundId || 'reveal-grid'}
-              className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
-              style={{
-                width: `${gridWidth}px`,
-                columnGap: `${layout.gapX}px`,
-                rowGap: `${layout.gapY}px`,
-              }}
+      {showHeader ? (
+        <div className="gs-reveal-content">
+          <header key={`header-${activeRoundId}`} className="gs-reveal-header">
+            {heading.kicker ? (
+              <p className="gs-reveal-kicker">{heading.kicker}</p>
+            ) : null}
+            <h1
+              className="gs-reveal-title"
+              style={{ fontSize: `${titleFontSize}px` }}
             >
-              {winners.map((winnerName, idx) => {
-                const row = Math.floor(idx / layout.cols);
-                const col = idx % layout.cols;
-                const itemsInRow = row === totalRows - 1
-                  ? winners.length - row * layout.cols
-                  : layout.cols;
-                const posX = (col - (itemsInRow - 1) / 2) * (layout.cardW + layout.gapX);
-                const posY = (row - (totalRows - 1) / 2) * (layout.cardH + layout.gapY);
-                const fontSize = computeAdjustedFontSize(winnerName, layout.fontSize);
+              {heading.title}
+            </h1>
+            {showPrize ? (
+              <p className="gs-reveal-prize">每人 {matchedRound.amount_each} BOB</p>
+            ) : null}
+          </header>
 
-                return (
-                  <div
-                    key={`${activeRoundId}-${idx}`}
-                    className={`gs-reveal-card gs-reveal-card-${layout.tier}`}
-                    style={{
-                      width: `${layout.cardW}px`,
-                      height: `${layout.cardH}px`,
-                      borderRadius: `${layout.radius}px`,
-                      fontSize: `${fontSize}px`,
-                      '--gs-from-x': `${(-posX).toFixed(1)}px`,
-                      '--gs-from-y': `${(-posY).toFixed(1)}px`,
-                      animationDelay: `${idx * staggerMs}ms`,
-                      animationDuration: `${animMs}ms`,
-                    }}
-                  >
-                    <span className="gs-reveal-card-name">{winnerName}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )
-        ) : null}
-      </div>
+          <div className="gs-reveal-stage">
+            {showWinners ? (
+              winners.length === 0 ? (
+                <div className="gs-reveal-empty">本轮暂无中奖人</div>
+              ) : (
+                <div
+                  key={`grid-${activeRoundId}`}
+                  className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
+                  style={{ rowGap: `${layout.gap}px` }}
+                >
+                  {winnerRows.map((row, rowIdx) => (
+                    <div
+                      key={`${activeRoundId}-row-${rowIdx}`}
+                      className="gs-reveal-grid-row"
+                      style={{
+                        gridTemplateColumns: `repeat(${row.length}, ${layout.cardW}px)`,
+                        columnGap: `${layout.gap}px`,
+                      }}
+                    >
+                      {row.map(({ name: winnerName, index }) => {
+                        const fontSize = computeAdjustedFontSize(winnerName, layout);
+                        return (
+                          <div
+                            key={`${activeRoundId}-${index}`}
+                            className={`gs-reveal-card gs-reveal-card-${layout.tier}`}
+                            style={{
+                              width: `${layout.cardW}px`,
+                              height: `${layout.cardH}px`,
+                              animationDelay: `${index * staggerMs}ms`,
+                              animationDuration: `${cardAnimMs}ms`,
+                            }}
+                          >
+                            <div className="gs-reveal-card-inner">
+                              <span
+                                className="gs-reveal-card-name"
+                                style={{ fontSize: `${fontSize}px` }}
+                              >
+                                {winnerName}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
