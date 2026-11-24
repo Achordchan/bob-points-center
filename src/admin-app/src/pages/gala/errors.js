@@ -104,6 +104,7 @@ const STATIC_ERROR_MESSAGES = {
 
   // 环节与抽签
   invalid_segment: '环节标识无效',
+  invalid_screen_mode: '大屏模式无效',
   segment_not_drawable: '该环节不支持抽签',
   segment_disabled: '该环节未启用，请先在活动设置中开启后再抽签',
   invalid_draw_count: '抽签人数必须是 1 到 100 之间的整数',

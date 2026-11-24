@@ -11,6 +11,10 @@ export default defineConfig({
     emptyOutDir: true,
     // 不再把 antd / wangeditor 打成超大 manualChunks；交给 Rollup 按页面动态导入自然拆包。
     rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        screen: fileURLToPath(new URL('./screen.html', import.meta.url)),
+      },
       output: {
         manualChunks(id) {
           if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) {
