@@ -1,48 +1,37 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 const CANVAS_WIDTH = 1920;
 const CANVAS_HEIGHT = 1080;
-const NORMAL_PARTICLE_COUNT = 120;
-const REDUCED_PARTICLE_COUNT = 36;
+const NORMAL_PARTICLE_COUNT = 80;
+const REDUCED_PARTICLE_COUNT = 24;
+const COUNT_ANIMATION_MS = 1200;
 
-const GOLD_PALETTE = [
-  '255, 236, 179',
-  '245, 199, 107',
-  '232, 168, 56',
+const DUST_PALETTE = [
+  '246, 213, 142',
+  '201, 151, 59',
+  '255, 244, 220',
 ];
 
-const RED_PALETTE = [
-  '235, 77, 92',
-  '214, 48, 65',
-  '255, 126, 107',
-];
-
-const GLOW_ORBS = [
-  { baseX: 960, baseY: 460, radius: 560, color: '245, 199, 107', alpha: 0.11, driftX: 48, driftY: 24, speed: 0.32, phase: 0 },
-  { baseX: 460, baseY: 760, radius: 480, color: '196, 36, 56', alpha: 0.14, driftX: 60, driftY: 34, speed: 0.25, phase: 1.7 },
-  { baseX: 1480, baseY: 720, radius: 500, color: '180, 30, 50', alpha: 0.13, driftX: 54, driftY: 30, speed: 0.28, phase: 3.4 },
-  { baseX: 960, baseY: 960, radius: 620, color: '218, 138, 42', alpha: 0.08, driftX: 36, driftY: 20, speed: 0.2, phase: 4.8 },
-];
-
-function createParticle(randomY) {
-  const isGold = Math.random() < 0.7;
-  const palette = isGold ? GOLD_PALETTE : RED_PALETTE;
-  const color = palette[Math.floor(Math.random() * palette.length)];
-  const radius = isGold ? 1.4 + Math.random() * 3.8 : 1.6 + Math.random() * 3.2;
+function createDustParticle(randomY) {
+  const blurred = Math.random() < 0.3;
+  const color = DUST_PALETTE[Math.floor(Math.random() * DUST_PALETTE.length)];
+  const radius = blurred
+    ? 1.1 + Math.random() * 0.9
+    : 0.65 + Math.random() * 0.95;
 
   return {
     x: Math.random() * CANVAS_WIDTH,
-    y: randomY ? Math.random() * CANVAS_HEIGHT : CANVAS_HEIGHT + 16 + Math.random() * 60,
+    y: randomY ? Math.random() * CANVAS_HEIGHT : CANVAS_HEIGHT + 12 + Math.random() * 48,
     radius,
-    vy: 14 + Math.random() * 34,
-    swayAmp: 10 + Math.random() * 26,
-    swaySpeed: 0.4 + Math.random() * 0.85,
+    vy: 5 + Math.random() * 10,
+    swayAmp: 4 + Math.random() * 10,
+    swaySpeed: 0.12 + Math.random() * 0.22,
     phase: Math.random() * Math.PI * 2,
-    twinkleSpeed: 1.1 + Math.random() * 2.2,
+    twinkleSpeed: 0.35 + Math.random() * 0.75,
     twinklePhase: Math.random() * Math.PI * 2,
-    baseAlpha: 0.28 + Math.random() * 0.56,
+    baseAlpha: 0.15 + Math.random() * 0.35,
     color,
-    hasHalo: isGold && radius > 3.2,
+    blurred,
   };
 }
 
@@ -54,13 +43,68 @@ function getReducedMotionPreference() {
 }
 
 export default function IdleView({ event, names, ready }) {
-  const canvasRef = useRef(null);
+  const sharpCanvasRef = useRef(null);
+  const blurCanvasRef = useRef(null);
+
+  const rawCount = event ? event.participant_count : names.length;
+  const participantCount = Math.max(0, Math.floor(Number(rawCount) || 0));
+
+  const [displayCount, setDisplayCount] = useState(0);
+  const displayedRef = useRef(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return undefined;
+    if (getReducedMotionPreference()) {
+      displayedRef.current = participantCount;
+      setDisplayCount(participantCount);
+      return undefined;
+    }
+
+    const startValue = displayedRef.current;
+    const delta = participantCount - startValue;
+    if (delta === 0) {
+      setDisplayCount(participantCount);
+      return undefined;
+    }
+
+    let rafId = 0;
+    let startTime = null;
+
+    const tick = (now) => {
+      if (startTime === null) {
+        startTime = now;
+      }
+      const progress = Math.min(1, (now - startTime) / COUNT_ANIMATION_MS);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextValue = Math.round(startValue + delta * eased);
+
+      if (nextValue !== displayedRef.current) {
+        displayedRef.current = nextValue;
+        setDisplayCount(nextValue);
+      }
+
+      if (progress < 1) {
+        rafId = window.requestAnimationFrame(tick);
+      } else {
+        displayedRef.current = participantCount;
+        setDisplayCount(participantCount);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [participantCount]);
+
+  useEffect(() => {
+    const sharpCanvas = sharpCanvasRef.current;
+    const blurCanvas = blurCanvasRef.current;
+    if (!sharpCanvas || !blurCanvas) return undefined;
+    const sharpCtx = sharpCanvas.getContext('2d');
+    const blurCtx = blurCanvas.getContext('2d');
+    if (!sharpCtx || !blurCtx) return undefined;
 
     let reducedMotion = getReducedMotionPreference();
     let mediaQuery = null;
@@ -71,7 +115,7 @@ export default function IdleView({ event, names, ready }) {
 
     const rebuildParticles = () => {
       const count = reducedMotion ? REDUCED_PARTICLE_COUNT : NORMAL_PARTICLE_COUNT;
-      particles = Array.from({ length: count }, () => createParticle(true));
+      particles = Array.from({ length: count }, () => createDustParticle(true));
     };
 
     const handleMotionChange = (evt) => {
@@ -93,55 +137,31 @@ export default function IdleView({ event, names, ready }) {
     const renderFrame = (now) => {
       const dt = lastTime ? Math.min((now - lastTime) / 1000, 0.05) : 0;
       lastTime = now;
-      const motionScale = reducedMotion ? 0.16 : 1;
+      const motionScale = reducedMotion ? 0.2 : 1;
       elapsed += dt * motionScale;
 
-      ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-
-      for (const orb of GLOW_ORBS) {
-        const cx = orb.baseX + Math.sin(elapsed * orb.speed + orb.phase) * orb.driftX;
-        const cy = orb.baseY + Math.cos(elapsed * orb.speed * 0.8 + orb.phase) * orb.driftY;
-        const pulse = 0.86 + 0.14 * Math.sin(elapsed * 0.7 + orb.phase);
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, orb.radius);
-        grad.addColorStop(0, `rgba(${orb.color}, ${(orb.alpha * pulse).toFixed(3)})`);
-        grad.addColorStop(0.55, `rgba(${orb.color}, ${(orb.alpha * 0.35 * pulse).toFixed(3)})`);
-        grad.addColorStop(1, `rgba(${orb.color}, 0)`);
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, orb.radius, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      sharpCtx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      blurCtx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
       for (let i = 0; i < particles.length; i += 1) {
         const p = particles[i];
         p.y -= p.vy * dt * motionScale;
-        if (p.y < -24) {
-          particles[i] = createParticle(false);
+        if (p.y < -16) {
+          particles[i] = createDustParticle(false);
           continue;
         }
 
         const drawX = p.x + Math.sin(elapsed * p.swaySpeed + p.phase) * p.swayAmp;
         const twinkle = reducedMotion
-          ? 0.85
-          : 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(elapsed * p.twinkleSpeed + p.twinklePhase));
-        const alpha = p.baseAlpha * twinkle;
+          ? 0.9
+          : 0.72 + 0.28 * (0.5 + 0.5 * Math.sin(elapsed * p.twinkleSpeed + p.twinklePhase));
+        const alpha = Math.max(0.15, Math.min(0.5, p.baseAlpha * twinkle));
 
-        if (p.hasHalo) {
-          const haloRadius = p.radius * 3.8;
-          const halo = ctx.createRadialGradient(drawX, p.y, 0, drawX, p.y, haloRadius);
-          halo.addColorStop(0, `rgba(${p.color}, ${(alpha * 0.7).toFixed(3)})`);
-          halo.addColorStop(0.45, `rgba(${p.color}, ${(alpha * 0.22).toFixed(3)})`);
-          halo.addColorStop(1, `rgba(${p.color}, 0)`);
-          ctx.fillStyle = halo;
-          ctx.beginPath();
-          ctx.arc(drawX, p.y, haloRadius, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        ctx.fillStyle = `rgba(${p.color}, ${alpha.toFixed(3)})`;
-        ctx.beginPath();
-        ctx.arc(drawX, p.y, p.radius, 0, Math.PI * 2);
-        ctx.fill();
+        const targetCtx = p.blurred ? blurCtx : sharpCtx;
+        targetCtx.fillStyle = `rgba(${p.color}, ${alpha.toFixed(3)})`;
+        targetCtx.beginPath();
+        targetCtx.arc(drawX, p.y, p.radius, 0, Math.PI * 2);
+        targetCtx.fill();
       }
 
       rafId = window.requestAnimationFrame(renderFrame);
@@ -165,44 +185,49 @@ export default function IdleView({ event, names, ready }) {
 
   const title = event?.title || (ready ? '年度盛典' : '');
   const eventDate = event?.event_date || '';
-  const participantCount = event ? event.participant_count : names.length;
 
   return (
     <section className="gs-idle">
       <canvas
-        ref={canvasRef}
+        ref={sharpCanvasRef}
         className="gs-idle-canvas"
         width={CANVAS_WIDTH}
         height={CANVAS_HEIGHT}
         aria-hidden="true"
       />
+      <canvas
+        ref={blurCanvasRef}
+        className="gs-idle-canvas gs-idle-canvas-blur"
+        width={CANVAS_WIDTH}
+        height={CANVAS_HEIGHT}
+        aria-hidden="true"
+      />
+
       <div className="gs-idle-content">
         <div className="gs-ornament-line" aria-hidden="true">
-          <span className="gs-ornament-rule" />
+          <span className="gs-ornament-rule gs-ornament-rule-left" />
           <span className="gs-ornament-diamond" />
-          <span className="gs-ornament-rule" />
+          <span className="gs-ornament-rule gs-ornament-rule-right" />
         </div>
 
-        <h1 className="gs-idle-title">{title}</h1>
-
-        {eventDate ? (
-          <div className="gs-idle-date-row">
-            <span className="gs-idle-date-line" aria-hidden="true" />
-            <p className="gs-idle-date">{eventDate}</p>
-            <span className="gs-idle-date-line" aria-hidden="true" />
-          </div>
-        ) : null}
-
-        <div className="gs-idle-count-badge">
-          <span className="gs-idle-count-text">参与人数</span>
-          <span className="gs-idle-count-value">{participantCount}</span>
-          <span className="gs-idle-count-text">人</span>
+        <div className="gs-idle-title-wrap">
+          <h1 className="gs-idle-title">{title}</h1>
         </div>
 
         <div className="gs-ornament-line gs-ornament-line-bottom" aria-hidden="true">
-          <span className="gs-ornament-rule" />
+          <span className="gs-ornament-rule gs-ornament-rule-left" />
           <span className="gs-ornament-diamond" />
-          <span className="gs-ornament-rule" />
+          <span className="gs-ornament-rule gs-ornament-rule-right" />
+        </div>
+
+        <div className="gs-idle-meta">
+          {eventDate ? (
+            <p className="gs-idle-date">{eventDate}</p>
+          ) : null}
+          <p className="gs-idle-count">
+            <span className="gs-idle-count-value">{displayCount}</span>
+            <span className="gs-idle-count-unit"> 位伙伴已入场</span>
+          </p>
         </div>
       </div>
     </section>

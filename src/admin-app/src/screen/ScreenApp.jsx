@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useScreenData } from './useScreenData.js';
 import IdleView from './IdleView.jsx';
 import RollingView from './RollingView.jsx';
@@ -31,6 +31,24 @@ function toggleFullscreen() {
   } catch {
     // 浏览器限制或不支持全屏时静默忽略
   }
+}
+
+function resolveSegmentBadge(state, rounds, segmentLabels) {
+  if (!state || (state.mode !== 'rolling' && state.mode !== 'reveal')) {
+    return '';
+  }
+  if (state.mode === 'reveal' && state.round_id && Array.isArray(rounds)) {
+    const matched = rounds.find((item) => item && item.id === state.round_id);
+    if (matched) {
+      return (matched.segment && segmentLabels?.[matched.segment])
+        || matched.segment_label
+        || '';
+    }
+  }
+  if (state.segment) {
+    return segmentLabels?.[state.segment] || state.segment;
+  }
+  return '';
 }
 
 function renderModeView(mode, props) {
@@ -171,6 +189,11 @@ export default function ScreenApp() {
     }
   }, []);
 
+  const cornerTitle = event?.title || '';
+  const segmentBadge = useMemo(
+    () => resolveSegmentBadge(state, rounds, segmentLabels),
+    [state, rounds, segmentLabels],
+  );
   const viewportClass = cursorHidden ? 'gs-viewport gs-cursor-hidden' : 'gs-viewport';
 
   return (
@@ -179,8 +202,8 @@ export default function ScreenApp() {
         className="gs-stage"
         style={{ transform: `scale(${scale})` }}
       >
-        <div className="gs-stage-backdrop" aria-hidden="true" />
-        <div className="gs-stage-frame" aria-hidden="true" />
+        <div className="gs-stage-vignette" aria-hidden="true" />
+        <div className="gs-stage-texture" aria-hidden="true" />
 
         {!eventId ? (
           <div className="gs-view-layer">
@@ -189,29 +212,42 @@ export default function ScreenApp() {
             </section>
           </div>
         ) : (
-          layers.map((layer) => {
-            const layerClass = layer.status === 'entering'
-              ? 'gs-view-layer gs-view-entering'
-              : layer.status === 'exiting'
-                ? 'gs-view-layer gs-view-exiting'
-                : 'gs-view-layer';
-            const viewState = layer.status === 'exiting' && layer.snapshot
-              ? layer.snapshot
-              : state;
+          <>
+            <header className="gs-stage-chrome">
+              {cornerTitle ? (
+                <div className="gs-corner-event-title">{cornerTitle}</div>
+              ) : (
+                <div className="gs-corner-spacer" aria-hidden="true" />
+              )}
+              {segmentBadge ? (
+                <div className="gs-corner-segment-pill">{segmentBadge}</div>
+              ) : null}
+            </header>
 
-            return (
-              <div key={layer.id} className={layerClass}>
-                {renderModeView(layer.mode, {
-                  event,
-                  names,
-                  rounds,
-                  segmentLabels,
-                  state: viewState,
-                  ready,
-                })}
-              </div>
-            );
-          })
+            {layers.map((layer) => {
+              const layerClass = layer.status === 'entering'
+                ? 'gs-view-layer gs-view-entering'
+                : layer.status === 'exiting'
+                  ? 'gs-view-layer gs-view-exiting'
+                  : 'gs-view-layer';
+              const viewState = layer.status === 'exiting' && layer.snapshot
+                ? layer.snapshot
+                : state;
+
+              return (
+                <div key={layer.id} className={layerClass}>
+                  {renderModeView(layer.mode, {
+                    event,
+                    names,
+                    rounds,
+                    segmentLabels,
+                    state: viewState,
+                    ready,
+                  })}
+                </div>
+              );
+            })}
+          </>
         )}
       </div>
     </div>

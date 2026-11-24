@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 
-const NORMAL_SCROLL_SPEED_PX = 46;
-const REDUCED_SCROLL_SPEED_PX = 20;
-const TOP_PAUSE_MS = 1400;
+const NORMAL_SCROLL_SPEED_PX = 30;
+const REDUCED_SCROLL_SPEED_PX = 16;
+const TOP_PAUSE_MS = 1500;
 const BOTTOM_PAUSE_MS = 3000;
 
 function getReducedMotionPreference() {
@@ -25,7 +25,7 @@ function groupRoundsBySegment(rounds, segmentLabels) {
     if (!bucket.has(segKey)) {
       const groupTitle = labelMap[segKey]
         || round.segment_label
-        || (segKey === '__other__' ? '中奖名单' : segKey);
+        || (segKey === '__other__' ? '荣耀名单' : segKey);
       bucket.set(segKey, {
         key: segKey,
         title: groupTitle,
@@ -155,12 +155,17 @@ export default function WinnersView({ rounds, segmentLabels }) {
     };
   }, [groups]);
 
+  const columnCount = Math.min(Math.max(groups.length, 1), 3);
+
   return (
     <section className="gs-winners">
       <header className="gs-winners-header">
-        <span className="gs-winners-header-rule" aria-hidden="true" />
-        <h1 className="gs-winners-title">中奖榜</h1>
-        <span className="gs-winners-header-rule" aria-hidden="true" />
+        <h1 className="gs-winners-title">荣耀榜</h1>
+        <div className="gs-ornament-line gs-winners-ornament" aria-hidden="true">
+          <span className="gs-ornament-rule gs-ornament-rule-left" />
+          <span className="gs-ornament-diamond" />
+          <span className="gs-ornament-rule gs-ornament-rule-right" />
+        </div>
       </header>
 
       <div ref={viewportRef} className="gs-winners-viewport">
@@ -168,48 +173,46 @@ export default function WinnersView({ rounds, segmentLabels }) {
           {groups.length === 0 ? (
             <div className="gs-winners-empty">敬请期待中奖揭晓</div>
           ) : (
-            groups.map((group) => (
-              <section key={group.key} className="gs-segment-group">
-                <div className="gs-segment-heading">
-                  <span className="gs-segment-diamond" aria-hidden="true" />
-                  <h2 className="gs-segment-title">{group.title}</h2>
-                  <span className="gs-segment-line" aria-hidden="true" />
-                </div>
+            <div className={`gs-winners-columns gs-winners-columns-${columnCount}`}>
+              {groups.map((group) => (
+                <section key={group.key} className="gs-segment-column">
+                  <div className="gs-segment-heading">
+                    <h2 className="gs-segment-title">{group.title}</h2>
+                    <span className="gs-segment-line" aria-hidden="true" />
+                  </div>
 
-                <div className="gs-round-list">
-                  {group.rounds.map((round) => {
-                    const showPrize = round.prize_type === 'coin';
-                    return (
-                      <article key={round.id} className="gs-round-card">
-                        <h3 className="gs-round-meta">
-                          <span className="gs-round-no">第 {round.round_no} 轮</span>
-                          {round.title ? (
-                            <>
-                              <span className="gs-round-dot" aria-hidden="true"> · </span>
-                              <span className="gs-round-name">{round.title}</span>
-                            </>
-                          ) : null}
-                          {showPrize ? (
-                            <>
-                              <span className="gs-round-dot" aria-hidden="true"> · </span>
-                              <span className="gs-round-prize">每人 {round.amount_each} BOB</span>
-                            </>
-                          ) : null}
-                        </h3>
+                  <div className="gs-round-list">
+                    {group.rounds.map((round) => {
+                      const showPrize = round.prize_type === 'coin';
+                      const roundHeading = round.title
+                        ? `第 ${round.round_no} 轮 · ${round.title}`
+                        : `第 ${round.round_no} 轮`;
 
-                        <ul className="gs-winner-list">
-                          {round.winners.map((winnerName, idx) => (
-                            <li key={`${round.id}-${idx}`} className="gs-winner-pill">
-                              {winnerName}
-                            </li>
-                          ))}
-                        </ul>
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            ))
+                      return (
+                        <article key={round.id} className="gs-round-card">
+                          <div className="gs-round-head">
+                            <h3 className="gs-round-meta">{roundHeading}</h3>
+                            {showPrize ? (
+                              <span className="gs-prize-capsule">
+                                每人 {round.amount_each} BOB
+                              </span>
+                            ) : null}
+                          </div>
+
+                          <ul className="gs-winner-list">
+                            {round.winners.map((winnerName, idx) => (
+                              <li key={`${round.id}-${idx}`} className="gs-winner-name">
+                                {winnerName}
+                              </li>
+                            ))}
+                          </ul>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
           )}
         </div>
       </div>
