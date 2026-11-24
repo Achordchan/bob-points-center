@@ -15,8 +15,16 @@ import { hasPermission } from '../../permissions.js';
 import { amountText } from '../../utils.js';
 import DrawModal from './DrawModal.jsx';
 import { galaErrorText } from './errors.js';
+import {
+  clearPendingDraw,
+  isAmbiguousDrawError,
+  loadPendingDraw,
+  savePendingDraw,
+} from './pendingDraw.js';
 
 const PAGE_SIZE = 200;
+const PENDING_DRAW_DESCRIPTION =
+  '网络或服务器异常导致未收到结果，后台可能已抽出。请按原参数重试（不会重复抽签），或在轮次列表确认后放弃';
 
 function normalizeNextRoundNos(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -80,8 +88,14 @@ export default function RoundsTab({
   const [grantingRoundId, setGrantingRoundId] = useState(null);
   const [partialGrantNotice, setPartialGrantNotice] = useState(null);
   const [nextRoundNoOverrides, setNextRoundNoOverrides] = useState({});
+  const [pendingDraw, setPendingDraw] = useState(() => loadPendingDraw(eventId));
+  const [pendingDrawModalOpen, setPendingDrawModalOpen] = useState(false);
+  const [retryingPendingDraw, setRetryingPendingDraw] = useState(false);
 
   const requestSeqRef = useRef(0);
+  const currentEventIdRef = useRef(eventId);
+  const retryingPendingRef = useRef(false);
+  currentEventIdRef.current = eventId;
 
   // 只映射公开奖池（is_reserved === 0），绝不展示预留奖池信息
   const publicPoolMap = useMemo(() => {
@@ -146,6 +160,13 @@ export default function RoundsTab({
   }, [eventId, galaVersion, loadRounds]);
 
   useEffect(() => {
+    setPendingDraw(loadPendingDraw(eventId));
+    setPendingDrawModalOpen(false);
+    setRetryingPendingDraw(false);
+    retryingPendingRef.current = false;
+  }, [eventId]);
+
+  useEffect(() => {
     setNextRoundNos(normalizeNextRoundNos(detail?.next_round_nos));
   }, [detail]);
 
@@ -161,7 +182,33 @@ export default function RoundsTab({
     [nextRoundNos, nextRoundNoOverrides],
   );
 
+  const clearPendingState = useCallback((targetEventId) => {
+    const id = targetEventId ?? currentEventIdRef.current;
+    clearPendingDraw(id);
+    if (Number(id) === Number(currentEventIdRef.current)) {
+      setPendingDraw(null);
+      setPendingDrawModalOpen(false);
+    }
+  }, []);
+
+  const handleAmbiguousDraw = useCallback(
+    (pending) => {
+      const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
+      savePendingDraw(targetEventId, pending);
+      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
+        setPendingDraw(pending);
+      }
+      setDrawModal(null);
+      message.warning('抽签结果未确认，请在轮次页按原参数重试');
+    },
+    [message],
+  );
+
   const handleOpenDraw = async () => {
+    if (pendingDraw) {
+      setPendingDrawModalOpen(true);
+      return;
+    }
     if (openingDraw) return;
     setOpeningDraw(true);
     try {
@@ -211,6 +258,55 @@ export default function RoundsTab({
     },
     [refreshAll],
   );
+
+  const handleRetryPendingDraw = async () => {
+    if (!canOperate || !pendingDraw || retryingPendingRef.current) return;
+    const targetPending = pendingDraw;
+    const targetEventId = targetPending?.payload?.event_id ?? eventId;
+    retryingPendingRef.current = true;
+    setRetryingPendingDraw(true);
+    try {
+      const resp = await api('/admin/gala/rounds/draw', {
+        method: 'POST',
+        body: targetPending.payload,
+      });
+      clearPendingState(targetEventId);
+      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
+        await handleDrawSuccess(resp?.data || null);
+      }
+    } catch (err) {
+      if (isAmbiguousDrawError(err)) {
+        message.warning('仍未确认，请稍后再试');
+        return;
+      }
+      clearPendingState(targetEventId);
+      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
+        const versionChanged = handleError(err);
+        if (versionChanged) {
+          loadRounds();
+        }
+      }
+    } finally {
+      retryingPendingRef.current = false;
+      setRetryingPendingDraw(false);
+    }
+  };
+
+  const handleDiscardPendingDraw = () => {
+    if (!canOperate || !pendingDraw || retryingPendingRef.current) return;
+    const targetEventId = pendingDraw?.payload?.event_id ?? eventId;
+    modal.confirm({
+      title: '放弃这次尝试',
+      content: '请先在轮次列表确认该轮是否已抽出；放弃后再抽签会生成新的一轮',
+      okText: '确认放弃',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await loadRounds();
+        clearPendingState(targetEventId);
+      },
+    });
+  };
 
   const handleGrant = (record) => {
     const winnersCount = Number(
@@ -384,9 +480,43 @@ export default function RoundsTab({
 
   const totalCount = Number(detail?.round_count ?? rounds.length);
   const drawResultWinners = Array.isArray(drawResult?.winners) ? drawResult.winners : [];
+  const pendingDrawTitle = pendingDraw
+    ? `上次抽签（${pendingDraw.segment_label || pendingDraw.payload?.segment || ''} 第 ${pendingDraw.payload?.round_no} 轮）结果未确认`
+    : '';
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
+      {pendingDraw && (
+        <Alert
+          type="warning"
+          showIcon
+          message={pendingDrawTitle}
+          description={PENDING_DRAW_DESCRIPTION}
+          action={
+            canOperate ? (
+              <Space size="small">
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={retryingPendingDraw}
+                  disabled={retryingPendingDraw}
+                  onClick={handleRetryPendingDraw}
+                >
+                  按原参数重试
+                </Button>
+                <Button
+                  size="small"
+                  disabled={retryingPendingDraw}
+                  onClick={handleDiscardPendingDraw}
+                >
+                  放弃这次尝试
+                </Button>
+              </Space>
+            ) : undefined
+          }
+        />
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <Typography.Text type="secondary">
           共 {totalCount} 轮
@@ -470,10 +600,52 @@ export default function RoundsTab({
         getNextRoundNo={getNextRoundNo}
         onRoundNoChanged={handleRoundNoChanged}
         onSuccess={handleDrawSuccess}
+        onAmbiguousDraw={handleAmbiguousDraw}
         onRefreshAll={refreshAll}
         onRefreshRounds={loadRounds}
         handleError={handleError}
       />
+
+      <Modal
+        title={pendingDrawTitle || '抽签结果未确认'}
+        open={Boolean(pendingDraw && pendingDrawModalOpen)}
+        onCancel={() => {
+          if (!retryingPendingDraw) setPendingDrawModalOpen(false);
+        }}
+        closable={!retryingPendingDraw}
+        maskClosable={!retryingPendingDraw}
+        footer={
+          canOperate
+            ? [
+                <Button
+                  key="discard"
+                  disabled={retryingPendingDraw}
+                  onClick={handleDiscardPendingDraw}
+                >
+                  放弃这次尝试
+                </Button>,
+                <Button
+                  key="retry"
+                  type="primary"
+                  loading={retryingPendingDraw}
+                  disabled={retryingPendingDraw}
+                  onClick={handleRetryPendingDraw}
+                >
+                  按原参数重试
+                </Button>,
+              ]
+            : null
+        }
+        width={520}
+        destroyOnHidden
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message={pendingDrawTitle}
+          description={PENDING_DRAW_DESCRIPTION}
+        />
+      </Modal>
 
       <Modal
         title={

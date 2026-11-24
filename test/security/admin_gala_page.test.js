@@ -5,6 +5,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canAccessNav, navPermissionMap } from '../../src/admin-app/src/permissions.js';
 import { galaErrorText } from '../../src/admin-app/src/pages/gala/errors.js';
+import {
+  clearPendingDraw,
+  getPendingDrawKey,
+  isAmbiguousDrawError,
+  loadPendingDraw,
+  PENDING_DRAW_KEY_PREFIX,
+  savePendingDraw,
+} from '../../src/admin-app/src/pages/gala/pendingDraw.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const readRepoFile = (relPath) => readFileSync(path.join(rootDir, relPath), 'utf8');
@@ -103,4 +111,82 @@ test('EventDetail 环节列表加载失败可提示并在刷新时恢复加载',
   assert.match(refreshHandlerBlock, /\breload\(/);
   assert.match(refreshHandlerBlock, /\bloadSegments\(/);
   assert.match(eventDetailSource, /onClick=\{handleRefresh\}[\s\S]*?>\s*刷新\s*<\/Button>/);
+});
+
+test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用 sessionStorage 与 gala:pendingDraw: 键前缀', () => {
+  const galaDir = path.join(rootDir, 'src/admin-app/src/pages/gala');
+  const entries = readdirSync(galaDir, { withFileTypes: true }).filter((ent) => ent.isFile());
+  const combinedSource = entries
+    .map((ent) => readFileSync(path.join(galaDir, ent.name), 'utf8'))
+    .join('\n');
+
+  assert.match(combinedSource, /\bsessionStorage\b/, 'gala 目录应使用 sessionStorage 持久化待确认抽签');
+  assert.match(combinedSource, /gala:pendingDraw:/, 'gala 目录应使用 gala:pendingDraw: 键前缀');
+  assert.match(combinedSource, /\bsavePendingDraw\b/, 'gala 目录缺少待确认抽签保存逻辑');
+  assert.match(combinedSource, /\bloadPendingDraw\b/, 'gala 目录缺少待确认抽签读取逻辑');
+  assert.match(combinedSource, /\bclearPendingDraw\b/, 'gala 目录缺少待确认抽签清除逻辑');
+  assert.match(combinedSource, /\bisAmbiguousDrawError\b/, 'gala 目录缺少结果不明错误判定逻辑');
+  assert.match(combinedSource, /按原参数重试/, 'RoundsTab 缺少按原参数重试按钮');
+  assert.match(combinedSource, /放弃这次尝试/, 'RoundsTab 缺少放弃这次尝试按钮');
+
+  const roundsTabSource = readRepoFile('src/admin-app/src/pages/gala/RoundsTab.jsx');
+  const drawModalSource = readRepoFile('src/admin-app/src/pages/gala/DrawModal.jsx');
+  assert.match(drawModalSource, /isAmbiguousDrawError\(err\)/);
+  assert.match(roundsTabSource, /api\('\/admin\/gala\/rounds\/draw',[\s\S]*?body:\s*targetPending\.payload/);
+  assert.match(roundsTabSource, /savePendingDraw\(/);
+  assert.match(roundsTabSource, /clearPendingDraw\(/);
+
+  // 行为校验：错误分类与 sessionStorage 存取删
+  assert.equal(PENDING_DRAW_KEY_PREFIX, 'gala:pendingDraw:');
+  assert.equal(getPendingDrawKey(42), 'gala:pendingDraw:42');
+  assert.equal(isAmbiguousDrawError(new TypeError('Failed to fetch')), true);
+  assert.equal(isAmbiguousDrawError({ status: 502, code: '' }), true);
+  assert.equal(isAmbiguousDrawError({ status: 500, code: 'internal_error' }), true);
+  assert.equal(isAmbiguousDrawError({ status: 400, code: '' }), true);
+  assert.equal(isAmbiguousDrawError({ status: 409, code: 'round_no_changed' }), false);
+  assert.equal(isAmbiguousDrawError({ status: 400, code: 'not_enough_participants' }), false);
+  assert.equal(isAmbiguousDrawError({ status: 409, code: 'gala_data_changed' }), false);
+
+  const store = new Map();
+  const prevStorage = globalThis.sessionStorage;
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  try {
+    const sample = {
+      payload: {
+        event_id: 42,
+        segment: 'lucky',
+        title: '一等奖',
+        draw_count: 2,
+        prize_type: 'coin',
+        pool_id: 7,
+        amount_each: 100,
+        exclude_previous_winners: true,
+        round_no: 3,
+        gala_version: 'v1',
+      },
+      segment_label: '幸运抽奖',
+    };
+    savePendingDraw(42, sample);
+    assert.ok(store.has('gala:pendingDraw:42'));
+    assert.deepEqual(loadPendingDraw(42), sample);
+    assert.equal(loadPendingDraw(99), null);
+    clearPendingDraw(42);
+    assert.equal(loadPendingDraw(42), null);
+  } finally {
+    if (prevStorage === undefined) {
+      delete globalThis.sessionStorage;
+    } else {
+      Object.defineProperty(globalThis, 'sessionStorage', {
+        configurable: true,
+        value: prevStorage,
+      });
+    }
+  }
 });

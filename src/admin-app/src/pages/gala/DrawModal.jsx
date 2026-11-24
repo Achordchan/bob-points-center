@@ -16,6 +16,7 @@ import {
 import { api } from '../../api.js';
 import { amountText } from '../../utils.js';
 import { galaErrorText } from './errors.js';
+import { isAmbiguousDrawError } from './pendingDraw.js';
 
 const MAX_DRAW_COUNT = 100;
 const MAX_TITLE_LENGTH = 80;
@@ -33,6 +34,7 @@ export default function DrawModal({
   getNextRoundNo,
   onRoundNoChanged,
   onSuccess,
+  onAmbiguousDraw,
   onRefreshAll,
   onRefreshRounds,
   handleError,
@@ -187,22 +189,21 @@ export default function DrawModal({
       ),
       onOk: async () => {
         setSubmitting(true);
+        const payload = {
+          event_id: eventId,
+          segment,
+          title,
+          draw_count: count,
+          prize_type: values.prize_type,
+          exclude_previous_winners: excludePrevious,
+          round_no: roundNo,
+          gala_version: version,
+        };
+        if (isCoin) {
+          payload.pool_id = poolId;
+          payload.amount_each = each;
+        }
         try {
-          const payload = {
-            event_id: eventId,
-            segment,
-            title,
-            draw_count: count,
-            prize_type: values.prize_type,
-            exclude_previous_winners: excludePrevious,
-            round_no: roundNo,
-            gala_version: version,
-          };
-          if (isCoin) {
-            payload.pool_id = poolId;
-            payload.amount_each = each;
-          }
-
           const resp = await api('/admin/gala/rounds/draw', {
             method: 'POST',
             body: payload,
@@ -210,6 +211,13 @@ export default function DrawModal({
           setRoundNoNotice('');
           await onSuccess(resp?.data || null);
         } catch (err) {
+          if (isAmbiguousDrawError(err)) {
+            onAmbiguousDraw?.({
+              payload,
+              segment_label: segmentLabel,
+            });
+            return;
+          }
           if (err?.code === 'round_no_changed') {
             const nextNo = Number(err?.data?.next_round_no);
             if (Number.isSafeInteger(nextNo) && nextNo > 0) {
