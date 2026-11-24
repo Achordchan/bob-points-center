@@ -3,6 +3,11 @@
 import { requireAdminSession } from '../../middleware/requireAdminSession.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
 import {
+  getGalaScreenState,
+  revealRoundIfRolling,
+  setGalaScreenState,
+} from '../../services/galaScreenService.js';
+import {
   GalaError,
   GALA_SEGMENTS,
   GALA_DRAW_SEGMENTS,
@@ -178,6 +183,32 @@ export function registerAdminGalaRoutes(router) {
     // 重放也发：上一次请求可能在事务提交后、发通知前退出，重试是补发的唯一机会。通知只是“按轮次 ID 刷新”的信号，
     // 订阅端收到重复的同一轮次不会有副作用。通知走进程内订阅表，只送达本实例的连接（与其他实时事件相同）。
     publishMallRealtimeEvent('gala_changed', { event_id: data.event_id, round_id: data.id, reason: 'round_drawn' });
+    try {
+      const screen = revealRoundIfRolling(data.event_id, data.id);
+      if (screen) {
+        publishMallRealtimeEvent('gala_screen', { event_id: screen.event_id, version: screen.version, scopes: ['screen'] });
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[gala] screen reveal hook error', err);
+    }
+    res.json({ ok: true, data });
+  }));
+
+  router.get('/gala/screen/state', requireAdminSession(), handle(async (req, res) => {
+    const data = getGalaScreenState(req.query?.event_id);
+    res.json({ ok: true, data });
+  }));
+
+  router.post('/gala/screen/state', requireAdminSession(), handle(async (req, res, db) => {
+    const b = req.body || {};
+    const data = await setGalaScreenState(db, {
+      eventId: b.event_id,
+      mode: b.mode,
+      segment: b.segment,
+      roundId: b.round_id,
+    });
+    publishMallRealtimeEvent('gala_screen', { event_id: data.event_id, version: data.version, scopes: ['screen'] });
     res.json({ ok: true, data });
   }));
 

@@ -177,6 +177,7 @@ export function matchPathPermission(method, path) {
   // 年会：预留名额与预留奖池只对超级管理员开放。
   if (p.startsWith('/gala/reserved')) return 'super';
   if (p.startsWith('/gala/rounds/draw') || p.startsWith('/gala/rounds/grant')) return 'gala:operate';
+  if (m === 'POST' && p.startsWith('/gala/screen/state')) return 'gala:operate';
   if (p.startsWith('/gala')) return m === 'GET' ? 'gala:view' : 'gala:edit';
   if (p.startsWith('/settings/notify/test') || p.startsWith('/settings/group-card/test')) return 'messages:test';
   if (p.startsWith('/notify') || p.startsWith('/settings/notify') || p.startsWith('/settings/group-card')) return m === 'GET' ? 'messages:view' : 'messages:edit';
