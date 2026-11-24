@@ -62,6 +62,8 @@ export function useScreenData() {
     let roundsDataVersion = null;
     let latestDataVersion = null;
     let lastRoundsReconcileKey = null;
+    let roundsSignature = null;
+    let roundsSignatureVersion = null;
     let lastStateVersion = null;
     // SSE 是否连着：连着时轮次、活动靠 gala_changed 事件刷新；断开（或浏览器不支持、连接数满）时靠状态轮询带着刷新。
     let sseOpen = false;
@@ -135,7 +137,13 @@ export function useScreenData() {
         if (item && item.id) knownRoundIds.add(item.id);
       }
       roundsDataVersion = next.dataVersion;
-      setRoundsData({ list: next.rounds, dataVersion: next.dataVersion });
+      // 内容与版本都没变时保留原来的数组：定时刷新不触发视图重算，也不会打断榜单滚动等动画。
+      const signature = JSON.stringify(next.rounds);
+      if (signature !== roundsSignature || next.dataVersion !== roundsSignatureVersion) {
+        roundsSignature = signature;
+        roundsSignatureVersion = next.dataVersion;
+        setRoundsData({ list: next.rounds, dataVersion: next.dataVersion });
+      }
       // 轮次与状态版本不一致：再读一次状态，让两边对上；空列表没有版本，不算不一致。
       // 同一对版本只追一次：持续不一致时不会在两个请求之间来回打转，之后由状态轮询（每次都会补拉轮次）收敛。
       if (next.dataVersion !== null && next.dataVersion !== latestDataVersion) {
@@ -247,6 +255,12 @@ export function useScreenData() {
         if (needsReconnectRefresh) {
           needsReconnectRefresh = false;
           void refreshAll();
+        } else {
+          // 首次连上也对一次账：首屏数据拉完到订阅生效之间发生的抽签、切换，事件已经错过了。
+          // 名单变化不走实时事件（有自己的定时刷新），这里不重拉。
+          void refreshRounds();
+          void refreshEvent();
+          void refreshState();
         }
       });
 

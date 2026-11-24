@@ -6,6 +6,7 @@ import { isPublicAdminPath, matchPathPermission } from '../../src/services/admin
 import { GalaError } from '../../src/services/galaService.js';
 import {
   getGalaScreenState,
+  readGalaScreenState,
   revealRoundIfRolling,
   setGalaScreenState,
 } from '../../src/services/galaScreenService.js';
@@ -303,6 +304,39 @@ test('开始滚动与抽签交错：抽签在读基线之后、写入滚动之�
   db.roundList.push({ id: 802, event_id: 91010 });
   const rolling = await setGalaScreenState(db, { eventId: 91010, mode: 'rolling', segment: 'lottery', expectedVersion: V1 });
   assert.equal(rolling.mode, 'rolling');
+});
+
+test('readGalaScreenState：读版本期间状态被按新版本写入时，不用可能过时的读取作废新状态', async () => {
+  const db = createMockDb({ events: [91011], rounds: [{ id: 901, event_id: 91011 }] });
+  await setGalaScreenState(db, { eventId: 91011, mode: 'winners', expectedVersion: V1 });
+
+  // 正常：版本没变，原样返回；版本变了，作废回到待机
+  assert.equal((await readGalaScreenState(db, 91011)).mode, 'winners');
+  assert.equal((await readGalaScreenState(db, 91011)).data_version, V1);
+
+  // 读版本（V1）还没返回时，恢复完成、控制卡片按 V2 写入了揭晓：这次读取不得把新状态当旧状态作废
+  const realGet = db.get;
+  db.get = async (sql, params) => {
+    const row = await realGet(sql, params);
+    if (sql.includes('FROM gala_restore_state') && db.version === V1) {
+      db.get = realGet;
+      db.version = V2;
+      await setGalaScreenState(db, { eventId: 91011, mode: 'reveal', roundId: 901, expectedVersion: V2 });
+    }
+    return row;
+  };
+  const raced = await readGalaScreenState(db, 91011);
+  assert.equal(raced.mode, 'reveal');
+  assert.equal(raced.round_id, 901);
+  assert.equal(raced.data_version, V2);
+  assert.equal(getGalaScreenState(91011).mode, 'reveal');
+
+  // 没有并发写入时，读到新版本照常作废旧状态
+  db.version = '66666666-6666-4666-8666-666666666666';
+  const reset = await readGalaScreenState(db, 91011);
+  assert.equal(reset.mode, 'idle');
+
+  await assert.rejects(() => readGalaScreenState(db, 'bad'), (err) => err instanceof GalaError && err.code === 'invalid_event_id');
 });
 
 test('isPublicAdminPath：仅 GET /gala/screen 放行给路由自校验，POST 与 /gala/screen/state 不公开', () => {

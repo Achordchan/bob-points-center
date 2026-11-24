@@ -6,7 +6,7 @@ import { requireAdminSession } from '../../middleware/requireAdminSession.js';
 import { getAdminAccess, hasAdminPermission } from '../../services/adminPermissionService.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
 import {
-  getGalaScreenState,
+  readGalaScreenState,
   revealRoundIfRolling,
   setGalaScreenState,
 } from '../../services/galaScreenService.js';
@@ -31,7 +31,6 @@ import {
   serializeDrawResult,
   serializeGrantResult,
   parseGalaVersion,
-  readGalaDataVersion,
   updateGalaEvent,
   updateGalaPool,
 } from '../../services/galaService.js';
@@ -233,9 +232,8 @@ export function registerAdminGalaRoutes(router) {
   }));
 
   router.get('/gala/screen/state', requireAdminSession(), handle(async (req, res, db) => {
-    getGalaScreenState(req.query?.event_id); // 先校验活动 ID，非法参数不碰数据库
-    // 带上当前数据版本：全量恢复后，恢复前设置的大屏状态作废、回到待机。
-    const data = getGalaScreenState(req.query?.event_id, { currentDataVersion: await readGalaDataVersion(db) });
+    // 带上当前数据版本：全量恢复后，恢复前设置的大屏状态作废、回到待机（见 readGalaScreenState）。
+    const data = await readGalaScreenState(db, req.query?.event_id);
     res.json({ ok: true, data });
   }));
 

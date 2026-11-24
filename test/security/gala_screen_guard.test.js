@@ -325,7 +325,7 @@ test('8. 大屏控制带回数据版本：卡片提交 gala_version、版本错�
   const postHandler = extractRouteBlock(routesSource, "router.post('/gala/screen/state'");
   assert.match(postHandler, /expectedVersion\s*:\s*b\.gala_version/, 'POST /gala/screen/state 必须把 gala_version 交给服务层核对');
   const getHandler = extractRouteBlock(routesSource, "router.get('/gala/screen/state'");
-  assert.match(getHandler, /currentDataVersion\s*:\s*await\s+readGalaDataVersion\(/, 'GET /gala/screen/state 必须按当前数据版本作废旧状态');
+  assert.match(getHandler, /await\s+readGalaScreenState\(\s*db\s*,/, 'GET /gala/screen/state 必须经 readGalaScreenState 按当前数据版本作废旧状态');
   const drawHandler = extractRouteBlock(routesSource, "router.post('/gala/rounds/draw'");
   assert.match(drawHandler, /revealRoundIfRolling\([^)]*dataVersion/, '抽签后自动揭晓必须带上数据版本');
 });
@@ -362,4 +362,16 @@ test('11. 大屏首次加载版本不一致会重拉轮次；SSE 不可用时状
   assert.match(hookCode, /sseOpen = true;/, 'SSE 连上时必须记下');
   assert.match(hookCode, /sseOpen = false;/, 'SSE 出错时必须记下');
   assert.match(hookCode, /lastRoundsReconcileKey/, '轮次触发的状态对账必须防止来回打转');
+});
+
+test('12. 荣耀榜滚动只在展示内容变化时重置；大屏首次连上 SSE 也补拉一次', () => {
+  const winnersCode = stripJsComments(readRepoFile('src/admin-app/src/screen/WinnersView.jsx'));
+  assert.match(winnersCode, /const contentKey = useMemo\(/);
+  assert.match(winnersCode, /\}, \[contentKey\]\);/, '滚动效果必须只依赖内容签名');
+  assert.doesNotMatch(winnersCode, /\}, \[groups\]\);/, '滚动效果不得依赖每次刷新都会新建的 groups');
+
+  const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
+  assert.match(hookCode, /signature !== roundsSignature/, '轮次内容没变时不得替换数组');
+  const openHandler = hookCode.slice(hookCode.indexOf("addEventListener('open'"), hookCode.indexOf("addEventListener('gala_screen'"));
+  assert.match(openHandler, /else\s*\{[\s\S]*?refreshRounds\(\)[\s\S]*?refreshEvent\(\)[\s\S]*?refreshState\(\)/, '首次连上 SSE 必须补拉轮次、活动和状态');
 });

@@ -103,6 +103,17 @@ export default function WinnersView({ rounds, segmentLabels }) {
     [rounds, segmentLabels],
   );
 
+  // 展示内容的签名：数据定时刷新会生成新数组，但内容没变时不能让滚动回到顶部，
+  // 否则需要滚动超过刷新间隔的长榜单永远看不到最后几行。只有内容真的变了才从头滚动。
+  const contentKey = useMemo(
+    () => JSON.stringify(groups.map((group) => [
+      group.key,
+      group.title,
+      group.rounds.map((round) => [round.id, round.round_no, round.title, round.prize_type, round.amount_each, round.winners]),
+    ])),
+    [groups],
+  );
+
   useEffect(() => {
     const viewport = viewportRef.current;
     const track = trackRef.current;
@@ -207,7 +218,7 @@ export default function WinnersView({ rounds, segmentLabels }) {
         }
       }
     };
-  }, [groups]);
+  }, [contentKey]);
 
   const columnCount = resolveColumnCount(groups.length);
 

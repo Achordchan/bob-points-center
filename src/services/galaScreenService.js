@@ -4,7 +4,7 @@
 // 版本变了的旧状态不再展示，读取时回到待机。
 // 滚动状态还记下开始滚动时本活动已有的最大轮次 ID：只有之后新抽出的轮次才自动揭晓，
 // 重试一次早已抽完的旧轮次（抽签接口幂等重放）不会打断正在进行的滚动。
-import { GalaError, GALA_DRAW_SEGMENTS, enterGalaVersionedWrite } from './galaService.js';
+import { GalaError, GALA_DRAW_SEGMENTS, enterGalaVersionedWrite, readGalaDataVersion } from './galaService.js';
 
 export const GALA_SCREEN_MODES = new Set(['idle', 'rolling', 'reveal', 'winners']);
 
@@ -98,6 +98,19 @@ export function getGalaScreenState(eventId, { currentDataVersion } = {}) {
     return toPublic(next);
   }
   return toPublic(existing);
+}
+
+// 状态接口用：读当前数据版本，据此作废恢复前的旧状态。
+// 读版本是异步的：读的同时可能有控制卡片按新版本写入了状态（或抽签揭晓）。只有读版本前后状态没被换过，
+// 才拿这次读到的版本去作废；换过就直接返回新状态——它写入时已在锁内核对过版本，不能被一次可能过时的读取覆盖。
+export async function readGalaScreenState(db, eventId) {
+  const id = toPositiveId(eventId);
+  if (!id) throw new GalaError('invalid_event_id', 400);
+  const observed = screenStates.get(id);
+  const currentDataVersion = await readGalaDataVersion(db);
+  const latest = screenStates.get(id);
+  if (latest !== observed) return toPublic(latest);
+  return getGalaScreenState(id, { currentDataVersion });
 }
 
 // expectedVersion：控制卡片读到数据时的 gala_version，必传。在恢复互斥的共享锁内核对，
