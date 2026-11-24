@@ -1,12 +1,16 @@
 // 年会管理端路由（挂载于 /admin/gala/*）。权限见 adminPermissionService.matchPathPermission：
 // GET → gala:view；抽签与发币 → gala:operate；其余写操作 → gala:edit；/gala/reserved/* 仅超级管理员。
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { requireAdminSession } from '../../middleware/requireAdminSession.js';
+import { getAdminAccess, hasAdminPermission } from '../../services/adminPermissionService.js';
 import { publishMallRealtimeEvent } from '../../services/mallRealtimeService.js';
 import {
   getGalaScreenState,
   revealRoundIfRolling,
   setGalaScreenState,
 } from '../../services/galaScreenService.js';
+import { getAdminSessionPayload } from './shared.js';
 import {
   GalaError,
   GALA_SEGMENTS,
@@ -69,7 +73,34 @@ function handle(fn) {
 // 全量恢复可能复用同一个活动/奖池/名额 ID，旧页面的请求不能落到恢复后的另一份数据上。
 const versionOf = (b) => parseGalaVersion(b?.gala_version);
 
+const galaScreenHtml = fileURLToPath(new URL('../../pages/admin-app-dist/screen.html', import.meta.url));
+
 export function registerAdminGalaRoutes(router) {
+  router.get('/gala/screen', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const redirectToLogin = () => res.redirect(302, `/admin/login?redirect=${encodeURIComponent(req.originalUrl || '/admin/gala/screen')}`);
+    let payload;
+    try {
+      payload = await getAdminSessionPayload(req);
+      if (!payload) return redirectToLogin();
+      const db = req.app?.locals?.db;
+      const cfg = req.app?.locals?.cfg;
+      const access = await getAdminAccess(db, cfg, payload);
+      if (!access?.ok || !hasAdminPermission(access, 'gala:view')) {
+        return redirectToLogin();
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[gala] screen auth error', err);
+      return res.status(500).type('text').send('internal_error');
+    }
+    req.adminSession = payload;
+    if (!existsSync(galaScreenHtml)) {
+      return res.status(503).type('text').send('大屏页面未构建');
+    }
+    return res.type('html').sendFile(galaScreenHtml);
+  });
+
   router.get('/gala/segments', requireAdminSession(), handle(async (_req, res) => {
     res.json({
       ok: true,

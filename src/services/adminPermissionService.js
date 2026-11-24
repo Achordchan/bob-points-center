@@ -201,10 +201,10 @@ export function matchPathPermission(method, path) {
   return m === 'GET' ? 'dashboard:view' : 'super';
 }
 
-function isPublicAdminPath(method, path) {
+export function isPublicAdminPath(method, path) {
   const m = String(method || 'GET').toUpperCase();
   const p = String(path || '');
-  return (m === 'GET' && ['/', '/login', '/auth', '/config', '/me', '/home', '/oauth/start', '/oauth/callback'].includes(p)) || (m === 'POST' && p === '/logout');
+  return (m === 'GET' && ['/', '/login', '/auth', '/config', '/me', '/home', '/gala/screen', '/oauth/start', '/oauth/callback'].includes(p)) || (m === 'POST' && p === '/logout');
 }
 
 export function adminAccessMiddleware() {

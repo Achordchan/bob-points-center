@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchPathPermission } from '../../src/services/adminPermissionService.js';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { isPublicAdminPath, matchPathPermission } from '../../src/services/adminPermissionService.js';
 import { GalaError } from '../../src/services/galaService.js';
 import {
   getGalaScreenState,
@@ -164,4 +166,30 @@ test('revealRoundIfRolling：idle 时返回 null 不变，rolling 切到 reveal 
   assert.equal(revealRoundIfRolling(91006, 402), null);
   assert.equal(getGalaScreenState(91006).version, 3);
   assert.equal(getGalaScreenState(91006).round_id, 402);
+});
+
+test('isPublicAdminPath：仅 GET /gala/screen 放行给路由自校验，POST 与 /gala/screen/state 不公开', () => {
+  assert.equal(isPublicAdminPath('GET', '/gala/screen'), true);
+  assert.equal(isPublicAdminPath('get', '/gala/screen'), true);
+  assert.equal(isPublicAdminPath('POST', '/gala/screen'), false);
+  assert.equal(isPublicAdminPath('post', '/gala/screen'), false);
+  assert.equal(isPublicAdminPath('GET', '/gala/screen/state'), false);
+  assert.equal(isPublicAdminPath('POST', '/gala/screen/state'), false);
+});
+
+test('GET /gala/screen 路由处理器自校验 gala:view 并在未登录/无权限时跳转 /admin/login', () => {
+  const routesPath = fileURLToPath(new URL('../../src/routes/admin/galaRoutes.js', import.meta.url));
+  const src = fs.readFileSync(routesPath, 'utf8');
+  const start = src.indexOf("router.get('/gala/screen'");
+  assert.ok(start >= 0, '缺少 GET /gala/screen 路由');
+  const end = src.indexOf("router.get('/gala/segments'", start);
+  const handlerSrc = end > start ? src.slice(start, end) : src.slice(start);
+
+  assert.match(handlerSrc, /getAdminSessionPayload/);
+  assert.match(handlerSrc, /getAdminAccess/);
+  assert.match(handlerSrc, /hasAdminPermission\([^)]*['"]gala:view['"]/);
+  assert.match(handlerSrc, /\/admin\/login\?redirect=/);
+  assert.match(handlerSrc, /Cache-Control.*no-store/);
+  assert.match(handlerSrc, /503/);
+  assert.match(handlerSrc, /大屏页面未构建/);
 });
