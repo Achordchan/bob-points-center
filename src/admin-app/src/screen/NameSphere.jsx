@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { SPHERE_CARD_BASE_FONT_PX, computeSphereNameFit } from './nameFit.js';
 
 const MAX_SPHERE_CARDS = 120;
 const SWAP_INTERVAL_MS = 2500;
@@ -14,46 +15,12 @@ const REDUCED_SPEED_RPS = 0.08;
 const RAMP_START_FACTOR = 0.12;
 const DEFAULT_RADIUS_PX = 420;
 const SPHERE_DEPTH_OFFSET_PX = 320;
-const SPHERE_CARD_BASE_FONT_PX = 28;
-const SPHERE_CARD_INNER_WIDTH_PX = 124;
-const SPHERE_CARD_MIN_FONT_PX = 12;
 const DEFAULT_DECELERATE_MS = 1200;
 const REDUCED_DECELERATE_MS = 240;
 const GOLDEN_ANGLE_RAD = Math.PI * (3 - Math.sqrt(5));
 const RAD_TO_DEG = 180 / Math.PI;
 const NORMAL_TILT_AMP_DEG = 6;
 const REDUCED_TILT_AMP_DEG = 3;
-
-function estimateSphereNameUnits(text) {
-  let units = 0;
-  for (const ch of text) {
-    const code = ch.codePointAt(0) || 0;
-    if (code <= 0x7f) {
-      units += code >= 0x41 && code <= 0x5a ? 0.78 : 0.62;
-    } else {
-      units += 1.04;
-    }
-  }
-  return Math.max(1, units);
-}
-
-// 大屏最小字号规范为 28px；球面卡片尺寸固定为 140×56，此处是唯一允许低于 28px 的情况：
-// 仅当名字 ≥5 个字且 28px 放不下时按比例缩小到刚好放下，不允许使用省略号。
-function computeSphereCardFontSize(name) {
-  const text = String(name || '').trim();
-  const charCount = Array.from(text).length;
-  if (charCount < 5) {
-    return SPHERE_CARD_BASE_FONT_PX;
-  }
-  const units = estimateSphereNameUnits(text);
-  if (units * SPHERE_CARD_BASE_FONT_PX <= SPHERE_CARD_INNER_WIDTH_PX) {
-    return SPHERE_CARD_BASE_FONT_PX;
-  }
-  return Math.max(
-    SPHERE_CARD_MIN_FONT_PX,
-    Math.floor(SPHERE_CARD_INNER_WIDTH_PX / units),
-  );
-}
 
 function getReducedMotionPreference() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -381,8 +348,11 @@ export default function NameSphere({
         <div ref={sphereRef} className="gs-sphere-body">
           {slots.map((slot, idx) => {
             const name = safeNames[activeIndices[idx]] || '';
-            const fontSize = computeSphereCardFontSize(name);
-            const textStyle = fontSize < SPHERE_CARD_BASE_FONT_PX ? { fontSize: `${fontSize}px` } : undefined;
+            const fit = computeSphereNameFit(name);
+            const textClass = fit.lines > 1 ? 'gs-sphere-card-text gs-sphere-card-text-wrap' : 'gs-sphere-card-text';
+            const textStyle = fit.lines > 1
+              ? { fontSize: `${fit.fontSize}px`, WebkitLineClamp: fit.lines }
+              : fit.fontSize < SPHERE_CARD_BASE_FONT_PX ? { fontSize: `${fit.fontSize}px` } : undefined;
             return (
               <div
                 key={slot.key}
@@ -396,10 +366,10 @@ export default function NameSphere({
                   }}
                 >
                   <div className="gs-sphere-card-face gs-sphere-card-front">
-                    <span className="gs-sphere-card-text" style={textStyle}>{name}</span>
+                    <span className={textClass} style={textStyle}>{name}</span>
                   </div>
                   <div className="gs-sphere-card-face gs-sphere-card-back" aria-hidden="true">
-                    <span className="gs-sphere-card-text" style={textStyle}>{name}</span>
+                    <span className={textClass} style={textStyle}>{name}</span>
                   </div>
                 </div>
               </div>

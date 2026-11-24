@@ -429,3 +429,24 @@ test('揭晓名字卡：超长名字最小字号单行放不下时折行且放�
   }
   assert.equal(computeCardNameFit('Christopher Alexander Montgomery-Williams', layouts[0]).lines > 1, true, '密集网格里的超长名字必须折行');
 });
+
+test('滚动球体名字卡：常规名字单行，12px 单行放不下的超长名字折行且放得进 140×56 卡片', async () => {
+  const {
+    computeSphereNameFit, estimateSphereNameUnits, NAME_LINE_HEIGHT,
+    SPHERE_CARD_INNER_WIDTH_PX, SPHERE_CARD_INNER_HEIGHT_PX, SPHERE_CARD_MIN_FONT_PX, SPHERE_CARD_BASE_FONT_PX,
+  } = await import('../../src/admin-app/src/screen/nameFit.js');
+  assert.deepEqual(computeSphereNameFit('张三'), { fontSize: SPHERE_CARD_BASE_FONT_PX, lines: 1 });
+  for (const name of ['欧阳娜娜子', 'Maria Garcia', 'Jonathan Smith']) {
+    const fit = computeSphereNameFit(name);
+    assert.equal(fit.lines, 1, name);
+    assert.ok(fit.fontSize >= SPHERE_CARD_MIN_FONT_PX);
+    assert.ok(fit.fontSize * estimateSphereNameUnits(name) <= SPHERE_CARD_INNER_WIDTH_PX, name);
+  }
+  for (const name of ['Christopher Alexander Montgomery-Williams', 'Maximilian Bartholomew Featherstone']) {
+    const fit = computeSphereNameFit(name);
+    assert.ok(fit.lines > 1, name);
+    assert.ok(fit.fontSize >= SPHERE_CARD_MIN_FONT_PX);
+    assert.ok(fit.fontSize * estimateSphereNameUnits(name) <= SPHERE_CARD_INNER_WIDTH_PX * fit.lines, `${name} 宽度放得下`);
+    assert.ok(fit.lines * fit.fontSize * NAME_LINE_HEIGHT <= SPHERE_CARD_INNER_HEIGHT_PX, `${name} 高度放得下`);
+  }
+});

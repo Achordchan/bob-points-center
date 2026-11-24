@@ -84,3 +84,48 @@ export function computeCardNameFit(name, layout) {
   }
   return { fontSize: Math.max(WRAP_MIN_FONT_PX, best.fontSize), lines: best.lines };
 }
+
+// ---------------------------------------------------------------- 滚动球体上的名字卡（固定 140×56）
+
+export const SPHERE_CARD_BASE_FONT_PX = 28;
+export const SPHERE_CARD_INNER_WIDTH_PX = 124;
+export const SPHERE_CARD_INNER_HEIGHT_PX = 52;
+export const SPHERE_CARD_MIN_FONT_PX = 12;
+
+export function estimateSphereNameUnits(text) {
+  let units = 0;
+  for (const ch of String(text || '').trim()) {
+    const code = ch.codePointAt(0) || 0;
+    if (code <= 0x7f) {
+      units += code >= 0x41 && code <= 0x5a ? 0.78 : 0.62;
+    } else {
+      units += 1.04;
+    }
+  }
+  return Math.max(1, units);
+}
+
+// 大屏最小字号规范为 28px；球面卡片尺寸固定，这里是唯一允许低于 28px 的情况：
+// 名字 ≥5 个字且 28px 放不下时按比例缩小到刚好放下，不使用省略号。
+// 缩到 12px 单行仍放不下的超长名字（如长英文全名）折成 2–3 行，返回 { fontSize, lines }。
+export function computeSphereNameFit(name) {
+  const text = String(name || '').trim();
+  const charCount = Array.from(text).length;
+  if (charCount < 5) return { fontSize: SPHERE_CARD_BASE_FONT_PX, lines: 1 };
+  const units = estimateSphereNameUnits(text);
+  if (units * SPHERE_CARD_BASE_FONT_PX <= SPHERE_CARD_INNER_WIDTH_PX) {
+    return { fontSize: SPHERE_CARD_BASE_FONT_PX, lines: 1 };
+  }
+  const single = Math.floor(SPHERE_CARD_INNER_WIDTH_PX / units);
+  if (single >= SPHERE_CARD_MIN_FONT_PX) return { fontSize: single, lines: 1 };
+
+  let best = { fontSize: 0, lines: 2 };
+  for (let lines = 2; lines <= WRAP_MAX_LINES; lines += 1) {
+    const byWidth = Math.floor((SPHERE_CARD_INNER_WIDTH_PX * lines * WRAP_WIDTH_SLACK) / units);
+    const byHeight = Math.floor(SPHERE_CARD_INNER_HEIGHT_PX / (lines * NAME_LINE_HEIGHT));
+    const size = Math.min(SPHERE_CARD_BASE_FONT_PX, byWidth, byHeight);
+    if (size > best.fontSize) best = { fontSize: size, lines };
+  }
+  // 再长的名字也不低于可读下限；行数截断 + 溢出隐藏保证不越出卡片。
+  return { fontSize: Math.max(SPHERE_CARD_MIN_FONT_PX, best.fontSize), lines: best.lines };
+}

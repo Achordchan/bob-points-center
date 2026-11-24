@@ -305,8 +305,11 @@ export function useScreenData() {
       if (!disposed) void refreshState();
     }, STATE_POLL_INTERVAL_MS);
 
+    // 名单增减没有实时事件：定时刷新名单时一并刷新活动详情（参与人数等），免得待机页人数一直停在旧值。
     const participantsTimer = setInterval(() => {
-      if (!disposed) void refreshParticipants();
+      if (disposed) return;
+      void refreshParticipants();
+      void refreshEvent();
     }, PARTICIPANTS_REFRESH_INTERVAL_MS);
 
     return () => {

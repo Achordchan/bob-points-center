@@ -725,6 +725,19 @@ body,
   white-space: nowrap;
 }
 
+/* 12px 单行仍放不下的超长名字：在卡片内折行，行数由内联 -webkit-line-clamp 给出，溢出隐藏兜底。 */
+.gs-sphere-card-text-wrap {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: center;
+  line-height: 1.18;
+  letter-spacing: 0;
+}
+
 .gs-sphere-card-front {
   transform: rotateY(0deg) translateZ(0.5px);
   border: 1px solid rgba(var(--gs-gold-1-rgb), 0.4);
