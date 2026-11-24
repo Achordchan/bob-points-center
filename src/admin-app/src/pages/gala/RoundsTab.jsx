@@ -15,6 +15,7 @@ import { hasPermission } from '../../permissions.js';
 import { amountText } from '../../utils.js';
 import DrawModal from './DrawModal.jsx';
 import { galaErrorText } from './errors.js';
+import ScreenControlCard from './ScreenControlCard.jsx';
 import {
   clearPendingDrawIfMatch,
   isAmbiguousDrawError,
@@ -559,6 +560,7 @@ export default function RoundsTab({
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
+      <ScreenControlCard eventId={eventId} me={me} segments={segments} rounds={rounds} />
       {pendingDraw && (
         <Alert
           type="warning"
