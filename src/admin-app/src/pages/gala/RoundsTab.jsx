@@ -93,6 +93,7 @@ export default function RoundsTab({
     if (!eventId) return;
     const seq = ++requestSeqRef.current;
     setLoading(true);
+    setLoadingMore(false);
     try {
       const resp = await api(`/admin/gala/rounds?${qs({ event_id: eventId, limit: PAGE_SIZE })}`);
       if (seq !== requestSeqRef.current) return;

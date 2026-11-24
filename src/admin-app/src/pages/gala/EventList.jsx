@@ -37,6 +37,7 @@ export default function EventList({ canEdit, onSelectEvent }) {
   const loadEvents = useCallback(async () => {
     const seq = ++requestSeqRef.current;
     setLoading(true);
+    setLoadingMore(false);
     try {
       const resp = await api(`/admin/gala/events?${qs({ limit: PAGE_SIZE })}`);
       if (seq !== requestSeqRef.current) return;

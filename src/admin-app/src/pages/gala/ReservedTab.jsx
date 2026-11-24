@@ -129,6 +129,7 @@ export default function ReservedTab({
     if (!isSuperAdmin || !eventId) return;
     const seq = ++requestSeqRef.current;
     setSlotsLoading(true);
+    setLoadingMore(false);
     try {
       const resp = await api(`/admin/gala/reserved?${qs({ event_id: eventId, limit: PAGE_SIZE })}`);
       if (seq !== requestSeqRef.current) return;
