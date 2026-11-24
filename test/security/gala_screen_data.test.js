@@ -10,6 +10,8 @@ import {
   fetchAllParticipantNames,
   fetchAllRounds,
   fetchAllRoundsVersioned,
+  fetchAllParticipantNamesVersioned,
+  fetchEventDetailVersioned,
   fetchEventDetail,
   fetchScreenState,
   fetchSegmentLabels,
@@ -449,4 +451,27 @@ test('滚动球体名字卡：常规名字单行，12px 单行放不下的超长
     assert.ok(fit.fontSize * estimateSphereNameUnits(name) <= SPHERE_CARD_INNER_WIDTH_PX * fit.lines, `${name} 宽度放得下`);
     assert.ok(fit.lines * fit.fontSize * NAME_LINE_HEIGHT <= SPHERE_CARD_INNER_HEIGHT_PX, `${name} 高度放得下`);
   }
+});
+
+test('名单与活动详情的版本化拉取：给出数据版本，名单翻页途中版本变化整批作废', async () => {
+  const VA = '77777777-7777-4777-8777-777777777777';
+  const VB = '88888888-8888-4888-8888-888888888888';
+  const makeFetch = (secondPageVersion) => async (url) => {
+    if (url.startsWith('/admin/gala/events/detail?')) {
+      return { ok: true, status: 200, async json() { return { ok: true, data: { title: '年会', gala_version: VA, participant_count: 3 } }; } };
+    }
+    const u = new URL(url, 'http://localhost');
+    const page = u.searchParams.get('after_id')
+      ? [{ id: PARTICIPANTS_PAGE_SIZE + 1, name: '压轴', gala_version: secondPageVersion }]
+      : Array.from({ length: PARTICIPANTS_PAGE_SIZE }, (_, i) => ({ id: i + 1, name: `员工${i + 1}`, gala_version: VA }));
+    return { ok: true, status: 200, async json() { return { ok: true, data: page }; } };
+  };
+  const ok = await fetchAllParticipantNamesVersioned(7, makeFetch(VA));
+  assert.equal(ok.dataVersion, VA);
+  assert.equal(ok.names.length, PARTICIPANTS_PAGE_SIZE + 1);
+  await assert.rejects(() => fetchAllParticipantNamesVersioned(7, makeFetch(VB)), /participants_version_changed/);
+
+  const ev = await fetchEventDetailVersioned(7, makeFetch(VA));
+  assert.equal(ev.dataVersion, VA);
+  assert.equal('gala_version' in ev.event, false, '活动本身仍按白名单取字段');
 });

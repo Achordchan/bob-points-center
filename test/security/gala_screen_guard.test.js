@@ -354,14 +354,15 @@ test('10. 大屏只在轮次与状态属于同一份数据时认定轮次已加�
 test('11. 大屏首次加载版本不一致会重拉轮次；SSE 不可用时状态轮询带着刷新轮次与活动，切到中奖榜也会拉最新轮次', () => {
   const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
   const stateHandler = hookCode.slice(hookCode.indexOf('refreshState = createRefresh('), hookCode.indexOf('const refreshSegments'));
-  assert.match(stateHandler, /roundsStale\s*=\s*roundsDataVersion !== null[\s\S]*?roundsDataVersion !== next\.data_version/);
+  assert.match(stateHandler, /isStale = \(v\) => v !== null && next\.data_version !== null && v !== next\.data_version/);
+  assert.match(stateHandler, /roundsStale = isStale\(roundsDataVersion\)/);
   assert.match(stateHandler, /polling\s*=\s*!initial && !sseOpen/);
   assert.match(stateHandler, /enteredWinners\s*=\s*!initial && next\.mode === 'winners'/);
   assert.match(stateHandler, /if \(dataChanged \|\| roundsStale \|\| enteredWinners \|\| polling\) void refreshRounds\(\)/);
-  assert.match(stateHandler, /if \(dataChanged \|\| polling\) void refreshEvent\(\)/);
+  assert.match(stateHandler, /if \(dataChanged \|\| eventStale \|\| polling\) void refreshEvent\(\)/);
   assert.match(hookCode, /sseOpen = true;/, 'SSE 连上时必须记下');
   assert.match(hookCode, /sseOpen = false;/, 'SSE 出错时必须记下');
-  assert.match(hookCode, /lastRoundsReconcileKey/, '轮次触发的状态对账必须防止来回打转');
+  assert.match(hookCode, /reconcileKeys\.get\(dataset\) === key/, '数据集触发的状态对账必须防止来回打转');
 });
 
 test('12. 荣耀榜滚动只在展示内容变化时重置；大屏首次连上 SSE 也补拉一次', () => {
@@ -419,4 +420,15 @@ test('16. 荣耀榜中奖人名字限制在轮次卡片宽度内，超长名字�
   assert.match(rule, /white-space:\s*normal/);
   assert.match(rule, /overflow-wrap:\s*break-word/);
   assert.doesNotMatch(rule, /white-space:\s*nowrap/);
+});
+
+test('17. 名单与活动详情同样按数据版本核对：分页版本一致才用，与状态版本不一致时重拉', () => {
+  const hook = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
+  assert.match(hook, /fetchAllParticipantNamesVersioned\(/);
+  assert.match(hook, /fetchEventDetailVersioned\(/);
+  assert.match(hook, /reconcileWithState\('names', next\.dataVersion\)/);
+  assert.match(hook, /reconcileWithState\('event', next\.dataVersion\)/);
+  assert.match(hook, /reconcileWithState\('rounds', next\.dataVersion\)/);
+  assert.match(hook, /if \(dataChanged \|\| namesStale\) void refreshParticipants\(\)/);
+  assert.match(hook, /if \(dataChanged \|\| eventStale \|\| polling\) void refreshEvent\(\)/);
 });

@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_SCREEN_STATE,
   createSingleFlight,
-  fetchAllParticipantNames,
+  fetchAllParticipantNamesVersioned,
   fetchAllRoundsVersioned,
-  fetchEventDetail,
+  fetchEventDetailVersioned,
   fetchScreenState,
   fetchSegmentLabels,
   parseEventId,
@@ -61,7 +61,8 @@ export function useScreenData() {
     const knownRoundIds = new Set();
     let roundsDataVersion = null;
     let latestDataVersion = null;
-    let lastRoundsReconcileKey = null;
+    let namesDataVersion = null;
+    let eventDataVersion = null;
     let roundsSignature = null;
     let roundsSignatureVersion = null;
     let lastStateVersion = null;
@@ -116,18 +117,35 @@ export function useScreenData() {
       knownRoundIds.has(roundId) && roundsDataVersion === latestDataVersion
     );
 
+    // 先声明，各数据集发现版本与大屏状态不一致时要顺手刷新状态。
+    let refreshState = () => Promise.resolve();
+
+    // 某个数据集（活动、名单、轮次）读到的版本与最近一次状态的版本不一致：再读一次状态，让两边对上。
+    // 每个数据集同一对版本只追一次：持续不一致时不会在两个请求之间来回打转，之后由状态读取按版本补拉收敛。
+    const reconcileKeys = new Map();
+    const reconcileWithState = (dataset, dataVersion) => {
+      if (dataVersion === null || dataVersion === latestDataVersion) return;
+      const key = `${dataVersion}|${latestDataVersion}`;
+      if (reconcileKeys.get(dataset) === key) return;
+      reconcileKeys.set(dataset, key);
+      void refreshState();
+    };
+
     const refreshEvent = createRefresh(async () => {
-      const next = await fetchEventDetail(eventId);
-      if (!disposed) setEvent(next);
+      const next = await fetchEventDetailVersioned(eventId);
+      if (disposed) return;
+      eventDataVersion = next.dataVersion;
+      setEvent(next.event);
+      reconcileWithState('event', next.dataVersion);
     });
 
     const refreshParticipants = createRefresh(async () => {
-      const next = await fetchAllParticipantNames(eventId);
-      if (!disposed) setNames(next);
+      const next = await fetchAllParticipantNamesVersioned(eventId);
+      if (disposed) return;
+      namesDataVersion = next.dataVersion;
+      setNames(next.names);
+      reconcileWithState('names', next.dataVersion);
     });
-
-    // 先声明，refreshRounds 发现版本与大屏状态不一致时要顺手刷新状态。
-    let refreshState = () => Promise.resolve();
 
     const refreshRounds = createRefresh(async () => {
       const next = await fetchAllRoundsVersioned(eventId);
@@ -144,15 +162,8 @@ export function useScreenData() {
         roundsSignatureVersion = next.dataVersion;
         setRoundsData({ list: next.rounds, dataVersion: next.dataVersion });
       }
-      // 轮次与状态版本不一致：再读一次状态，让两边对上；空列表没有版本，不算不一致。
-      // 同一对版本只追一次：持续不一致时不会在两个请求之间来回打转，之后由状态轮询（每次都会补拉轮次）收敛。
-      if (next.dataVersion !== null && next.dataVersion !== latestDataVersion) {
-        const key = `${next.dataVersion}|${latestDataVersion}`;
-        if (key !== lastRoundsReconcileKey) {
-          lastRoundsReconcileKey = key;
-          void refreshState();
-        }
-      }
+      // 空列表没有版本，不算不一致。
+      reconcileWithState('rounds', next.dataVersion);
     });
 
     // 每次停止或换轮都换一个令牌：旧循环醒来发现令牌不对就退出，同一时刻只有一个补拉循环。
@@ -197,21 +208,22 @@ export function useScreenData() {
       lastStateVersion = next.version;
       setState(next);
       const dataChanged = prevVersion !== null && next.data_version !== null && next.data_version !== prevVersion;
-      // 已缓存的轮次与状态不是同一份数据（如首次加载时轮次读到恢复前、状态读到恢复后）。
-      const roundsStale = roundsDataVersion !== null && next.data_version !== null && roundsDataVersion !== next.data_version;
+      // 已缓存的数据与状态不是同一份数据（如首次加载时它们读到恢复前、状态读到恢复后）：分别重拉。
+      const isStale = (v) => v !== null && next.data_version !== null && v !== next.data_version;
+      const roundsStale = isStale(roundsDataVersion);
+      const namesStale = isStale(namesDataVersion);
+      const eventStale = isStale(eventDataVersion);
       // 首次加载时 refreshAll 已在拉轮次和活动，下面两种补拉从第二次读取状态起才需要。
       const initial = prevStateVersion === null;
       // 切到中奖榜（状态有变化）时拉一次最新轮次，免得显示旧榜单。
       const enteredWinners = !initial && next.mode === 'winners' && next.version !== prevStateVersion;
       const polling = !initial && !sseOpen;
-      if (dataChanged) {
-        // 做过全量恢复：已缓存的活动、名单都可能属于旧数据，全部重拉；进行中的补拉作废。
-        stopRoundBackfill();
-        void refreshParticipants();
-      }
+      // 做过全量恢复：已缓存的活动、名单都可能属于旧数据，全部重拉；进行中的补拉作废。
+      if (dataChanged) stopRoundBackfill();
+      if (dataChanged || namesStale) void refreshParticipants();
       // 没有实时推送（SSE 断开、浏览器不支持或连接数满）时，轮次和活动只能靠这里的轮询跟上。
       if (dataChanged || roundsStale || enteredWinners || polling) void refreshRounds();
-      if (dataChanged || polling) void refreshEvent();
+      if (dataChanged || eventStale || polling) void refreshEvent();
       if (next.mode === 'reveal' && next.round_id && !isRoundLoaded(next.round_id)) {
         startRoundBackfill(next.round_id);
       } else {

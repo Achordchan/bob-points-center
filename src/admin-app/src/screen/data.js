@@ -10,6 +10,24 @@ export function pickDataVersion(value) {
   return typeof value === 'string' && DATA_VERSION_RE.test(value) ? value : null;
 }
 
+// 分页拉取时核对每条记录的数据版本：全部一致才返回这个版本，出现不一致就抛错（翻页途中做过全量恢复）。
+function createPageVersionCheck(errorCode) {
+  let seen = false;
+  let version = null;
+  return {
+    check(raw) {
+      const v = pickDataVersion(raw);
+      if (!seen) {
+        seen = true;
+        version = v;
+      } else if (v !== version) {
+        throw new Error(errorCode);
+      }
+    },
+    value: () => version,
+  };
+}
+
 export const PARTICIPANTS_PAGE_SIZE = 500;
 export const ROUNDS_PAGE_SIZE = 200;
 
@@ -177,19 +195,26 @@ export async function fetchScreenJson(url, fetchImpl = globalThis.fetch) {
   return body.data;
 }
 
-export async function fetchEventDetail(eventId, fetchImpl = globalThis.fetch) {
+export async function fetchEventDetailVersioned(eventId, fetchImpl = globalThis.fetch) {
   const id = toPositiveInt(eventId);
   if (!id) throw new Error('invalid_event_id');
   const data = await fetchScreenJson(`/admin/gala/events/detail?id=${encodeURIComponent(id)}`, fetchImpl);
   const picked = pickEvent(data);
   if (!picked) throw new Error('invalid_event_data');
-  return picked;
+  return { event: picked, dataVersion: pickDataVersion(data?.gala_version) };
 }
 
-export async function fetchAllParticipantNames(eventId, fetchImpl = globalThis.fetch) {
+export async function fetchEventDetail(eventId, fetchImpl = globalThis.fetch) {
+  return (await fetchEventDetailVersioned(eventId, fetchImpl)).event;
+}
+
+// 拉全部参与人名字，并给出所属数据版本（每页与名单同一快照读出）。
+// 各页版本不一致说明翻页途中做过全量恢复，拼出来的名单混了两份数据：整批作废，交给调用方重试。
+export async function fetchAllParticipantNamesVersioned(eventId, fetchImpl = globalThis.fetch) {
   const id = toPositiveInt(eventId);
   if (!id) throw new Error('invalid_event_id');
   const names = [];
+  const versions = createPageVersionCheck('participants_version_changed');
   let afterId = 0;
   while (true) {
     const qs = afterId > 0
@@ -199,6 +224,7 @@ export async function fetchAllParticipantNames(eventId, fetchImpl = globalThis.f
     if (!Array.isArray(page)) throw new Error('invalid_participants_data');
     if (page.length === 0) break;
     for (const item of page) {
+      versions.check(item?.gala_version);
       const name = pickParticipantName(item);
       if (name) names.push(name);
     }
@@ -207,7 +233,11 @@ export async function fetchAllParticipantNames(eventId, fetchImpl = globalThis.f
     if (!lastId || lastId <= afterId) break;
     afterId = lastId;
   }
-  return names;
+  return { names, dataVersion: versions.value() };
+}
+
+export async function fetchAllParticipantNames(eventId, fetchImpl = globalThis.fetch) {
+  return (await fetchAllParticipantNamesVersioned(eventId, fetchImpl)).names;
 }
 
 // 拉全部轮次，并给出这批轮次所属的数据版本（每页与轮次同一快照读出）。
@@ -216,8 +246,7 @@ export async function fetchAllRoundsVersioned(eventId, fetchImpl = globalThis.fe
   const id = toPositiveInt(eventId);
   if (!id) throw new Error('invalid_event_id');
   const byId = new Map();
-  let dataVersion = null;
-  let versionSeen = false;
+  const versions = createPageVersionCheck('rounds_version_changed');
   let beforeId = null;
   while (true) {
     const qs = beforeId !== null
@@ -229,13 +258,7 @@ export async function fetchAllRoundsVersioned(eventId, fetchImpl = globalThis.fe
     for (const item of page) {
       const picked = pickRound(item);
       if (!picked) continue;
-      const itemVersion = pickDataVersion(item?.gala_version);
-      if (!versionSeen) {
-        versionSeen = true;
-        dataVersion = itemVersion;
-      } else if (itemVersion !== dataVersion) {
-        throw new Error('rounds_version_changed');
-      }
+      versions.check(item?.gala_version);
       byId.set(picked.id, picked);
     }
     if (page.length < ROUNDS_PAGE_SIZE) break;
@@ -243,7 +266,7 @@ export async function fetchAllRoundsVersioned(eventId, fetchImpl = globalThis.fe
     if (!lastId || (beforeId !== null && lastId >= beforeId)) break;
     beforeId = lastId;
   }
-  return { rounds: Array.from(byId.values()).sort((a, b) => a.id - b.id), dataVersion };
+  return { rounds: Array.from(byId.values()).sort((a, b) => a.id - b.id), dataVersion: versions.value() };
 }
 
 export async function fetchAllRounds(eventId, fetchImpl = globalThis.fetch) {
