@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
 import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { App as AntApp, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import { api } from '../../api.js';
 import { galaErrorText, isGalaVersionError } from './errors.js';
+
+dayjs.extend(customParseFormat);
 
 export const EVENT_STATUS_LABELS = {
   draft: '草稿',
@@ -22,8 +25,8 @@ export const EVENT_STATUS_OPTIONS = Object.entries(EVENT_STATUS_LABELS).map(([va
 }));
 
 function parseEventDate(value) {
-  if (!value) return null;
-  const parsed = dayjs(value, 'YYYY-MM-DD');
+  if (typeof value !== 'string' || !value) return null;
+  const parsed = dayjs(value, 'YYYY-MM-DD', true);
   return parsed.isValid() ? parsed : null;
 }
 
@@ -40,6 +43,8 @@ export default function EventFormModal({
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(event?.id);
+  const rawEventDate = isEdit && typeof event?.event_date === 'string' ? event.event_date : '';
+  const hasNonStandardEventDate = Boolean(rawEventDate.trim()) && !parseEventDate(rawEventDate);
 
   useEffect(() => {
     if (!open) return;
@@ -77,26 +82,32 @@ export default function EventFormModal({
     try {
       const baseBody = {
         title: String(values.title || '').trim(),
-        event_date: values.event_date ? values.event_date.format('YYYY-MM-DD') : null,
         total_budget: Number(values.total_budget ?? 0),
         enabled_segments: Array.isArray(values.enabled_segments) ? values.enabled_segments : [],
       };
       if (isEdit) {
+        const body = {
+          ...baseBody,
+          id: event.id,
+          status: values.status,
+          gala_version: event.gala_version,
+        };
+        if (form.isFieldTouched('event_date')) {
+          body.event_date = values.event_date ? values.event_date.format('YYYY-MM-DD') : null;
+        }
         const resp = await api('/admin/gala/events/update', {
           method: 'POST',
-          body: {
-            ...baseBody,
-            id: event.id,
-            status: values.status,
-            gala_version: event.gala_version,
-          },
+          body,
         });
         message.success('年会活动已更新');
         onSuccess?.(resp?.data || null);
       } else {
         const resp = await api('/admin/gala/events/create', {
           method: 'POST',
-          body: baseBody,
+          body: {
+            ...baseBody,
+            event_date: values.event_date ? values.event_date.format('YYYY-MM-DD') : null,
+          },
         });
         message.success('年会活动已创建');
         onSuccess?.(resp?.data || null);
@@ -151,7 +162,11 @@ export default function EventFormModal({
           <Input placeholder="例如：2026 公司年会" maxLength={80} />
         </Form.Item>
 
-        <Form.Item name="event_date" label="活动日期">
+        <Form.Item
+          name="event_date"
+          label="活动日期"
+          extra={hasNonStandardEventDate ? `当前值：${rawEventDate}，未修改则保持不变` : undefined}
+        >
           <DatePicker format="YYYY-MM-DD" style={{ width: '100%' }} placeholder="请选择活动日期（可选）" allowClear />
         </Form.Item>
 
