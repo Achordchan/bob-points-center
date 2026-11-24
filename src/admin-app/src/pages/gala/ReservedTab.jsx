@@ -19,7 +19,6 @@ import { api, qs } from '../../api.js';
 import { amountText, formatTs, localTablePagination } from '../../utils.js';
 
 const PAGE_SIZE = 100;
-const MAX_RESERVED_SLOTS = 3;
 const PG_INT_MAX = 2147483647;
 const MAX_NOTE_LENGTH = 200;
 
@@ -28,6 +27,28 @@ const SLOT_STATUS_META = {
   used: { label: '已用', color: 'green' },
   cancelled: { label: '已取消', color: 'default' },
 };
+
+function readReservedSlotQuota(eventDetail) {
+  const used = eventDetail?.reserved_slots_used;
+  const limit = eventDetail?.reserved_slots_limit;
+  const valid = (
+    typeof used === 'number'
+    && Number.isSafeInteger(used)
+    && used >= 0
+    && typeof limit === 'number'
+    && Number.isSafeInteger(limit)
+    && limit >= 0
+  );
+  if (!valid) {
+    return { valid: false, used: null, limit: null, atLimit: false };
+  }
+  return {
+    valid: true,
+    used,
+    limit,
+    atLimit: used >= limit,
+  };
+}
 
 function normalizeNextRoundNos(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -123,11 +144,8 @@ export default function ReservedTab({
   const reservedPoolsRef = useRef(reservedPools);
   reservedPoolsRef.current = reservedPools;
 
-  const activeSlotCount = useMemo(
-    () => slots.filter((slot) => slot?.status !== 'cancelled').length,
-    [slots],
-  );
-  const atSlotLimit = activeSlotCount >= MAX_RESERVED_SLOTS;
+  const slotQuota = useMemo(() => readReservedSlotQuota(detail), [detail]);
+  const canCreateSlot = slotQuota.valid && !slotQuota.atLimit;
 
   const loadSlots = useCallback(async () => {
     if (!isSuperAdmin || !eventId) return;
@@ -314,6 +332,12 @@ export default function ReservedTab({
         segmentsLoadFailed && loadSegments ? loadSegments() : Promise.resolve(),
       ]);
       if (!latestDetail) return;
+      const latestQuota = readReservedSlotQuota(latestDetail);
+      if (!latestQuota.valid) return;
+      if (latestQuota.atLimit) {
+        message.warning('预留名额已达上限');
+        return;
+      }
       const normalized = normalizeNextRoundNos(latestDetail.next_round_nos);
       nextRoundNosRef.current = normalized;
       setNextRoundNos(normalized);
@@ -564,19 +588,27 @@ export default function ReservedTab({
               预留名额
             </Typography.Title>
             <Typography.Text type="secondary">
-              已占名额 {activeSlotCount} / {MAX_RESERVED_SLOTS}（待用与已用合计上限 {MAX_RESERVED_SLOTS} 个）
+              {slotQuota.valid
+                ? `已占名额 ${slotQuota.used} / ${slotQuota.limit}（待用与已用合计上限 ${slotQuota.limit} 个）`
+                : '已占名额 - / -'}
             </Typography.Text>
-            {atSlotLimit && <Tag color="orange">已达上限</Tag>}
+            {slotQuota.valid && slotQuota.atLimit && <Tag color="orange">已达上限</Tag>}
           </Space>
           <Space>
-            <Button onClick={loadSlots} loading={slotsLoading}>
+            <Button
+              onClick={() => {
+                loadSlots();
+                reload();
+              }}
+              loading={slotsLoading}
+            >
               刷新名额
             </Button>
             <Button
               type="primary"
               onClick={openCreateSlot}
               loading={openingSlotModal}
-              disabled={atSlotLimit || openingSlotModal}
+              disabled={!canCreateSlot || openingSlotModal}
             >
               新建预留名额
             </Button>
@@ -677,7 +709,7 @@ export default function ReservedTab({
             segmentsLoadFailed
             || drawableSegments.length === 0
             || reservedPools.length === 0
-            || atSlotLimit
+            || !canCreateSlot
             || slotRoundNoExhausted,
         }}
         width={540}

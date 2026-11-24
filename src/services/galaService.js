@@ -478,7 +478,7 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     pools_allocated: publicPools.reduce((s, p) => s + p.allocated, 0),
   };
   if (includeReserved) budgetSummary.pools_spent = publicPools.reduce((s, p) => s + p.spent, 0);
-  return {
+  const detail = {
     ...serializeEvent(event),
     pools: visiblePools,
     budget_summary: budgetSummary,
@@ -488,6 +488,15 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     // 本活动所有写接口（改活动、奖池、名单、抽签、预留）都要原样带回，见 inTx。
     gala_version: await readGalaVersion(db),
   };
+  if (includeReserved) {
+    const reservedCount = await db.get(
+      "SELECT COUNT(*) AS n FROM gala_reserved_slots WHERE event_id = ? AND status <> 'cancelled'",
+      [id],
+    );
+    detail.reserved_slots_used = Number(reservedCount?.n || 0);
+    detail.reserved_slots_limit = GALA_MAX_RESERVED_SLOTS;
+  }
+  return detail;
 }
 
 // ---------------------------------------------------------------- 奖池

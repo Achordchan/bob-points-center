@@ -1407,3 +1407,64 @@ test('活动详情：在同一只读快照里返回各环节下一轮次号 next
   assert.deepEqual(emptyDetail.next_round_nos, {});
 });
 
+test('活动详情：仅超级管理员（includeReserved）返回全量预留名额占用数与上限，普通视图不查询也不返回对应键', async () => {
+  const { getGalaEventDetail } = await import('../../src/services/galaService.js');
+  const V = '11111111-2222-4333-8444-555555555555';
+  const makeDb = (reservedCountRow) => {
+    const queries = [];
+    const tx = {
+      exec: async (sql) => { queries.push(sql); },
+      get: async (sql) => {
+        queries.push(sql);
+        if (sql.includes('FROM gala_events')) {
+          return {
+            id: 1,
+            title: '2026 年会',
+            event_date: '2026-12-31',
+            status: 'live',
+            total_budget: 10000,
+            enabled_segments: '["lottery","game"]',
+            created_by: 'admin',
+            created_name: '管理员',
+            created_at: 100,
+            updated_at: 200,
+          };
+        }
+        if (sql.includes('AS participants')) return { participants: 50, rounds: 4 };
+        if (sql.includes('FROM gala_reserved_slots')) return reservedCountRow;
+        if (sql.includes('version_token')) return { version_token: V };
+        return null;
+      },
+      all: async (sql) => {
+        queries.push(sql);
+        return [];
+      },
+    };
+    return {
+      queries,
+      transaction: async (fn) => fn(tx),
+    };
+  };
+
+  const superDb = makeDb({ n: '2' });
+  const superDetail = await getGalaEventDetail(superDb, { eventId: 1, includeReserved: true });
+  assert.equal(superDetail.reserved_slots_used, 2);
+  assert.equal(typeof superDetail.reserved_slots_used, 'number');
+  assert.equal(superDetail.reserved_slots_limit, GALA_MAX_RESERVED_SLOTS);
+  assert.ok(superDb.queries.some((q) => q.includes('REPEATABLE READ, READ ONLY')));
+  assert.ok(
+    superDb.queries.some(
+      (q) => q.includes('COUNT(*)') && q.includes('FROM gala_reserved_slots') && q.includes("status <> 'cancelled'"),
+    ),
+  );
+
+  const normalDb = makeDb({ n: '2' });
+  const normalDetail = await getGalaEventDetail(normalDb, { eventId: 1, includeReserved: false });
+  assert.equal(Object.hasOwn(normalDetail, 'reserved_slots_used'), false);
+  assert.equal(Object.hasOwn(normalDetail, 'reserved_slots_limit'), false);
+  assert.equal(
+    normalDb.queries.some((q) => q.includes('gala_reserved_slots')),
+    false,
+  );
+});
+
