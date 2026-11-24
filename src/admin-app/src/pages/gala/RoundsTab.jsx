@@ -250,9 +250,8 @@ export default function RoundsTab({
     const [, latestDetail] = await Promise.all([loadRounds(), reload()]);
     if (latestDetail) {
       setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
-      const latestVersion = typeof latestDetail.gala_version === 'string' ? latestDetail.gala_version : '';
-      setDrawModal((prev) => (prev ? { ...prev, version: latestVersion } : prev));
     }
+    return latestDetail || null;
   }, [loadRounds, reload]);
 
   const handleDrawSuccess = useCallback(

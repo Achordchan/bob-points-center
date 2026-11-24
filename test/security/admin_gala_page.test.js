@@ -9,6 +9,7 @@ import {
   clearPendingDraw,
   getPendingDrawKey,
   isAmbiguousDrawError,
+  isDefinitiveDrawRejection,
   loadPendingDraw,
   PENDING_DRAW_KEY_PREFIX,
   savePendingDraw,
@@ -189,4 +190,47 @@ test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用
       });
     }
   }
+});
+
+test('待确认抽签错误分类排除 401/403，发请求前持久化，且 round_no_changed 版本变化时关闭旧表单', () => {
+  const pendingDrawSource = readRepoFile('src/admin-app/src/pages/gala/pendingDraw.js');
+  const drawModalSource = readRepoFile('src/admin-app/src/pages/gala/DrawModal.jsx');
+  const roundsTabSource = readRepoFile('src/admin-app/src/pages/gala/RoundsTab.jsx');
+
+  // pendingDraw.js 导出 isDefinitiveDrawRejection，且源码排除 401、403
+  assert.equal(typeof isDefinitiveDrawRejection, 'function');
+  assert.match(pendingDrawSource, /export\s+function\s+isDefinitiveDrawRejection\b/);
+  assert.match(
+    pendingDrawSource,
+    /NON_DEFINITIVE_CLIENT_STATUSES\s*=\s*new Set\(\[[^\]]*\b401\b[^\]]*\b403\b[^\]]*\]\)/,
+  );
+  assert.match(pendingDrawSource, /NON_DEFINITIVE_CLIENT_STATUSES\.has\(err\.status\)/);
+  assert.equal(isDefinitiveDrawRejection({ status: 401, code: 'unauthorized' }), false);
+  assert.equal(isDefinitiveDrawRejection({ status: 403, code: 'forbidden' }), false);
+  assert.equal(isDefinitiveDrawRejection({ status: 409, code: 'round_no_changed' }), true);
+
+  // DrawModal.jsx 在调用 /admin/gala/rounds/draw 之前先保存待确认抽签
+  const beforeDrawIdx = drawModalSource.indexOf('onBeforeDraw?.(');
+  const drawApiIdx = drawModalSource.indexOf("api('/admin/gala/rounds/draw'");
+  assert.ok(beforeDrawIdx !== -1, 'DrawModal.jsx 缺少 onBeforeDraw 调用');
+  assert.ok(drawApiIdx !== -1, "DrawModal.jsx 缺少 api('/admin/gala/rounds/draw') 调用");
+  assert.ok(beforeDrawIdx < drawApiIdx, 'DrawModal.jsx 应在发起抽签请求前保存待确认抽签');
+
+  // DrawModal.jsx 的 round_no_changed 分支比较版本并在不同时关闭弹窗
+  const roundNoChangedBlock =
+    drawModalSource.match(/if\s*\(err\?\.code === 'round_no_changed'\)\s*\{[\s\S]*?\n          \}/)?.[0] || '';
+  assert.ok(roundNoChangedBlock, 'DrawModal.jsx 缺少 round_no_changed 处理分支');
+  assert.match(roundNoChangedBlock, /await\s+onRefreshAll\(\)/);
+  assert.match(roundNoChangedBlock, /gala_version/);
+  assert.match(
+    roundNoChangedBlock,
+    /if\s*\(!latestDetail\s*\|\|\s*latestVersion\s*!==\s*version\)\s*\{[\s\S]*?onCancel\(\)[\s\S]*?数据已变化，请重新发起抽签[\s\S]*?return;/,
+  );
+
+  // RoundsTab.jsx 的 refreshAll 不再调用 setDrawModal 修改 version
+  const refreshAllBlock =
+    roundsTabSource.match(/const refreshAll = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] || '';
+  assert.ok(refreshAllBlock, 'RoundsTab.jsx 缺少 refreshAll 定义');
+  assert.doesNotMatch(refreshAllBlock, /\bsetDrawModal\b/, 'RoundsTab.refreshAll 不应调用 setDrawModal 修改 version');
+  assert.match(refreshAllBlock, /return\s+latestDetail\b/, 'RoundsTab.refreshAll 应返回 latestDetail');
 });

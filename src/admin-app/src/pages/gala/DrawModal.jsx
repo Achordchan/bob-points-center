@@ -225,6 +225,15 @@ export default function DrawModal({
           }
           onClearPendingDraw?.(eventId);
           if (err?.code === 'round_no_changed') {
+            const latestDetail = await onRefreshAll();
+            const latestVersion =
+              typeof latestDetail?.gala_version === 'string' ? latestDetail.gala_version : '';
+            if (!latestDetail || latestVersion !== version) {
+              setRoundNoNotice('');
+              onCancel();
+              message.warning('数据已变化，请重新发起抽签');
+              return;
+            }
             const nextNo = Number(err?.data?.next_round_no);
             if (Number.isSafeInteger(nextNo) && nextNo > 0) {
               onRoundNoChanged(segment, nextNo);
@@ -232,7 +241,6 @@ export default function DrawModal({
             const notice = `${galaErrorText(err)}，已刷新列表，请重新确认后再提交`;
             setRoundNoNotice(notice);
             message.warning(notice);
-            await onRefreshAll();
             return;
           }
           const versionChanged = handleError(err);
