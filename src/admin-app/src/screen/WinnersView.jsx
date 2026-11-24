@@ -57,6 +57,43 @@ function groupRoundsBySegment(rounds, segmentLabels) {
   return ordered;
 }
 
+function resolveColumnCount(groupCount) {
+  if (groupCount <= 1) return 1;
+  if (groupCount === 2 || groupCount === 4) return 2;
+  return 3;
+}
+
+function formatRoundHeading(round, groupTitle) {
+  const base = `第 ${round.round_no} 轮`;
+  const rawTitle = typeof round.title === 'string' ? round.title.trim() : '';
+  const normalizedGroup = typeof groupTitle === 'string' ? groupTitle.trim() : '';
+  const normalizedSegment = typeof round.segment_label === 'string' ? round.segment_label.trim() : '';
+  if (
+    !rawTitle
+    || rawTitle === normalizedGroup
+    || (normalizedSegment && rawTitle === normalizedSegment)
+  ) {
+    return base;
+  }
+  return `${base} · ${rawTitle}`;
+}
+
+function renderSegmentTitle(title) {
+  const text = String(title || '');
+  const parts = text.split(/([A-Za-z0-9]+)/g);
+  return parts.map((part, idx) => {
+    if (!part) return null;
+    if (/^[A-Za-z0-9]+$/.test(part)) {
+      return (
+        <span key={idx} className="gs-segment-title-latin">
+          {part}
+        </span>
+      );
+    }
+    return <React.Fragment key={idx}>{part}</React.Fragment>;
+  });
+}
+
 export default function WinnersView({ rounds, segmentLabels }) {
   const viewportRef = useRef(null);
   const trackRef = useRef(null);
@@ -78,6 +115,19 @@ export default function WinnersView({ rounds, segmentLabels }) {
     let offset = 0;
     let phase = 'pause-top';
     let pauseElapsed = 0;
+    let fadeTop = false;
+    let fadeBottom = false;
+
+    const syncMaskClasses = (nextFadeTop, nextFadeBottom) => {
+      if (nextFadeTop !== fadeTop) {
+        fadeTop = nextFadeTop;
+        viewport.classList.toggle('gs-winners-viewport-fade-top', fadeTop);
+      }
+      if (nextFadeBottom !== fadeBottom) {
+        fadeBottom = nextFadeBottom;
+        viewport.classList.toggle('gs-winners-viewport-fade-bottom', fadeBottom);
+      }
+    };
 
     const handleMotionChange = (evt) => {
       reducedMotion = Boolean(evt.matches);
@@ -104,6 +154,7 @@ export default function WinnersView({ rounds, segmentLabels }) {
         }
         phase = 'pause-top';
         pauseElapsed = 0;
+        syncMaskClasses(false, false);
       } else {
         if (offset > maxOffset) {
           offset = maxOffset;
@@ -133,11 +184,13 @@ export default function WinnersView({ rounds, segmentLabels }) {
         }
 
         track.style.transform = `translate3d(0, ${(-offset).toFixed(2)}px, 0)`;
+        syncMaskClasses(offset > 0.5, offset < maxOffset - 0.5);
       }
 
       rafId = window.requestAnimationFrame(step);
     };
 
+    viewport.classList.remove('gs-winners-viewport-fade-top', 'gs-winners-viewport-fade-bottom');
     track.style.transform = 'translate3d(0, 0, 0)';
     rafId = window.requestAnimationFrame(step);
 
@@ -145,6 +198,7 @@ export default function WinnersView({ rounds, segmentLabels }) {
       if (rafId) {
         window.cancelAnimationFrame(rafId);
       }
+      viewport.classList.remove('gs-winners-viewport-fade-top', 'gs-winners-viewport-fade-bottom');
       if (mediaQuery) {
         if (typeof mediaQuery.removeEventListener === 'function') {
           mediaQuery.removeEventListener('change', handleMotionChange);
@@ -155,7 +209,7 @@ export default function WinnersView({ rounds, segmentLabels }) {
     };
   }, [groups]);
 
-  const columnCount = Math.min(Math.max(groups.length, 1), 3);
+  const columnCount = resolveColumnCount(groups.length);
 
   return (
     <section className="gs-winners">
@@ -177,16 +231,14 @@ export default function WinnersView({ rounds, segmentLabels }) {
               {groups.map((group) => (
                 <section key={group.key} className="gs-segment-column">
                   <div className="gs-segment-heading">
-                    <h2 className="gs-segment-title">{group.title}</h2>
+                    <h2 className="gs-segment-title">{renderSegmentTitle(group.title)}</h2>
                     <span className="gs-segment-line" aria-hidden="true" />
                   </div>
 
                   <div className="gs-round-list">
                     {group.rounds.map((round) => {
                       const showPrize = round.prize_type === 'coin';
-                      const roundHeading = round.title
-                        ? `第 ${round.round_no} 轮 · ${round.title}`
-                        : `第 ${round.round_no} 轮`;
+                      const roundHeading = formatRoundHeading(round, group.title);
 
                       return (
                         <article key={round.id} className="gs-round-card">

@@ -294,65 +294,67 @@ body,
 .gs-idle-title-wrap {
   position: relative;
   display: inline-block;
-  overflow: hidden;
-  padding: 6px 24px;
+  max-width: 100%;
 }
 
-.gs-idle-title-wrap::after {
-  content: "";
-  position: absolute;
-  top: -20%;
-  bottom: -20%;
-  left: 0;
-  width: 30%;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgba(255, 255, 255, 0) 0%,
-    rgba(255, 252, 240, 0.55) 50%,
-    rgba(255, 255, 255, 0) 100%
-  );
-  mix-blend-mode: overlay;
-  opacity: 0;
-  transform: translateX(-140%) skewX(-20deg);
-  animation: gs-title-sheen 6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-  will-change: transform, opacity;
-}
-
-@keyframes gs-title-sheen {
-  0% {
-    transform: translateX(-140%) skewX(-20deg);
-    opacity: 0;
-  }
-  2% {
-    opacity: 0.9;
-  }
-  18% {
-    opacity: 0.9;
-  }
-  20% {
-    transform: translateX(420%) skewX(-20deg);
-    opacity: 0;
-  }
-  100% {
-    transform: translateX(420%) skewX(-20deg);
-    opacity: 0;
-  }
-}
-
-.gs-idle-title {
+.gs-idle-title,
+.gs-idle-title-sheen {
   margin: 0;
+  padding: 0 0.1em;
   font-family: var(--gs-font-serif);
   font-size: 120px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: 0.1em;
   word-break: break-word;
-  background: var(--gs-gold-gradient);
   -webkit-background-clip: text;
   background-clip: text;
+  -webkit-text-fill-color: transparent;
   color: transparent;
+}
+
+.gs-idle-title {
+  background-image: var(--gs-gold-gradient);
   filter: drop-shadow(0 0 40px var(--gs-gold-glow));
+}
+
+.gs-idle-title-sheen {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+  background-image: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 252, 240, 0.72) 50%,
+    rgba(255, 255, 255, 0) 60%
+  );
+  background-size: 320% 100%;
+  background-position: 100% 0;
+  background-repeat: no-repeat;
+  opacity: 0;
+  animation: gs-title-sheen 6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes gs-title-sheen {
+  0% {
+    background-position: 100% 0;
+    opacity: 0;
+  }
+  2% {
+    opacity: 1;
+  }
+  18% {
+    opacity: 1;
+  }
+  20% {
+    background-position: 0% 0;
+    opacity: 0;
+  }
+  100% {
+    background-position: 0% 0;
+    opacity: 0;
+  }
 }
 
 .gs-idle-meta {
@@ -409,7 +411,7 @@ body,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin-bottom: 24px;
+  margin-bottom: 48px;
 }
 
 .gs-winners-title {
@@ -438,12 +440,27 @@ body,
   min-height: 0;
   position: relative;
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000000 28px, #000000 calc(100% - 36px), transparent 100%);
-  mask-image: linear-gradient(to bottom, transparent 0%, #000000 28px, #000000 calc(100% - 36px), transparent 100%);
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.gs-winners-viewport-fade-top {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000000 32px, #000000 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000000 32px, #000000 100%);
+}
+
+.gs-winners-viewport-fade-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, #000000 0%, #000000 calc(100% - 40px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000000 0%, #000000 calc(100% - 40px), transparent 100%);
+}
+
+.gs-winners-viewport-fade-top.gs-winners-viewport-fade-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000000 32px, #000000 calc(100% - 40px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000000 32px, #000000 calc(100% - 40px), transparent 100%);
 }
 
 .gs-winners-track {
-  padding: 20px 0 48px;
+  padding: 4px 0 24px;
   will-change: transform;
 }
 
@@ -459,53 +476,63 @@ body,
 }
 
 .gs-winners-columns {
-  display: grid;
-  align-items: start;
   width: 100%;
+  column-gap: 48px;
+  column-fill: balance;
 }
 
 .gs-winners-columns-1 {
-  grid-template-columns: minmax(0, 1fr);
+  column-count: 1;
   max-width: 1160px;
   margin: 0 auto;
-  gap: 36px;
 }
 
 .gs-winners-columns-2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 36px 40px;
+  column-count: 2;
 }
 
 .gs-winners-columns-3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 36px 36px;
+  column-count: 3;
 }
 
 .gs-segment-column {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
+  display: block;
+  width: 100%;
   min-width: 0;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin-bottom: 40px;
 }
 
 .gs-segment-heading {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  margin-bottom: 24px;
 }
 
 .gs-segment-title {
   margin: 0;
+  padding: 2px 0;
   font-family: var(--gs-font-serif);
   font-size: 44px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1.28;
   letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
   background: var(--gs-gold-gradient);
   -webkit-background-clip: text;
   background-clip: text;
+  -webkit-text-fill-color: transparent;
   color: transparent;
   filter: drop-shadow(0 0 24px var(--gs-gold-glow));
+}
+
+.gs-segment-title-latin {
+  display: inline;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
 }
 
 .gs-segment-line {
@@ -996,7 +1023,7 @@ body,
   .gs-corner-segment-pill {
     animation-duration: 0.2s;
   }
-  .gs-idle-title-wrap::after {
+  .gs-idle-title-sheen {
     animation: none;
     opacity: 0;
   }

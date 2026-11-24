@@ -212,6 +212,11 @@ export default function IdleView({ event, names, ready }) {
 
         <div className="gs-idle-title-wrap">
           <h1 className="gs-idle-title">{title}</h1>
+          {title ? (
+            <span className="gs-idle-title-sheen" aria-hidden="true">
+              {title}
+            </span>
+          ) : null}
         </div>
 
         <div className="gs-ornament-line gs-ornament-line-bottom" aria-hidden="true">
