@@ -11,13 +11,18 @@ const HEADER_ENTER_MS = 400;
 const REDUCED_HEADER_ENTER_MS = 160;
 const CARD_STAGGER_MS = 250;
 const REDUCED_CARD_STAGGER_MS = 24;
+const MAX_PAGE_REVEAL_MS = 6000;
 const CARD_ANIM_MS = 420;
 const REDUCED_CARD_ANIM_MS = 160;
 const CONFETTI_DELAY_MS = 300;
 const CONFETTI_VOLLEY_INTERVAL_MS = 250;
+const MAX_WINNERS_PER_PAGE = 48;
+const PAGE_INTERVAL_MS = 10000;
+const PAGE_TRANSITION_MS = 600;
+const COMPACT_HEADER_THRESHOLD = 24;
 const STAGE_INNER_WIDTH = 1760;
-const GRID_MAX_HEIGHT = 592;
 const MIN_SCREEN_FONT_SIZE = 28;
+const LONG_NAME_MIN_FONT_PX = 14;
 
 const CONFETTI_COLORS = ['#F6D58E', '#C9973B', '#C8102E', '#FFF4DC'];
 
@@ -86,65 +91,75 @@ function resolveRevealHeading(round, segmentTitle) {
   return { kicker: defaultKicker, title: rawTitle };
 }
 
-function computeWinnerLayout(count) {
-  if (count <= 1) {
-    return { cols: 1, cardW: 900, cardH: 300, gap: 0, fontSize: 160, tier: 'hero' };
+function paginateWinners(winners) {
+  if (!Array.isArray(winners) || winners.length === 0) return [];
+  const pages = [];
+  for (let i = 0; i < winners.length; i += MAX_WINNERS_PER_PAGE) {
+    pages.push(winners.slice(i, i + MAX_WINNERS_PER_PAGE));
   }
-  if (count === 2) {
-    return { cols: 2, cardW: 640, cardH: 240, gap: 32, fontSize: 92, tier: 'large' };
-  }
-  if (count === 3) {
-    return { cols: 3, cardW: 520, cardH: 220, gap: 32, fontSize: 80, tier: 'large' };
-  }
-  if (count <= 5) {
-    return { cols: 5, cardW: 328, cardH: 180, gap: 28, fontSize: 58, tier: 'medium' };
-  }
-  if (count <= 10) {
-    return { cols: 5, cardW: 328, cardH: 168, gap: 28, fontSize: 54, tier: 'medium' };
-  }
-  if (count <= 12) {
-    const gap = 28;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
-    return { cols: 6, cardW, cardH: 148, gap, fontSize: 46, tier: 'normal' };
-  }
-  if (count <= 18) {
-    const gap = 28;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
-    return { cols: 6, cardW, cardH: 136, gap, fontSize: 42, tier: 'normal' };
-  }
-  if (count <= 21) {
-    const gap = 24;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
-    return { cols: 7, cardW, cardH: 128, gap, fontSize: 38, tier: 'compact' };
-  }
-  if (count <= 28) {
-    const gap = 24;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
-    return { cols: 7, cardW, cardH: 116, gap, fontSize: 36, tier: 'compact' };
-  }
-  if (count <= 32) {
-    const gap = 24;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
-    return { cols: 8, cardW, cardH: 112, gap, fontSize: 34, tier: 'compact' };
-  }
-  if (count <= 40) {
-    const gap = 24;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
-    return { cols: 8, cardW, cardH: 98, gap, fontSize: 32, tier: 'compact' };
-  }
-  if (count <= 48) {
-    const gap = 24;
-    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
-    return { cols: 8, cardW, cardH: 78, gap, fontSize: 30, tier: 'dense' };
-  }
+  return pages;
+}
 
-  const cols = 8;
-  const gap = 24;
-  const rows = Math.ceil(count / cols);
-  const cardW = Math.floor((STAGE_INNER_WIDTH - (cols - 1) * gap) / cols);
-  const cardH = Math.max(58, Math.floor((GRID_MAX_HEIGHT - (rows - 1) * gap) / rows));
-  const fontSize = Math.max(MIN_SCREEN_FONT_SIZE, Math.min(30, Math.floor(cardH * 0.44)));
-  return { cols, cardW, cardH, gap, fontSize, tier: 'dense' };
+function computePageStaggerMs(pageCount, isReduced) {
+  if (pageCount <= 0) return 0;
+  const maxStagger = isReduced ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
+  return Math.min(maxStagger, MAX_PAGE_REVEAL_MS / pageCount);
+}
+
+function computeWinnerLayout(pageSize) {
+  if (pageSize <= 1) {
+    return { cols: 1, cardW: 900, cardH: 300, gap: 0, fontSize: 160, tier: 'hero', groupGap: 64 };
+  }
+  if (pageSize === 2) {
+    return { cols: 2, cardW: 640, cardH: 240, gap: 32, fontSize: 92, tier: 'large', groupGap: 64 };
+  }
+  if (pageSize === 3) {
+    return { cols: 3, cardW: 520, cardH: 220, gap: 32, fontSize: 80, tier: 'large', groupGap: 64 };
+  }
+  if (pageSize <= 5) {
+    return { cols: 5, cardW: 328, cardH: 180, gap: 28, fontSize: 58, tier: 'medium', groupGap: 64 };
+  }
+  if (pageSize <= 10) {
+    return { cols: 5, cardW: 328, cardH: 168, gap: 28, fontSize: 54, tier: 'medium', groupGap: 52 };
+  }
+  if (pageSize <= 12) {
+    const gap = 28;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
+    return { cols: 6, cardW, cardH: 148, gap, fontSize: 46, tier: 'normal', groupGap: 52 };
+  }
+  if (pageSize <= 18) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 5 * gap) / 6);
+    return { cols: 6, cardW, cardH: 132, gap, fontSize: 42, tier: 'normal', groupGap: 40 };
+  }
+  if (pageSize <= 21) {
+    const gap = 24;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
+    return { cols: 7, cardW, cardH: 128, gap, fontSize: 38, tier: 'compact', groupGap: 40 };
+  }
+  if (pageSize <= 24) {
+    const gap = 22;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 120, gap, fontSize: 36, tier: 'compact', groupGap: 40 };
+  }
+  if (pageSize <= 28) {
+    const gap = 22;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 6 * gap) / 7);
+    return { cols: 7, cardW, cardH: 112, gap, fontSize: 36, tier: 'compact', groupGap: 28 };
+  }
+  if (pageSize <= 32) {
+    const gap = 20;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 110, gap, fontSize: 34, tier: 'compact', groupGap: 28 };
+  }
+  if (pageSize <= 40) {
+    const gap = 18;
+    const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+    return { cols: 8, cardW, cardH: 90, gap, fontSize: 32, tier: 'compact', groupGap: 24 };
+  }
+  const gap = 16;
+  const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
+  return { cols: 8, cardW, cardH: 74, gap, fontSize: 30, tier: 'dense', groupGap: 24 };
 }
 
 function countNameChars(text) {
@@ -163,28 +178,44 @@ function estimateVisualUnits(text) {
   let units = 0;
   for (const ch of str) {
     const code = ch.codePointAt(0) || 0;
-    units += code <= 0x7f ? 0.66 : 1.08;
+    if (code <= 0x7f) {
+      units += code >= 0x41 && code <= 0x5a ? 0.8 : 0.64;
+    } else {
+      units += 1.06;
+    }
   }
   return Math.max(1, units);
 }
 
-function computeRoundFontSize(winnerNames, layout) {
-  if (!Array.isArray(winnerNames) || winnerNames.length === 0) {
-    return layout.fontSize;
-  }
-  let maxChars = 0;
-  let maxUnits = 1;
-  for (const name of winnerNames) {
-    const chars = countNameChars(name);
-    if (chars > maxChars) maxChars = chars;
-    const units = estimateVisualUnits(name);
-    if (units > maxUnits) maxUnits = units;
-  }
-  const tierScaled = Math.round(layout.fontSize * getLengthScaleFactor(maxChars));
-  const horizontalPadding = layout.tier === 'hero' ? 100 : 32;
+function computeCardFontSize(name, layout) {
+  const text = String(name || '').trim();
+  const chars = countNameChars(text);
+  const units = estimateVisualUnits(text);
+  const horizontalPadding = layout.tier === 'hero'
+    ? 100
+    : layout.tier === 'dense' || layout.tier === 'compact'
+      ? 24
+      : 32;
   const availWidth = Math.max(80, layout.cardW - horizontalPadding);
-  const fitWidth = Math.floor(availWidth / maxUnits);
-  return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(tierScaled, fitWidth));
+  const fitWidth = Math.floor(availWidth / units);
+
+  if (layout.cols >= 6) {
+    const baseSize = Math.max(MIN_SCREEN_FONT_SIZE, layout.fontSize);
+    if (chars < 5) {
+      return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(baseSize, fitWidth));
+    }
+    // 6–8 列名字卡字号默认不低于 28px；仅当名字 ≥5 个字且 28px 放不下时按比例缩小到刚好放下，不使用省略号
+    if (fitWidth >= MIN_SCREEN_FONT_SIZE) {
+      return Math.min(baseSize, fitWidth);
+    }
+    return Math.max(LONG_NAME_MIN_FONT_PX, fitWidth);
+  }
+
+  const tierScaled = Math.round(layout.fontSize * getLengthScaleFactor(chars));
+  if (chars < 5) {
+    return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(tierScaled, fitWidth));
+  }
+  return Math.max(LONG_NAME_MIN_FONT_PX, Math.min(tierScaled, fitWidth));
 }
 
 function chunkIntoRows(items, cols) {
@@ -234,13 +265,22 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
     () => (matchedRound && Array.isArray(matchedRound.winners) ? matchedRound.winners : []),
     [matchedRound],
   );
+  const pages = useMemo(() => paginateWinners(winners), [winners]);
+  const totalPages = pages.length;
+  const firstPageCount = pages[0]?.length || 0;
 
   const [phase, setPhase] = useState(() => (matchedRoundId ? 'decelerating' : 'waiting'));
   const [activeRoundId, setActiveRoundId] = useState(() => matchedRoundId);
   const [reducedMotion, setReducedMotion] = useState(getReducedMotionPreference);
+  const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  const [pageLayers, setPageLayers] = useState(() => [
+    { id: 1, pageIndex: 0, status: 'stable' },
+  ]);
 
-  const winnersCountRef = useRef(winners.length);
-  winnersCountRef.current = winners.length;
+  const firstPageCountRef = useRef(firstPageCount);
+  firstPageCountRef.current = firstPageCount;
+  const currentPageRef = useRef(0);
+  const nextPageLayerIdRef = useRef(2);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -284,6 +324,12 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
       }
     };
 
+    currentPageRef.current = 0;
+    setCurrentPageIndex(0);
+    const initialLayerId = nextPageLayerIdRef.current;
+    nextPageLayerIdRef.current += 1;
+    setPageLayers([{ id: initialLayerId, pageIndex: 0, status: 'stable' }]);
+
     if (!matchedRoundId) {
       setActiveRoundId(null);
       setPhase('waiting');
@@ -294,7 +340,6 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
     const decelMs = isReduced ? REDUCED_DECELERATE_MS : DECELERATE_DURATION_MS;
     const pauseMs = isReduced ? REDUCED_PAUSE_MS : POST_SPHERE_PAUSE_MS;
     const headerMs = isReduced ? REDUCED_HEADER_ENTER_MS : HEADER_ENTER_MS;
-    const staggerMs = isReduced ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
     const cardAnimMs = isReduced ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
 
     setActiveRoundId(matchedRoundId);
@@ -309,14 +354,15 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
     }, decelMs + pauseMs);
 
     schedule(() => {
-      const count = winnersCountRef.current;
-      if (count <= 0) {
+      const pageCount = firstPageCountRef.current;
+      if (pageCount <= 0) {
         setPhase('revealed');
         return;
       }
 
       setPhase('revealing');
-      const lastCardFinishMs = (count - 1) * staggerMs + cardAnimMs;
+      const staggerMs = computePageStaggerMs(pageCount, isReduced);
+      const lastCardFinishMs = Math.round((pageCount - 1) * staggerMs + cardAnimMs);
 
       schedule(() => {
         setPhase('revealed');
@@ -332,17 +378,62 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
     return cleanup;
   }, [matchedRoundId]);
 
-  const layout = useMemo(() => computeWinnerLayout(winners.length), [winners.length]);
-  const winnerRows = useMemo(() => chunkIntoRows(winners, layout.cols), [winners, layout.cols]);
-  const roundFontSize = useMemo(
-    () => computeRoundFontSize(winners, layout),
-    [winners, layout],
-  );
-  const gridSlotHeight = winnerRows.length > 0
-    ? winnerRows.length * layout.cardH + Math.max(0, winnerRows.length - 1) * layout.gap
+  const isCurrentRoundActive = Boolean(matchedRound) && activeRoundId === matchedRound.id;
+  const showSphere = !isCurrentRoundActive || phase === 'waiting' || phase === 'decelerating';
+  const isDecelerating = isCurrentRoundActive && phase === 'decelerating';
+  const showHeader = isCurrentRoundActive && (phase === 'header' || phase === 'revealing' || phase === 'revealed');
+  const showWinners = isCurrentRoundActive && (phase === 'revealing' || phase === 'revealed');
+
+  useEffect(() => {
+    if (!showWinners || totalPages <= 1) {
+      return undefined;
+    }
+
+    let transitionTimer = null;
+    const intervalId = setInterval(() => {
+      const nextIdx = (currentPageRef.current + 1) % totalPages;
+      currentPageRef.current = nextIdx;
+      setCurrentPageIndex(nextIdx);
+
+      const nextLayerId = nextPageLayerIdRef.current;
+      nextPageLayerIdRef.current += 1;
+
+      setPageLayers((prev) => {
+        const currentActive = prev.find((item) => item.status !== 'exiting') || prev[prev.length - 1];
+        const nextList = [];
+        if (currentActive) {
+          nextList.push({ ...currentActive, status: 'exiting' });
+        }
+        nextList.push({ id: nextLayerId, pageIndex: nextIdx, status: 'entering' });
+        return nextList;
+      });
+
+      if (transitionTimer !== null) {
+        clearTimeout(transitionTimer);
+      }
+      transitionTimer = setTimeout(() => {
+        transitionTimer = null;
+        setPageLayers((prev) => prev
+          .filter((item) => item.id === nextLayerId)
+          .map((item) => ({ ...item, status: 'stable' })));
+      }, PAGE_TRANSITION_MS + 40);
+    }, PAGE_INTERVAL_MS);
+
+    return () => {
+      clearInterval(intervalId);
+      if (transitionTimer !== null) {
+        clearTimeout(transitionTimer);
+      }
+    };
+  }, [activeRoundId, showWinners, totalPages]);
+
+  const layoutCount = Math.min(winners.length, MAX_WINNERS_PER_PAGE);
+  const layout = useMemo(() => computeWinnerLayout(layoutCount), [layoutCount]);
+  const maxRows = layoutCount > 0 ? Math.ceil(layoutCount / layout.cols) : 0;
+  const gridSlotHeight = maxRows > 0
+    ? maxRows * layout.cardH + Math.max(0, maxRows - 1) * layout.gap
     : 0;
 
-  const staggerMs = reducedMotion ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
   const cardAnimMs = reducedMotion ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
 
   const segmentTitle = matchedRound
@@ -356,13 +447,11 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
     return resolveRevealHeading(matchedRound, segmentTitle);
   }, [matchedRound, segmentTitle]);
 
-  const titleFontSize = heading.title.length > 12 ? 96 : 104;
+  const isCompactHeader = winners.length > COMPACT_HEADER_THRESHOLD;
+  const titleFontSize = isCompactHeader ? 72 : (heading.title.length > 12 ? 96 : 104);
   const showPrize = Boolean(matchedRound && matchedRound.prize_type === 'coin');
-  const isCurrentRoundActive = Boolean(matchedRound) && activeRoundId === matchedRound.id;
-  const showSphere = !isCurrentRoundActive || phase === 'waiting' || phase === 'decelerating';
-  const isDecelerating = isCurrentRoundActive && phase === 'decelerating';
-  const showHeader = isCurrentRoundActive && (phase === 'header' || phase === 'revealing' || phase === 'revealed');
-  const showWinners = isCurrentRoundActive && (phase === 'revealing' || phase === 'revealed');
+  const isPaginated = totalPages > 1;
+  const displayPage = Math.min(currentPageIndex + 1, Math.max(1, totalPages));
 
   return (
     <section className="gs-reveal">
@@ -388,7 +477,10 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
 
       {showHeader ? (
         <div className="gs-reveal-content">
-          <div className="gs-reveal-group">
+          <div
+            className={isCompactHeader ? 'gs-reveal-group gs-reveal-group-compact' : 'gs-reveal-group'}
+            style={{ gap: `${layout.groupGap}px` }}
+          >
             <header key={`header-${activeRoundId}`} className="gs-reveal-header">
               {heading.kicker ? (
                 <p className="gs-reveal-kicker">{heading.kicker}</p>
@@ -406,53 +498,79 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
 
             <div
               className="gs-reveal-stage"
-              style={gridSlotHeight > 0 ? { minHeight: `${gridSlotHeight}px` } : undefined}
+              style={gridSlotHeight > 0 ? { height: `${gridSlotHeight}px` } : undefined}
             >
               {showWinners ? (
                 winners.length === 0 ? (
                   <div className="gs-reveal-empty">本轮暂无中奖人</div>
                 ) : (
-                  <div
-                    key={`grid-${activeRoundId}`}
-                    className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
-                    style={{ rowGap: `${layout.gap}px` }}
-                  >
-                    {winnerRows.map((row, rowIdx) => (
-                      <div
-                        key={`${activeRoundId}-row-${rowIdx}`}
-                        className="gs-reveal-grid-row"
-                        style={{
-                          gridTemplateColumns: `repeat(${row.length}, ${layout.cardW}px)`,
-                          columnGap: `${layout.gap}px`,
-                        }}
-                      >
-                        {row.map(({ name: winnerName, index }) => (
-                          <div
-                            key={`${activeRoundId}-${index}`}
-                            className={`gs-reveal-card gs-reveal-card-${layout.tier}`}
-                            style={{
-                              width: `${layout.cardW}px`,
-                              height: `${layout.cardH}px`,
-                              animationDelay: `${index * staggerMs}ms`,
-                              animationDuration: `${cardAnimMs}ms`,
-                            }}
-                          >
-                            <div className="gs-reveal-card-inner">
-                              <span
-                                className="gs-reveal-card-name"
-                                style={{ fontSize: `${roundFontSize}px` }}
-                              >
-                                {winnerName}
-                              </span>
+                  pageLayers.map((layer) => {
+                    const pageItems = pages[layer.pageIndex] || [];
+                    const pageRows = chunkIntoRows(pageItems, layout.cols);
+                    const pageStaggerMs = computePageStaggerMs(pageItems.length, reducedMotion);
+                    const pageClass = layer.status === 'entering'
+                      ? 'gs-reveal-page gs-reveal-page-entering'
+                      : layer.status === 'exiting'
+                        ? 'gs-reveal-page gs-reveal-page-exiting'
+                        : 'gs-reveal-page';
+
+                    return (
+                      <div key={`${activeRoundId}-page-${layer.id}`} className={pageClass}>
+                        <div
+                          className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
+                          style={{ rowGap: `${layout.gap}px` }}
+                        >
+                          {pageRows.map((row, rowIdx) => (
+                            <div
+                              key={`${activeRoundId}-p${layer.id}-row-${rowIdx}`}
+                              className="gs-reveal-grid-row"
+                              style={{
+                                gridTemplateColumns: `repeat(${row.length}, ${layout.cardW}px)`,
+                                columnGap: `${layout.gap}px`,
+                              }}
+                            >
+                              {row.map(({ name: winnerName, index }) => {
+                                const cardFontSize = computeCardFontSize(winnerName, layout);
+                                return (
+                                  <div
+                                    key={`${activeRoundId}-p${layer.id}-${index}`}
+                                    className={`gs-reveal-card gs-reveal-card-${layout.tier}`}
+                                    style={{
+                                      width: `${layout.cardW}px`,
+                                      height: `${layout.cardH}px`,
+                                      animationDelay: `${Math.round(index * pageStaggerMs)}ms`,
+                                      animationDuration: `${cardAnimMs}ms`,
+                                    }}
+                                  >
+                                    <div className="gs-reveal-card-inner">
+                                      <span
+                                        className="gs-reveal-card-name"
+                                        style={{ fontSize: `${cardFontSize}px` }}
+                                      >
+                                        {winnerName}
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
                             </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })
                 )
               ) : null}
             </div>
+
+            {isPaginated ? (
+              <div
+                className={showWinners ? 'gs-reveal-pager gs-reveal-pager-visible' : 'gs-reveal-pager'}
+                aria-live="polite"
+              >
+                {displayPage} / {totalPages}
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

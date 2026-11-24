@@ -177,7 +177,7 @@ test('isPublicAdminPath：仅 GET /gala/screen 放行给路由自校验，POST �
   assert.equal(isPublicAdminPath('POST', '/gala/screen/state'), false);
 });
 
-test('GET /gala/screen 路由处理器自校验 gala:view 并在未登录/无权限时跳转 /admin/login', () => {
+test('GET /gala/screen 路由处理器自校验 gala:view：未登录带 redirect 跳登录，无权限直接跳 /admin/login 避免死循环', () => {
   const routesPath = fileURLToPath(new URL('../../src/routes/admin/galaRoutes.js', import.meta.url));
   const src = fs.readFileSync(routesPath, 'utf8');
   const start = src.indexOf("router.get('/gala/screen'");
@@ -188,8 +188,16 @@ test('GET /gala/screen 路由处理器自校验 gala:view 并在未登录/无权
   assert.match(handlerSrc, /getAdminSessionPayload/);
   assert.match(handlerSrc, /getAdminAccess/);
   assert.match(handlerSrc, /hasAdminPermission\([^)]*['"]gala:view['"]/);
-  assert.match(handlerSrc, /\/admin\/login\?redirect=/);
   assert.match(handlerSrc, /Cache-Control.*no-store/);
   assert.match(handlerSrc, /503/);
   assert.match(handlerSrc, /大屏页面未构建/);
+
+  const unauthBranch = handlerSrc.match(/if\s*\(\s*!payload\s*\)\s*\{([\s\S]*?)\}/);
+  assert.ok(unauthBranch, '缺少未登录跳转分支');
+  assert.match(unauthBranch[1], /res\.redirect\(\s*302\s*,\s*`\/admin\/login\?redirect=/);
+
+  const noPermBranch = handlerSrc.match(/if\s*\(\s*!access\?\.ok\s*\|\|\s*!hasAdminPermission\([^)]*['"]gala:view['"]\s*\)\s*\)\s*\{([\s\S]*?)\}/);
+  assert.ok(noPermBranch, '缺少无权限跳转分支');
+  assert.match(noPermBranch[1], /res\.redirect\(\s*302\s*,\s*['"]\/admin\/login['"]\s*\)/);
+  assert.doesNotMatch(noPermBranch[1], /redirect=/, '无权限分支跳转地址不得包含 redirect=，避免已登录用户死循环');
 });

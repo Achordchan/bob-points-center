@@ -78,16 +78,17 @@ const galaScreenHtml = fileURLToPath(new URL('../../pages/admin-app-dist/screen.
 export function registerAdminGalaRoutes(router) {
   router.get('/gala/screen', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    const redirectToLogin = () => res.redirect(302, `/admin/login?redirect=${encodeURIComponent(req.originalUrl || '/admin/gala/screen')}`);
     let payload;
     try {
       payload = await getAdminSessionPayload(req);
-      if (!payload) return redirectToLogin();
+      if (!payload) {
+        return res.redirect(302, `/admin/login?redirect=${encodeURIComponent(req.originalUrl || '/admin/gala/screen')}`);
+      }
       const db = req.app?.locals?.db;
       const cfg = req.app?.locals?.cfg;
       const access = await getAdminAccess(db, cfg, payload);
       if (!access?.ok || !hasAdminPermission(access, 'gala:view')) {
-        return redirectToLogin();
+        return res.redirect(302, '/admin/login');
       }
     } catch (err) {
       // eslint-disable-next-line no-console
