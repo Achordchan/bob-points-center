@@ -436,11 +436,421 @@ body,
   white-space: nowrap;
 }
 
+/* ---------- NameSphere 3D 名字球体 ---------- */
+
+.gs-sphere-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  perspective: 1500px;
+  perspective-origin: 50% 50%;
+  overflow: visible;
+}
+
+.gs-sphere-halo {
+  position: absolute;
+  width: 820px;
+  height: 820px;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle, rgba(245, 199, 107, 0.22) 0%, rgba(186, 26, 48, 0.24) 44%, rgba(186, 26, 48, 0) 72%);
+  filter: blur(8px);
+}
+
+.gs-sphere-stage {
+  position: relative;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+}
+
+.gs-sphere-body {
+  position: relative;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+
+.gs-sphere-slot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-style: preserve-3d;
+}
+
+.gs-sphere-card {
+  position: relative;
+  width: 128px;
+  height: 46px;
+  transform-style: preserve-3d;
+  transition: transform 0.14s ease-out;
+  will-change: transform;
+}
+
+.gs-sphere-card-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.gs-sphere-card-front {
+  border: 1.5px solid rgba(245, 199, 107, 0.72);
+  background: linear-gradient(180deg, rgba(118, 18, 34, 0.86) 0%, rgba(44, 6, 14, 0.92) 100%);
+  color: #fff6dc;
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 240, 196, 0.28);
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+.gs-sphere-card-back {
+  transform: rotateY(180deg);
+  opacity: 0.26;
+  border: 1px solid rgba(245, 199, 107, 0.42);
+  background: linear-gradient(180deg, rgba(84, 12, 24, 0.72) 0%, rgba(30, 4, 10, 0.8) 100%);
+  color: #f5d89e;
+}
+
+.gs-sphere-card.gs-sphere-card-hot {
+  transform: scale3d(1.28, 1.28, 1);
+}
+
+.gs-sphere-card-hot .gs-sphere-card-front {
+  border-color: #fff3c2;
+  background: linear-gradient(145deg, #fff6cc 0%, #f7cb6b 48%, #d68b1e 100%);
+  color: #3a060d;
+  text-shadow: 0 1px 0 rgba(255, 250, 224, 0.55);
+  box-shadow:
+    0 0 24px rgba(255, 226, 132, 0.95),
+    0 0 54px rgba(245, 199, 107, 0.62),
+    inset 0 1px 0 rgba(255, 255, 240, 0.85);
+}
+
+.gs-sphere-card-hot .gs-sphere-card-back {
+  opacity: 0.46;
+  border-color: rgba(255, 234, 160, 0.85);
+  background: linear-gradient(145deg, rgba(245, 199, 107, 0.65) 0%, rgba(176, 106, 20, 0.7) 100%);
+  color: #fff6dc;
+}
+
+.gs-sphere-empty {
+  font-size: 48px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: rgba(245, 215, 154, 0.78);
+  text-shadow: 0 4px 18px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- RollingView 抽奖滚动视图 ---------- */
+
+.gs-rolling {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  padding: 58px 96px 54px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+}
+
+.gs-rolling-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 68% 64% at 50% 54%, rgba(168, 20, 42, 0.42) 0%, rgba(92, 10, 24, 0.22) 48%, rgba(12, 2, 6, 0) 78%),
+    radial-gradient(circle at 50% 54%, rgba(245, 199, 107, 0.12) 0%, rgba(245, 199, 107, 0) 44%);
+}
+
+.gs-rolling-header {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  margin-bottom: 12px;
+}
+
+.gs-rolling-header-rule {
+  width: 210px;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(245, 199, 107, 0) 0%, rgba(245, 199, 107, 0.85) 50%, rgba(245, 199, 107, 0) 100%);
+}
+
+.gs-rolling-header-diamond {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, #fff2be 0%, #f5c76b 60%, #c88924 100%);
+  transform: rotate(45deg);
+  box-shadow: 0 0 14px rgba(245, 199, 107, 0.72);
+}
+
+.gs-rolling-title {
+  margin: 0;
+  font-size: 72px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: 0.16em;
+  padding-left: 0.16em;
+  background: linear-gradient(180deg, #fff6d4 0%, #f5c76b 55%, #cf8f24 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.68));
+}
+
+.gs-rolling-stage {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- RevealView 揭晓视图 ---------- */
+
+.gs-reveal {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  padding: 54px 96px 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+}
+
+.gs-reveal-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 74% 66% at 50% 52%, rgba(178, 24, 46, 0.36) 0%, rgba(86, 10, 22, 0.18) 52%, rgba(10, 2, 5, 0) 80%),
+    radial-gradient(circle at 50% 48%, rgba(245, 199, 107, 0.16) 0%, rgba(245, 199, 107, 0) 48%);
+}
+
+.gs-reveal-header {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  width: 100%;
+  min-height: 146px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.gs-reveal-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  max-width: 1680px;
+}
+
+.gs-reveal-rule {
+  width: 180px;
+  height: 2px;
+  flex-shrink: 0;
+  background: linear-gradient(90deg, rgba(245, 199, 107, 0) 0%, rgba(245, 199, 107, 0.85) 50%, rgba(245, 199, 107, 0) 100%);
+}
+
+.gs-reveal-meta {
+  margin: 0;
+  font-size: 62px;
+  font-weight: 800;
+  line-height: 1.18;
+  letter-spacing: 0.08em;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  filter: drop-shadow(0 6px 22px rgba(0, 0, 0, 0.68));
+}
+
+.gs-reveal-segment {
+  background: linear-gradient(180deg, #fff7d8 0%, #f5c76b 55%, #cf8f24 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gs-reveal-dot {
+  color: rgba(245, 199, 107, 0.65);
+  font-weight: 600;
+}
+
+.gs-reveal-round-no {
+  color: #ffe39a;
+}
+
+.gs-reveal-round-title {
+  color: #fff6e0;
+}
+
+.gs-reveal-prize {
+  margin: 0;
+  padding: 8px 36px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(245, 199, 107, 0.65);
+  background: linear-gradient(180deg, rgba(108, 18, 32, 0.72) 0%, rgba(38, 6, 13, 0.84) 100%);
+  box-shadow:
+    0 6px 22px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 242, 200, 0.28);
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.1em;
+  color: #ffe494;
+  text-shadow: 0 0 16px rgba(245, 199, 107, 0.45);
+}
+
+.gs-reveal-stage {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gs-reveal-empty {
+  font-size: 46px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  color: rgba(245, 215, 154, 0.76);
+}
+
+.gs-reveal-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
+  max-width: 1728px;
+}
+
+.gs-reveal-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border: 2px solid rgba(248, 208, 122, 0.86);
+  background: linear-gradient(165deg, rgba(132, 22, 38, 0.9) 0%, rgba(62, 9, 19, 0.94) 58%, rgba(34, 5, 11, 0.96) 100%);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.48),
+    0 0 24px rgba(245, 199, 107, 0.24),
+    inset 0 1.5px 0 rgba(255, 244, 206, 0.42);
+  color: #fff7df;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-shadow: 0 3px 12px rgba(0, 0, 0, 0.55);
+  will-change: transform, opacity;
+  animation-name: gs-card-fly-in;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-fill-mode: both;
+}
+
+.gs-reveal-card-hero {
+  border-width: 3px;
+  border-color: #ffe89e;
+  background: linear-gradient(160deg, rgba(154, 24, 42, 0.94) 0%, rgba(76, 10, 22, 0.96) 55%, rgba(38, 5, 12, 0.98) 100%);
+  box-shadow:
+    0 20px 56px rgba(0, 0, 0, 0.58),
+    0 0 64px rgba(245, 199, 107, 0.48),
+    inset 0 2px 0 rgba(255, 246, 214, 0.6);
+  letter-spacing: 0.14em;
+}
+
+.gs-reveal-card-dense {
+  padding: 0 10px;
+  border-width: 1.5px;
+  letter-spacing: 0.04em;
+}
+
+.gs-reveal-card-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: linear-gradient(180deg, #fffbe8 0%, #ffe6a8 65%, #f2be59 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes gs-card-fly-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(var(--gs-from-x, 0px), var(--gs-from-y, 0px), 0) scale(0.18);
+  }
+  68% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes gs-card-fade-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gs-view-entering {
     animation-duration: 0.2s;
   }
   .gs-view-exiting {
     animation-duration: 0.2s;
+  }
+  .gs-sphere-card {
+    transition-duration: 0.25s;
+  }
+  .gs-sphere-card.gs-sphere-card-hot {
+    transform: scale3d(1.08, 1.08, 1);
+  }
+  .gs-reveal-card {
+    animation-name: gs-card-fade-in;
+    animation-timing-function: ease-out;
   }
 }

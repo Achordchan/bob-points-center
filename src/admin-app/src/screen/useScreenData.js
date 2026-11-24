@@ -17,6 +17,7 @@ const STATE_POLL_INTERVAL_MS = 30_000;
 const PARTICIPANTS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const INITIAL_RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const MAX_ROUND_BACKFILL_ATTEMPTS = 3;
 
 function parseSseJson(raw) {
   if (typeof raw !== 'string' || !raw) return null;
@@ -51,6 +52,8 @@ export function useScreenData() {
     let reconnectTimer = null;
     let retryDelay = INITIAL_RECONNECT_DELAY_MS;
     let needsReconnectRefresh = false;
+    const knownRoundIds = new Set();
+    const roundBackfillAttempts = new Map();
 
     const refreshEvent = createSingleFlight(async () => {
       if (disposed) return;
@@ -76,7 +79,16 @@ export function useScreenData() {
       if (disposed) return;
       try {
         const next = await fetchAllRounds(eventId);
-        if (!disposed) setRounds(next);
+        if (!disposed) {
+          knownRoundIds.clear();
+          for (const item of next) {
+            if (item && item.id) {
+              knownRoundIds.add(item.id);
+              roundBackfillAttempts.delete(item.id);
+            }
+          }
+          setRounds(next);
+        }
       } catch {
         // 失败时保留上一次成功数据
       }
@@ -86,7 +98,15 @@ export function useScreenData() {
       if (disposed) return;
       try {
         const next = await fetchScreenState(eventId);
-        if (!disposed) setState(next);
+        if (disposed) return;
+        setState(next);
+        if (next.mode === 'reveal' && next.round_id && !knownRoundIds.has(next.round_id)) {
+          const attempts = roundBackfillAttempts.get(next.round_id) || 0;
+          if (attempts < MAX_ROUND_BACKFILL_ATTEMPTS) {
+            roundBackfillAttempts.set(next.round_id, attempts + 1);
+            void refreshRounds();
+          }
+        }
       } catch {
         // 失败时保留上一次成功数据
       }
