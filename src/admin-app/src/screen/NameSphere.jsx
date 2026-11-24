@@ -12,11 +12,13 @@ const REDUCED_FLASH_TICK_MS = 640;
 const DEFAULT_SPEED_RPS = 0.65;
 const REDUCED_SPEED_RPS = 0.08;
 const RAMP_START_FACTOR = 0.12;
-const DEFAULT_RADIUS_PX = 420;
+const DEFAULT_RADIUS_PX = 360;
 const DEFAULT_DECELERATE_MS = 1200;
 const REDUCED_DECELERATE_MS = 240;
 const GOLDEN_ANGLE_RAD = Math.PI * (3 - Math.sqrt(5));
 const RAD_TO_DEG = 180 / Math.PI;
+const NORMAL_TILT_AMP_DEG = 6;
+const REDUCED_TILT_AMP_DEG = 3;
 
 function getReducedMotionPreference() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -76,6 +78,9 @@ function swapRandomIndices(currentIndices, totalCount) {
   return next;
 }
 
+// 保证不镜像：槽位按 rotateY(lon) rotateX(-lat) translateZ(+r) 使每张卡片法线严格指向球外；
+// .gs-sphere-body 保持纯粹 preserve-3d（不设 opacity/will-change: opacity 以免压平 3D 上下文），
+// 卡片正反两面均设 backface-visibility: hidden 且背面 rotateY(180deg)，前半球显正向正面、后半球显正向 25% 透明背面。
 function computeFibonacciSlots(count, radius) {
   if (count <= 0) return [];
   const slots = new Array(count);
@@ -85,7 +90,7 @@ function computeFibonacciSlots(count, radius) {
     const lonDeg = ((i * GOLDEN_ANGLE_RAD) * RAD_TO_DEG) % 360;
     slots[i] = {
       key: i,
-      transform: `translate3d(-50%, -50%, 0) rotateY(${lonDeg.toFixed(2)}deg) rotateX(${latDeg.toFixed(2)}deg) translateZ(${radius}px)`,
+      transform: `translate3d(-50%, -50%, 0) rotateY(${lonDeg.toFixed(2)}deg) rotateX(${(-latDeg).toFixed(2)}deg) translateZ(${radius}px)`,
     };
   }
   return slots;
@@ -109,6 +114,7 @@ export default function NameSphere({
 
   const [activeIndices, setActiveIndices] = useState(() => pickInitialIndices(totalCount));
 
+  const viewportRef = useRef(null);
   const sphereRef = useRef(null);
   const cardRefs = useRef([]);
   const speedRef = useRef(speed);
@@ -151,7 +157,8 @@ export default function NameSphere({
   useEffect(() => {
     if (cardCount === 0) return undefined;
     const sphereEl = sphereRef.current;
-    if (!sphereEl) return undefined;
+    const viewportEl = viewportRef.current;
+    if (!sphereEl || !viewportEl) return undefined;
 
     let reducedMotion = getReducedMotionPreference();
     let mediaQuery = null;
@@ -194,7 +201,7 @@ export default function NameSphere({
         isDecelActive = false;
         decelStartTime = null;
         if (opacityDirty) {
-          sphereEl.style.opacity = '1';
+          viewportEl.style.opacity = '1';
           opacityDirty = false;
         }
       }
@@ -216,7 +223,8 @@ export default function NameSphere({
         speedFactor = inv * inv;
         scale = Math.max(0.12, 1 - 0.88 * easeOut);
         const opacity = Math.max(0, 1 - Math.pow(progress, 1.45));
-        sphereEl.style.opacity = opacity.toFixed(4);
+        // 透明度挂在外层透视容器而非 preserve-3d 球体本身，避免减速阶段压平 3D 层级
+        viewportEl.style.opacity = opacity.toFixed(4);
         opacityDirty = true;
       } else if (!reducedMotion && rampUpMsRef.current > 0) {
         const rampProgress = Math.min(1, (now - rampStartTime) / rampUpMsRef.current);
@@ -227,7 +235,7 @@ export default function NameSphere({
       angleY = (angleY + angularVelocityDeg * dt) % 360;
       elapsed += dt * speedFactor;
 
-      const tiltAmp = reducedMotion ? 3 : 10;
+      const tiltAmp = reducedMotion ? REDUCED_TILT_AMP_DEG : NORMAL_TILT_AMP_DEG;
       const tiltX = Math.sin(elapsed * 0.5) * tiltAmp;
 
       if (scale < 0.9999) {
@@ -240,7 +248,7 @@ export default function NameSphere({
       rafId = window.requestAnimationFrame(step);
     };
 
-    sphereEl.style.opacity = '1';
+    viewportEl.style.opacity = '1';
     rafId = window.requestAnimationFrame(step);
 
     return () => {
@@ -334,7 +342,7 @@ export default function NameSphere({
         style={decelerating ? { animationDuration: `${decelerateDurationMs}ms` } : undefined}
         aria-hidden="true"
       />
-      <div className="gs-sphere-viewport">
+      <div ref={viewportRef} className="gs-sphere-viewport">
         <div ref={sphereRef} className="gs-sphere-body">
           {slots.map((slot, idx) => {
             const name = safeNames[activeIndices[idx]] || '';

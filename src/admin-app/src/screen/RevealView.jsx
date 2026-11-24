@@ -16,7 +16,7 @@ const REDUCED_CARD_ANIM_MS = 160;
 const CONFETTI_DELAY_MS = 300;
 const CONFETTI_VOLLEY_INTERVAL_MS = 250;
 const STAGE_INNER_WIDTH = 1760;
-const GRID_MAX_HEIGHT = 636;
+const GRID_MAX_HEIGHT = 592;
 const MIN_SCREEN_FONT_SIZE = 28;
 
 const CONFETTI_COLORS = ['#F6D58E', '#C9973B', '#C8102E', '#FFF4DC'];
@@ -27,24 +27,24 @@ const CONFETTI_VOLLEYS = [
     particleCount: 100,
     angle: 60,
     spread: 62,
-    startVelocity: 50,
-    origin: { x: 0.04, y: 0.92 },
+    startVelocity: 52,
+    origin: { x: 0.08, y: 1.05 },
   },
   {
     offsetMs: CONFETTI_VOLLEY_INTERVAL_MS,
     particleCount: 100,
     angle: 120,
     spread: 62,
-    startVelocity: 50,
-    origin: { x: 0.96, y: 0.92 },
+    startVelocity: 52,
+    origin: { x: 0.92, y: 1.05 },
   },
   {
     offsetMs: CONFETTI_VOLLEY_INTERVAL_MS * 2,
     particleCount: 110,
     angle: 90,
     spread: 66,
-    startVelocity: 52,
-    origin: { x: 0.5, y: 0.96 },
+    startVelocity: 54,
+    origin: { x: 0.5, y: 1.05 },
   },
 ];
 
@@ -130,12 +130,12 @@ function computeWinnerLayout(count) {
   if (count <= 40) {
     const gap = 24;
     const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
-    return { cols: 8, cardW, cardH: 102, gap, fontSize: 32, tier: 'compact' };
+    return { cols: 8, cardW, cardH: 98, gap, fontSize: 32, tier: 'compact' };
   }
   if (count <= 48) {
     const gap = 24;
     const cardW = Math.floor((STAGE_INNER_WIDTH - 7 * gap) / 8);
-    return { cols: 8, cardW, cardH: 86, gap, fontSize: 30, tier: 'dense' };
+    return { cols: 8, cardW, cardH: 78, gap, fontSize: 30, tier: 'dense' };
   }
 
   const cols = 8;
@@ -147,24 +147,44 @@ function computeWinnerLayout(count) {
   return { cols, cardW, cardH, gap, fontSize, tier: 'dense' };
 }
 
+function countNameChars(text) {
+  return Array.from(String(text || '').trim()).length;
+}
+
+function getLengthScaleFactor(charCount) {
+  if (charCount <= 3) return 1;
+  if (charCount === 4) return 0.85;
+  if (charCount === 5) return 0.75;
+  return 0.65;
+}
+
 function estimateVisualUnits(text) {
-  const str = String(text || '');
+  const str = String(text || '').trim();
   let units = 0;
-  for (let i = 0; i < str.length; i += 1) {
-    const code = str.charCodeAt(i);
-    units += code <= 0x7f ? 0.62 : 1.06;
+  for (const ch of str) {
+    const code = ch.codePointAt(0) || 0;
+    units += code <= 0x7f ? 0.66 : 1.08;
   }
   return Math.max(1, units);
 }
 
-function computeAdjustedFontSize(name, layout) {
-  const horizontalPadding = layout.tier === 'hero' ? 96 : 36;
-  const availWidth = Math.max(80, layout.cardW - horizontalPadding);
-  const units = estimateVisualUnits(name);
-  if (units * layout.fontSize <= availWidth) {
+function computeRoundFontSize(winnerNames, layout) {
+  if (!Array.isArray(winnerNames) || winnerNames.length === 0) {
     return layout.fontSize;
   }
-  return Math.max(MIN_SCREEN_FONT_SIZE, Math.floor(availWidth / units));
+  let maxChars = 0;
+  let maxUnits = 1;
+  for (const name of winnerNames) {
+    const chars = countNameChars(name);
+    if (chars > maxChars) maxChars = chars;
+    const units = estimateVisualUnits(name);
+    if (units > maxUnits) maxUnits = units;
+  }
+  const tierScaled = Math.round(layout.fontSize * getLengthScaleFactor(maxChars));
+  const horizontalPadding = layout.tier === 'hero' ? 100 : 32;
+  const availWidth = Math.max(80, layout.cardW - horizontalPadding);
+  const fitWidth = Math.floor(availWidth / maxUnits);
+  return Math.max(MIN_SCREEN_FONT_SIZE, Math.min(tierScaled, fitWidth));
 }
 
 function chunkIntoRows(items, cols) {
@@ -314,6 +334,13 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
 
   const layout = useMemo(() => computeWinnerLayout(winners.length), [winners.length]);
   const winnerRows = useMemo(() => chunkIntoRows(winners, layout.cols), [winners, layout.cols]);
+  const roundFontSize = useMemo(
+    () => computeRoundFontSize(winners, layout),
+    [winners, layout],
+  );
+  const gridSlotHeight = winnerRows.length > 0
+    ? winnerRows.length * layout.cardH + Math.max(0, winnerRows.length - 1) * layout.gap
+    : 0;
 
   const staggerMs = reducedMotion ? REDUCED_CARD_STAGGER_MS : CARD_STAGGER_MS;
   const cardAnimMs = reducedMotion ? REDUCED_CARD_ANIM_MS : CARD_ANIM_MS;
@@ -361,43 +388,45 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
 
       {showHeader ? (
         <div className="gs-reveal-content">
-          <header key={`header-${activeRoundId}`} className="gs-reveal-header">
-            {heading.kicker ? (
-              <p className="gs-reveal-kicker">{heading.kicker}</p>
-            ) : null}
-            <h1
-              className="gs-reveal-title"
-              style={{ fontSize: `${titleFontSize}px` }}
-            >
-              {heading.title}
-            </h1>
-            {showPrize ? (
-              <p className="gs-reveal-prize">每人 {matchedRound.amount_each} BOB</p>
-            ) : null}
-          </header>
+          <div className="gs-reveal-group">
+            <header key={`header-${activeRoundId}`} className="gs-reveal-header">
+              {heading.kicker ? (
+                <p className="gs-reveal-kicker">{heading.kicker}</p>
+              ) : null}
+              <h1
+                className="gs-reveal-title"
+                style={{ fontSize: `${titleFontSize}px` }}
+              >
+                {heading.title}
+              </h1>
+              {showPrize ? (
+                <p className="gs-reveal-prize">每人 {matchedRound.amount_each} BOB</p>
+              ) : null}
+            </header>
 
-          <div className="gs-reveal-stage">
-            {showWinners ? (
-              winners.length === 0 ? (
-                <div className="gs-reveal-empty">本轮暂无中奖人</div>
-              ) : (
-                <div
-                  key={`grid-${activeRoundId}`}
-                  className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
-                  style={{ rowGap: `${layout.gap}px` }}
-                >
-                  {winnerRows.map((row, rowIdx) => (
-                    <div
-                      key={`${activeRoundId}-row-${rowIdx}`}
-                      className="gs-reveal-grid-row"
-                      style={{
-                        gridTemplateColumns: `repeat(${row.length}, ${layout.cardW}px)`,
-                        columnGap: `${layout.gap}px`,
-                      }}
-                    >
-                      {row.map(({ name: winnerName, index }) => {
-                        const fontSize = computeAdjustedFontSize(winnerName, layout);
-                        return (
+            <div
+              className="gs-reveal-stage"
+              style={gridSlotHeight > 0 ? { minHeight: `${gridSlotHeight}px` } : undefined}
+            >
+              {showWinners ? (
+                winners.length === 0 ? (
+                  <div className="gs-reveal-empty">本轮暂无中奖人</div>
+                ) : (
+                  <div
+                    key={`grid-${activeRoundId}`}
+                    className={`gs-reveal-grid gs-reveal-grid-${layout.tier}`}
+                    style={{ rowGap: `${layout.gap}px` }}
+                  >
+                    {winnerRows.map((row, rowIdx) => (
+                      <div
+                        key={`${activeRoundId}-row-${rowIdx}`}
+                        className="gs-reveal-grid-row"
+                        style={{
+                          gridTemplateColumns: `repeat(${row.length}, ${layout.cardW}px)`,
+                          columnGap: `${layout.gap}px`,
+                        }}
+                      >
+                        {row.map(({ name: winnerName, index }) => (
                           <div
                             key={`${activeRoundId}-${index}`}
                             className={`gs-reveal-card gs-reveal-card-${layout.tier}`}
@@ -411,19 +440,19 @@ export default function RevealView({ names, rounds, segmentLabels, state }) {
                             <div className="gs-reveal-card-inner">
                               <span
                                 className="gs-reveal-card-name"
-                                style={{ fontSize: `${fontSize}px` }}
+                                style={{ fontSize: `${roundFontSize}px` }}
                               >
                                 {winnerName}
                               </span>
                             </div>
                           </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              )
-            ) : null}
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}
