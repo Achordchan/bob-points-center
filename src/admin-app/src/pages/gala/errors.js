@@ -50,9 +50,9 @@ const DYNAMIC_ERROR_MESSAGES = {
   },
   pools_exceed_total_budget(data) {
     if (hasFiniteNumber(data.pools_total)) {
-      return `员工奖池预算合计（${data.pools_total}）超出活动总预算`;
+      return `奖池预算合计（${data.pools_total}）超出活动总预算`;
     }
-    return '员工奖池预算合计超出活动总预算';
+    return '奖池预算合计超出活动总预算';
   },
   invalid_userid(data) {
     if (hasFiniteNumber(data.index)) {
@@ -119,7 +119,7 @@ const STATIC_ERROR_MESSAGES = {
   round_not_found: '抽签轮次不存在',
   round_not_coin: '该轮次不是发币轮，无需发币',
   invalid_winner_userid: '中奖人用户 ID 格式异常，无法自动发币',
-  winner_pool_missing: '中奖记录关联的奖池缺失或类型不匹配，无法发币',
+  winner_pool_missing: '中奖记录关联的奖池缺失或不可用，无法发币',
   winner_round_mismatch: '中奖记录与所属轮次配置不一致，无法发币',
   ledger_id_unsafe: '账本流水号超出范围，本次发币已回滚',
   award_failed: '发币失败，请稍后重试',

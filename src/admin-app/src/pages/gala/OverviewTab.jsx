@@ -137,7 +137,7 @@ export default function OverviewTab({ detail, segments = [] }) {
         />
       </Card>
 
-      <Card size="small" title={`公开奖池（${publicPools.length}）`}>
+      <Card size="small" title={`奖池（${publicPools.length}）`}>
         <Table
           rowKey="id"
           size="small"
