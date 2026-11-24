@@ -5,6 +5,7 @@ import { hasPermission } from '../../permissions.js';
 import { galaErrorText, isGalaVersionError } from './errors.js';
 import { EVENT_STATUS_COLORS, EVENT_STATUS_LABELS } from './EventFormModal.jsx';
 import OverviewTab from './OverviewTab.jsx';
+import ParticipantsTab from './ParticipantsTab.jsx';
 import PoolsTab from './PoolsTab.jsx';
 
 export default function EventDetail({ eventId, me, onBack }) {
@@ -98,6 +99,11 @@ export default function EventDetail({ eventId, me, onBack }) {
       key: 'pools',
       label: '奖池',
       children: <PoolsTab {...tabSharedProps} />,
+    },
+    {
+      key: 'participants',
+      label: '参与人',
+      children: <ParticipantsTab {...tabSharedProps} />,
     },
   ];
 
