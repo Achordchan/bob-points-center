@@ -71,7 +71,7 @@ export default function RoundsTab({
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
 
-  const [drawModalOpen, setDrawModalOpen] = useState(false);
+  const [drawModal, setDrawModal] = useState(null);
   const [openingDraw, setOpeningDraw] = useState(false);
   const [nextRoundNos, setNextRoundNos] = useState(() => normalizeNextRoundNos(detail?.next_round_nos));
   const [drawResult, setDrawResult] = useState(null);
@@ -166,7 +166,9 @@ export default function RoundsTab({
       const latestDetail = await reload();
       if (!latestDetail) return;
       setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
-      setDrawModalOpen(true);
+      setDrawModal({
+        version: typeof latestDetail.gala_version === 'string' ? latestDetail.gala_version : '',
+      });
     } finally {
       setOpeningDraw(false);
     }
@@ -183,12 +185,14 @@ export default function RoundsTab({
     const [, latestDetail] = await Promise.all([loadRounds(), reload()]);
     if (latestDetail) {
       setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
+      const latestVersion = typeof latestDetail.gala_version === 'string' ? latestDetail.gala_version : '';
+      setDrawModal((prev) => (prev ? { ...prev, version: latestVersion } : prev));
     }
   }, [loadRounds, reload]);
 
   const handleDrawSuccess = useCallback(
     async (data) => {
-      setDrawModalOpen(false);
+      setDrawModal(null);
       if (data?.segment) {
         setNextRoundNoOverrides((prev) => {
           if (!Object.hasOwn(prev, data.segment)) return prev;
@@ -450,11 +454,11 @@ export default function RoundsTab({
       )}
 
       <DrawModal
-        open={drawModalOpen}
-        onCancel={() => setDrawModalOpen(false)}
+        open={Boolean(drawModal)}
+        onCancel={() => setDrawModal(null)}
         eventId={eventId}
         detail={detail}
-        galaVersion={galaVersion}
+        drawGalaVersion={drawModal?.version ?? ''}
         segments={segments}
         nextRoundNos={nextRoundNos}
         getNextRoundNo={getNextRoundNo}

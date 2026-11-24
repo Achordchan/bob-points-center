@@ -55,8 +55,7 @@ export default function ReservedTab({
 
   const isSuperAdmin = me?.isSuperAdmin === true;
 
-  const [poolModalOpen, setPoolModalOpen] = useState(false);
-  const [editingPool, setEditingPool] = useState(null);
+  const [poolEditing, setPoolEditing] = useState(null);
   const [poolSubmitting, setPoolSubmitting] = useState(false);
 
   const [slots, setSlots] = useState([]);
@@ -65,7 +64,7 @@ export default function ReservedTab({
   const [hasMore, setHasMore] = useState(false);
   const [cancellingSlotId, setCancellingSlotId] = useState(null);
 
-  const [slotModalOpen, setSlotModalOpen] = useState(false);
+  const [slotModal, setSlotModal] = useState(null);
   const [openingSlotModal, setOpeningSlotModal] = useState(false);
   const [slotSubmitting, setSlotSubmitting] = useState(false);
 
@@ -177,16 +176,19 @@ export default function ReservedTab({
     loadSlots();
   }, [isSuperAdmin, eventId, galaVersion, loadSlots]);
 
+  const poolModalOpen = Boolean(poolEditing);
+  const editingPool = poolEditing?.pool || null;
   const isEditPool = Boolean(editingPool?.id);
+  const slotModalOpen = Boolean(slotModal);
 
   useEffect(() => {
-    if (!poolModalOpen) return;
+    if (!poolEditing) return;
     poolForm.resetFields();
-    if (editingPool?.id) {
+    if (poolEditing.pool?.id) {
       poolForm.setFieldsValue({
-        name: editingPool.name || '',
-        sponsor: editingPool.sponsor || '',
-        budget: Number.isSafeInteger(Number(editingPool.budget)) ? Number(editingPool.budget) : 0,
+        name: poolEditing.pool.name || '',
+        sponsor: poolEditing.pool.sponsor || '',
+        budget: Number.isSafeInteger(Number(poolEditing.pool.budget)) ? Number(poolEditing.pool.budget) : 0,
       });
     } else {
       poolForm.setFieldsValue({
@@ -195,7 +197,7 @@ export default function ReservedTab({
         budget: 0,
       });
     }
-  }, [poolModalOpen, editingPool, poolForm]);
+  }, [poolEditing, poolForm]);
 
   useEffect(() => {
     nextRoundNosRef.current = normalizeNextRoundNos(detail?.next_round_nos);
@@ -216,36 +218,42 @@ export default function ReservedTab({
   }, [slotModalOpen, slotForm]);
 
   const openCreatePool = () => {
-    setEditingPool(null);
-    setPoolModalOpen(true);
+    setPoolEditing({
+      pool: null,
+      version: typeof galaVersion === 'string' ? galaVersion : '',
+    });
   };
 
   const openEditPool = (pool) => {
-    setEditingPool(pool);
-    setPoolModalOpen(true);
+    setPoolEditing({
+      pool,
+      version: typeof galaVersion === 'string' ? galaVersion : '',
+    });
   };
 
   const closePoolModal = () => {
-    setPoolModalOpen(false);
-    setEditingPool(null);
+    setPoolEditing(null);
   };
 
   const handlePoolSubmit = async (values) => {
+    if (!poolEditing) return;
+    const targetPool = poolEditing.pool;
+    const version = poolEditing.version;
     setPoolSubmitting(true);
     try {
       const name = String(values.name || '').trim();
       const sponsor = String(values.sponsor || '').trim();
       const budget = Number(values.budget);
 
-      if (isEditPool) {
+      if (targetPool?.id) {
         await api('/admin/gala/reserved/pools/update', {
           method: 'POST',
           body: {
-            id: editingPool.id,
+            id: targetPool.id,
             name,
             sponsor,
             budget,
-            gala_version: galaVersion,
+            gala_version: version,
           },
         });
         message.success('预留奖池已更新');
@@ -257,7 +265,7 @@ export default function ReservedTab({
             name,
             sponsor,
             budget,
-            gala_version: galaVersion,
+            gala_version: version,
           },
         });
         message.success('预留奖池已创建');
@@ -282,14 +290,16 @@ export default function ReservedTab({
       const latestDetail = await reload();
       if (!latestDetail) return;
       nextRoundNosRef.current = normalizeNextRoundNos(latestDetail.next_round_nos);
-      setSlotModalOpen(true);
+      setSlotModal({
+        version: typeof latestDetail.gala_version === 'string' ? latestDetail.gala_version : '',
+      });
     } finally {
       setOpeningSlotModal(false);
     }
   };
 
   const closeSlotModal = () => {
-    setSlotModalOpen(false);
+    setSlotModal(null);
   };
 
   const handleSlotFormValuesChange = (changedValues) => {
@@ -302,6 +312,8 @@ export default function ReservedTab({
   };
 
   const handleSlotSubmit = async (values) => {
+    if (!slotModal) return;
+    const version = slotModal.version;
     setSlotSubmitting(true);
     try {
       await api('/admin/gala/reserved/create', {
@@ -313,7 +325,7 @@ export default function ReservedTab({
           userid: String(values.userid ?? ''),
           pool_id: Number(values.pool_id),
           note: String(values.note || '').trim(),
-          gala_version: galaVersion,
+          gala_version: version,
         },
       });
       message.success('预留名额已创建');
@@ -337,7 +349,7 @@ export default function ReservedTab({
         method: 'POST',
         body: {
           id: record.id,
-          gala_version: record.gala_version || galaVersion,
+          gala_version: typeof record?.gala_version === 'string' ? record.gala_version : '',
         },
       });
       message.success('预留名额已取消');

@@ -32,6 +32,19 @@ function parseBatchUserids(rawText) {
   return list;
 }
 
+function attachCapturedVersion(rows, fallbackVersion) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((item) => {
+    if (typeof item?.gala_version === 'string' && item.gala_version) {
+      return item;
+    }
+    return {
+      ...item,
+      gala_version: fallbackVersion,
+    };
+  });
+}
+
 export default function ParticipantsTab({
   eventId,
   detail,
@@ -51,22 +64,26 @@ export default function ParticipantsTab({
   const [hasMore, setHasMore] = useState(false);
   const [removingId, setRemovingId] = useState(null);
 
-  const [modalOpen, setModalOpen] = useState(false);
+  const [addModal, setAddModal] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   const requestSeqRef = useRef(0);
+  const galaVersionRef = useRef(galaVersion);
+  galaVersionRef.current = galaVersion;
 
+  const modalOpen = Boolean(addModal);
   const parsedUserids = useMemo(() => parseBatchUserids(useridsText), [useridsText]);
 
   const loadParticipants = useCallback(async () => {
     if (!eventId) return;
     const seq = ++requestSeqRef.current;
+    const capturedVersion = typeof galaVersionRef.current === 'string' ? galaVersionRef.current : '';
     setLoading(true);
     setLoadingMore(false);
     try {
       const resp = await api(`/admin/gala/participants?${qs({ event_id: eventId, limit: PAGE_SIZE })}`);
       if (seq !== requestSeqRef.current) return;
-      const list = Array.isArray(resp?.data) ? resp.data : [];
+      const list = attachCapturedVersion(resp?.data, capturedVersion);
       setParticipants(list);
       setHasMore(list.length >= PAGE_SIZE);
     } catch (err) {
@@ -82,13 +99,14 @@ export default function ParticipantsTab({
     const lastId = participants[participants.length - 1]?.id;
     if (!lastId) return;
     const seq = requestSeqRef.current;
+    const capturedVersion = typeof galaVersionRef.current === 'string' ? galaVersionRef.current : '';
     setLoadingMore(true);
     try {
       const resp = await api(
         `/admin/gala/participants?${qs({ event_id: eventId, after_id: lastId, limit: PAGE_SIZE })}`,
       );
       if (seq !== requestSeqRef.current) return;
-      const list = Array.isArray(resp?.data) ? resp.data : [];
+      const list = attachCapturedVersion(resp?.data, capturedVersion);
       setParticipants((prev) => {
         const seen = new Set(prev.map((item) => item.id));
         const appended = list.filter((item) => !seen.has(item.id));
@@ -121,21 +139,25 @@ export default function ParticipantsTab({
   }, [modalOpen, form]);
 
   const openAddModal = () => {
-    setModalOpen(true);
+    setAddModal({
+      version: typeof galaVersion === 'string' ? galaVersion : '',
+    });
   };
 
   const closeModal = () => {
-    setModalOpen(false);
+    setAddModal(null);
   };
 
   const handleAddSubmit = async (values) => {
+    if (!addModal) return;
+    const version = addModal.version;
     setSubmitting(true);
     let submittedUserids = null;
     try {
       const useAllActive = values.all_active_dingtalk === true;
       const payload = {
         event_id: eventId,
-        gala_version: galaVersion,
+        gala_version: version,
       };
       if (values.table_no !== undefined && values.table_no !== null && values.table_no !== '') {
         payload.table_no = Number(values.table_no);
@@ -194,7 +216,7 @@ export default function ParticipantsTab({
         body: {
           event_id: eventId,
           participant_id: record.id,
-          gala_version: record.gala_version || galaVersion,
+          gala_version: typeof record?.gala_version === 'string' ? record.gala_version : '',
         },
       });
       const removed = Number(resp?.data?.removed || 0);

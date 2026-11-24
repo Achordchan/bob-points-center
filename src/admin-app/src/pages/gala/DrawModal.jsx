@@ -25,7 +25,7 @@ export default function DrawModal({
   onCancel,
   eventId,
   detail,
-  galaVersion,
+  drawGalaVersion,
   segments = [],
   nextRoundNos,
   getNextRoundNo,
@@ -161,6 +161,8 @@ export default function DrawModal({
       children: excludePrevious ? '是' : '否',
     });
 
+    const version = typeof drawGalaVersion === 'string' ? drawGalaVersion : '';
+
     modal.confirm({
       title: '确认发起抽签',
       width: 480,
@@ -186,7 +188,7 @@ export default function DrawModal({
             prize_type: values.prize_type,
             exclude_previous_winners: excludePrevious,
             round_no: roundNo,
-            gala_version: galaVersion,
+            gala_version: version,
           };
           if (isCoin) {
             payload.pool_id = poolId;
