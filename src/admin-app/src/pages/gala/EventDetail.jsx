@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Card, Space, Spin, Tabs, Tag, Typography } from 'antd';
 import { api, qs } from '../../api.js';
 import { hasPermission } from '../../permissions.js';
@@ -9,9 +9,12 @@ import ParticipantsTab from './ParticipantsTab.jsx';
 import PoolsTab from './PoolsTab.jsx';
 import RoundsTab from './RoundsTab.jsx';
 
+const ReservedTab = lazy(() => import('./ReservedTab.jsx'));
+
 export default function EventDetail({ eventId, me, onBack }) {
   const { message } = AntApp.useApp();
   const canEdit = hasPermission(me, 'gala:edit');
+  const isSuperAdmin = me?.isSuperAdmin === true;
 
   const [detail, setDetail] = useState(null);
   const [galaVersion, setGalaVersion] = useState('');
@@ -113,6 +116,26 @@ export default function EventDetail({ eventId, me, onBack }) {
     },
   ];
 
+  if (isSuperAdmin) {
+    tabItems.push({
+      key: 'reserved',
+      label: '预留名额',
+      children: (
+        <Suspense
+          fallback={
+            <div style={{ padding: '32px 0', textAlign: 'center' }}>
+              <Spin />
+            </div>
+          }
+        >
+          <ReservedTab {...tabSharedProps} />
+        </Suspense>
+      ),
+    });
+  }
+
+  const effectiveActiveTab = !isSuperAdmin && activeTab === 'reserved' ? 'overview' : activeTab;
+
   return (
     <Card
       title={
@@ -157,7 +180,7 @@ export default function EventDetail({ eventId, me, onBack }) {
         />
       ) : detail ? (
         <Tabs
-          activeKey={activeTab}
+          activeKey={effectiveActiveTab}
           onChange={setActiveTab}
           items={tabItems}
         />
