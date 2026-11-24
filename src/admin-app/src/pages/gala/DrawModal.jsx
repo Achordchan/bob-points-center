@@ -19,6 +19,7 @@ import { galaErrorText } from './errors.js';
 
 const MAX_DRAW_COUNT = 100;
 const MAX_TITLE_LENGTH = 80;
+const PG_INT_MAX = 2147483647;
 
 export default function DrawModal({
   open,
@@ -68,6 +69,7 @@ export default function DrawModal({
   );
 
   const nextRoundNo = hasNextRoundNos && selectedSegment ? getNextRoundNo(selectedSegment) : null;
+  const roundNoExhausted = nextRoundNo !== null && nextRoundNo > PG_INT_MAX;
 
   const selectedPool = useMemo(
     () => publicPools.find((pool) => Number(pool.id) === Number(selectedPoolId)) || null,
@@ -113,6 +115,10 @@ export default function DrawModal({
     const roundNo = hasNextRoundNos ? getNextRoundNo(segment) : null;
     if (!Number.isSafeInteger(roundNo) || roundNo < 1) {
       message.error('尚未获取到最新轮次号，请关闭弹窗后重试');
+      return;
+    }
+    if (roundNo > PG_INT_MAX) {
+      message.error('该环节轮次号已用尽，不能再抽签');
       return;
     }
     const title = String(values.title || '').trim();
@@ -234,7 +240,7 @@ export default function DrawModal({
       okText="下一步"
       cancelText="取消"
       confirmLoading={submitting}
-      okButtonProps={{ disabled: drawableSegments.length === 0 || !hasNextRoundNos }}
+      okButtonProps={{ disabled: drawableSegments.length === 0 || !hasNextRoundNos || roundNoExhausted }}
       width={560}
       destroyOnHidden
     >
@@ -261,12 +267,15 @@ export default function DrawModal({
           <Form.Item
             name="segment"
             label="环节"
+            validateStatus={roundNoExhausted ? 'error' : undefined}
             extra={
               !hasNextRoundNos
                 ? '尚未获取到轮次信息，请关闭后重新发起抽签'
-                : nextRoundNo !== null
-                  ? `本环节下一轮次号：第 ${nextRoundNo} 轮`
-                  : '仅显示已启用且支持抽签的环节'
+                : roundNoExhausted
+                  ? <Typography.Text type="danger">该环节轮次号已用尽，不能再抽签</Typography.Text>
+                  : nextRoundNo !== null
+                    ? `本环节下一轮次号：第 ${nextRoundNo} 轮`
+                    : '仅显示已启用且支持抽签的环节'
             }
             rules={[{ required: true, message: '请选择抽签环节' }]}
           >

@@ -464,7 +464,7 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     [id, id],
   );
   const nextRoundRows = await db.all(
-    'SELECT segment, COALESCE(MAX(round_no), 0) + 1 AS next_no FROM gala_rounds WHERE event_id = ? GROUP BY segment',
+    'SELECT segment, COALESCE(MAX(round_no), 0)::bigint + 1 AS next_no FROM gala_rounds WHERE event_id = ? GROUP BY segment',
     [id],
   );
   const nextRoundNos = {};

@@ -67,9 +67,13 @@ export default function ReservedTab({
   const [slotModal, setSlotModal] = useState(null);
   const [openingSlotModal, setOpeningSlotModal] = useState(false);
   const [slotSubmitting, setSlotSubmitting] = useState(false);
+  const [nextRoundNos, setNextRoundNos] = useState(() => normalizeNextRoundNos(detail?.next_round_nos));
+
+  const selectedSlotSegment = Form.useWatch('segment', slotForm);
 
   const requestSeqRef = useRef(0);
-  const nextRoundNosRef = useRef(normalizeNextRoundNos(detail?.next_round_nos));
+  const nextRoundNosRef = useRef(nextRoundNos);
+  nextRoundNosRef.current = nextRoundNos;
   const roundNoManualRef = useRef(false);
 
   const reservedPools = useMemo(
@@ -200,17 +204,20 @@ export default function ReservedTab({
   }, [poolEditing, poolForm]);
 
   useEffect(() => {
-    nextRoundNosRef.current = normalizeNextRoundNos(detail?.next_round_nos);
+    const normalized = normalizeNextRoundNos(detail?.next_round_nos);
+    nextRoundNosRef.current = normalized;
+    setNextRoundNos(normalized);
   }, [detail]);
 
   useEffect(() => {
     if (!slotModalOpen) return;
     roundNoManualRef.current = false;
     const defaultSegment = drawableSegmentsRef.current[0]?.key;
+    const defaultRoundNo = resolveNextRoundNo(nextRoundNosRef.current, defaultSegment);
     slotForm.resetFields();
     slotForm.setFieldsValue({
       segment: defaultSegment,
-      round_no: resolveNextRoundNo(nextRoundNosRef.current, defaultSegment),
+      round_no: defaultRoundNo > PG_INT_MAX ? undefined : defaultRoundNo,
       userid: '',
       pool_id: reservedPoolsRef.current[0]?.id,
       note: '',
@@ -289,7 +296,9 @@ export default function ReservedTab({
     try {
       const latestDetail = await reload();
       if (!latestDetail) return;
-      nextRoundNosRef.current = normalizeNextRoundNos(latestDetail.next_round_nos);
+      const normalized = normalizeNextRoundNos(latestDetail.next_round_nos);
+      nextRoundNosRef.current = normalized;
+      setNextRoundNos(normalized);
       setSlotModal({
         version: typeof latestDetail.gala_version === 'string' ? latestDetail.gala_version : '',
       });
@@ -307,12 +316,17 @@ export default function ReservedTab({
       roundNoManualRef.current = true;
     }
     if (Object.hasOwn(changedValues, 'segment') && !roundNoManualRef.current) {
-      slotForm.setFieldValue('round_no', resolveNextRoundNo(nextRoundNosRef.current, changedValues.segment));
+      const nextNo = resolveNextRoundNo(nextRoundNosRef.current, changedValues.segment);
+      slotForm.setFieldValue('round_no', nextNo > PG_INT_MAX ? undefined : nextNo);
     }
   };
 
   const handleSlotSubmit = async (values) => {
     if (!slotModal) return;
+    if (resolveNextRoundNo(nextRoundNosRef.current, values.segment) > PG_INT_MAX) {
+      message.error('该环节轮次号已用尽');
+      return;
+    }
     const version = slotModal.version;
     setSlotSubmitting(true);
     try {
@@ -361,6 +375,11 @@ export default function ReservedTab({
       setCancellingSlotId(null);
     }
   };
+
+  const slotDefaultRoundNo = selectedSlotSegment
+    ? resolveNextRoundNo(nextRoundNos, selectedSlotSegment)
+    : null;
+  const slotRoundNoExhausted = slotDefaultRoundNo !== null && slotDefaultRoundNo > PG_INT_MAX;
 
   if (!isSuperAdmin) return null;
 
@@ -635,7 +654,13 @@ export default function ReservedTab({
         okText="创建"
         cancelText="取消"
         confirmLoading={slotSubmitting}
-        okButtonProps={{ disabled: drawableSegments.length === 0 || reservedPools.length === 0 || atSlotLimit }}
+        okButtonProps={{
+          disabled:
+            drawableSegments.length === 0
+            || reservedPools.length === 0
+            || atSlotLimit
+            || slotRoundNoExhausted,
+        }}
         width={540}
         destroyOnHidden
       >
@@ -678,7 +703,14 @@ export default function ReservedTab({
             <Form.Item
               name="round_no"
               label="轮次号"
-              extra="填写正整数，须大于该环节当前已抽的最大轮次号"
+              validateStatus={slotRoundNoExhausted ? 'error' : undefined}
+              extra={
+                slotRoundNoExhausted ? (
+                  <Typography.Text type="danger">该环节轮次号已用尽</Typography.Text>
+                ) : (
+                  '填写正整数，须大于该环节当前已抽的最大轮次号'
+                )
+              }
               rules={[
                 { required: true, message: '请输入轮次号' },
                 {
@@ -702,6 +734,7 @@ export default function ReservedTab({
                 max={PG_INT_MAX}
                 step={1}
                 precision={0}
+                disabled={slotRoundNoExhausted}
                 style={{ width: '100%' }}
                 placeholder="请输入正整数，例如：1"
               />

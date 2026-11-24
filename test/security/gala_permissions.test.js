@@ -1347,6 +1347,7 @@ test('活动详情：在同一只读快照里返回各环节下一轮次号 next
   const V = '11111111-2222-4333-8444-555555555555';
   const makeDb = (roundGroups) => {
     const queries = [];
+    const allQueries = [];
     const tx = {
       exec: async (sql) => { queries.push(sql); },
       get: async (sql) => {
@@ -1371,6 +1372,7 @@ test('活动详情：在同一只读快照里返回各环节下一轮次号 next
       },
       all: async (sql) => {
         queries.push(sql);
+        allQueries.push(sql);
         if (sql.includes('FROM gala_pools')) return [];
         if (sql.includes('FROM gala_rounds') && sql.includes('GROUP BY segment')) return roundGroups;
         return [];
@@ -1378,6 +1380,7 @@ test('活动详情：在同一只读快照里返回各环节下一轮次号 next
     };
     return {
       queries,
+      allQueries,
       transaction: async (fn) => fn(tx),
     };
   };
@@ -1392,7 +1395,13 @@ test('活动详情：在同一只读快照里返回各环节下一轮次号 next
   assert.equal(Object.hasOwn(detail.next_round_nos, 'giveaway'), false);
   assert.equal(detail.gala_version, V);
   assert.ok(db.queries.some((q) => q.includes('REPEATABLE READ, READ ONLY')));
-  assert.ok(db.queries.some((q) => q.includes('COALESCE(MAX(round_no), 0) + 1 AS next_no') && q.includes('GROUP BY segment')));
+  assert.ok(db.allQueries.some((q) => q.includes('COALESCE(MAX(round_no), 0)::bigint + 1 AS next_no') && q.includes('GROUP BY segment')));
+
+  const maxedDb = makeDb([{ segment: 'lottery', next_no: '2147483648' }]);
+  const maxedDetail = await getGalaEventDetail(maxedDb, { eventId: 1 });
+  assert.ok(maxedDb.allQueries.some((q) => q.includes('::bigint + 1')));
+  assert.equal(maxedDetail.next_round_nos.lottery, 2147483648);
+  assert.equal(typeof maxedDetail.next_round_nos.lottery, 'number');
 
   const emptyDetail = await getGalaEventDetail(makeDb([]), { eventId: 1 });
   assert.deepEqual(emptyDetail.next_round_nos, {});
