@@ -27,6 +27,7 @@ export default function DrawModal({
   detail,
   galaVersion,
   segments = [],
+  nextRoundNos,
   getNextRoundNo,
   onRoundNoChanged,
   onSuccess,
@@ -62,7 +63,11 @@ export default function DrawModal({
     [detail?.pools],
   );
 
-  const nextRoundNo = selectedSegment ? getNextRoundNo(selectedSegment) : null;
+  const hasNextRoundNos = Boolean(
+    nextRoundNos && typeof nextRoundNos === 'object' && !Array.isArray(nextRoundNos),
+  );
+
+  const nextRoundNo = hasNextRoundNos && selectedSegment ? getNextRoundNo(selectedSegment) : null;
 
   const selectedPool = useMemo(
     () => publicPools.find((pool) => Number(pool.id) === Number(selectedPoolId)) || null,
@@ -105,7 +110,11 @@ export default function DrawModal({
     const segment = values.segment;
     const segmentObj = drawableSegments.find((item) => item.key === segment);
     const segmentLabel = segmentObj?.label || segment;
-    const roundNo = getNextRoundNo(segment);
+    const roundNo = hasNextRoundNos ? getNextRoundNo(segment) : null;
+    if (!Number.isSafeInteger(roundNo) || roundNo < 1) {
+      message.error('尚未获取到最新轮次号，请关闭弹窗后重试');
+      return;
+    }
     const title = String(values.title || '').trim();
     const count = Number(values.draw_count);
     const isCoin = values.prize_type === 'coin';
@@ -223,7 +232,7 @@ export default function DrawModal({
       okText="下一步"
       cancelText="取消"
       confirmLoading={submitting}
-      okButtonProps={{ disabled: drawableSegments.length === 0 }}
+      okButtonProps={{ disabled: drawableSegments.length === 0 || !hasNextRoundNos }}
       width={560}
       destroyOnHidden
     >
@@ -251,9 +260,11 @@ export default function DrawModal({
             name="segment"
             label="环节"
             extra={
-              nextRoundNo !== null
-                ? `本环节下一轮次号：第 ${nextRoundNo} 轮`
-                : '仅显示已启用且支持抽签的环节'
+              !hasNextRoundNos
+                ? '尚未获取到轮次信息，请关闭后重新发起抽签'
+                : nextRoundNo !== null
+                  ? `本环节下一轮次号：第 ${nextRoundNo} 轮`
+                  : '仅显示已启用且支持抽签的环节'
             }
             rules={[{ required: true, message: '请选择抽签环节' }]}
           >

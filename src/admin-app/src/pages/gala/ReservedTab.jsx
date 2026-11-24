@@ -30,6 +30,16 @@ const SLOT_STATUS_META = {
   cancelled: { label: '已取消', color: 'default' },
 };
 
+function normalizeNextRoundNos(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function resolveNextRoundNo(nextRoundNos, segmentKey) {
+  if (!segmentKey || !nextRoundNos) return 1;
+  const raw = Number(nextRoundNos[segmentKey]);
+  return Number.isSafeInteger(raw) && raw >= 1 ? raw : 1;
+}
+
 export default function ReservedTab({
   eventId,
   detail,
@@ -57,9 +67,12 @@ export default function ReservedTab({
   const [cancellingSlotId, setCancellingSlotId] = useState(null);
 
   const [slotModalOpen, setSlotModalOpen] = useState(false);
+  const [openingSlotModal, setOpeningSlotModal] = useState(false);
   const [slotSubmitting, setSlotSubmitting] = useState(false);
 
   const requestSeqRef = useRef(0);
+  const nextRoundNosRef = useRef(normalizeNextRoundNos(detail?.next_round_nos));
+  const roundNoManualRef = useRef(false);
 
   const reservedPools = useMemo(
     () => (Array.isArray(detail?.pools) ? detail.pools : []).filter((pool) => Number(pool?.is_reserved) === 1),
@@ -185,11 +198,17 @@ export default function ReservedTab({
   }, [poolModalOpen, editingPool, poolForm]);
 
   useEffect(() => {
+    nextRoundNosRef.current = normalizeNextRoundNos(detail?.next_round_nos);
+  }, [detail]);
+
+  useEffect(() => {
     if (!slotModalOpen) return;
+    roundNoManualRef.current = false;
+    const defaultSegment = drawableSegmentsRef.current[0]?.key;
     slotForm.resetFields();
     slotForm.setFieldsValue({
-      segment: drawableSegmentsRef.current[0]?.key,
-      round_no: 1,
+      segment: defaultSegment,
+      round_no: resolveNextRoundNo(nextRoundNosRef.current, defaultSegment),
       userid: '',
       pool_id: reservedPoolsRef.current[0]?.id,
       note: '',
@@ -256,12 +275,30 @@ export default function ReservedTab({
     }
   };
 
-  const openCreateSlot = () => {
-    setSlotModalOpen(true);
+  const openCreateSlot = async () => {
+    if (openingSlotModal) return;
+    setOpeningSlotModal(true);
+    try {
+      const latestDetail = await reload();
+      if (!latestDetail) return;
+      nextRoundNosRef.current = normalizeNextRoundNos(latestDetail.next_round_nos);
+      setSlotModalOpen(true);
+    } finally {
+      setOpeningSlotModal(false);
+    }
   };
 
   const closeSlotModal = () => {
     setSlotModalOpen(false);
+  };
+
+  const handleSlotFormValuesChange = (changedValues) => {
+    if (Object.hasOwn(changedValues, 'round_no')) {
+      roundNoManualRef.current = true;
+    }
+    if (Object.hasOwn(changedValues, 'segment') && !roundNoManualRef.current) {
+      slotForm.setFieldValue('round_no', resolveNextRoundNo(nextRoundNosRef.current, changedValues.segment));
+    }
   };
 
   const handleSlotSubmit = async (values) => {
@@ -486,7 +523,12 @@ export default function ReservedTab({
             <Button onClick={loadSlots} loading={slotsLoading}>
               刷新名额
             </Button>
-            <Button type="primary" onClick={openCreateSlot} disabled={atSlotLimit}>
+            <Button
+              type="primary"
+              onClick={openCreateSlot}
+              loading={openingSlotModal}
+              disabled={atSlotLimit || openingSlotModal}
+            >
               新建预留名额
             </Button>
           </Space>
@@ -601,7 +643,12 @@ export default function ReservedTab({
             />
           )}
 
-          <Form form={slotForm} layout="vertical" onFinish={handleSlotSubmit}>
+          <Form
+            form={slotForm}
+            layout="vertical"
+            onFinish={handleSlotSubmit}
+            onValuesChange={handleSlotFormValuesChange}
+          >
             <Form.Item
               name="segment"
               label="环节"

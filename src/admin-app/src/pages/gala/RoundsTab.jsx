@@ -18,6 +18,10 @@ import { galaErrorText } from './errors.js';
 
 const PAGE_SIZE = 200;
 
+function normalizeNextRoundNos(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
 // 兼容普通管理员（failed_count / failed_reasons）与超管（failed 数组），
 // 只汇总数量与错误原因，不展示任何逐人或 is_reserved 信息。
 function summarizeGrantFailures(data) {
@@ -68,6 +72,8 @@ export default function RoundsTab({
   const [hasMore, setHasMore] = useState(false);
 
   const [drawModalOpen, setDrawModalOpen] = useState(false);
+  const [openingDraw, setOpeningDraw] = useState(false);
+  const [nextRoundNos, setNextRoundNos] = useState(() => normalizeNextRoundNos(detail?.next_round_nos));
   const [drawResult, setDrawResult] = useState(null);
   const [grantingRoundId, setGrantingRoundId] = useState(null);
   const [partialGrantNotice, setPartialGrantNotice] = useState(null);
@@ -136,21 +142,34 @@ export default function RoundsTab({
     loadRounds();
   }, [eventId, galaVersion, loadRounds]);
 
+  useEffect(() => {
+    setNextRoundNos(normalizeNextRoundNos(detail?.next_round_nos));
+  }, [detail]);
+
   const getNextRoundNo = useCallback(
     (segmentKey) => {
-      if (!segmentKey) return 1;
-      let maxRoundNo = 0;
-      for (const item of rounds) {
-        if (item.segment === segmentKey) {
-          const no = Number(item.round_no || 0);
-          if (no > maxRoundNo) maxRoundNo = no;
-        }
-      }
-      const override = Number(nextRoundNoOverrides[segmentKey] || 0);
-      return Math.max(maxRoundNo + 1, override);
+      if (!segmentKey || !nextRoundNos) return null;
+      const rawBase = Number(nextRoundNos[segmentKey]);
+      const base = Number.isSafeInteger(rawBase) && rawBase >= 1 ? rawBase : 1;
+      const rawOverride = Number(nextRoundNoOverrides[segmentKey]);
+      const override = Number.isSafeInteger(rawOverride) && rawOverride >= 1 ? rawOverride : 0;
+      return Math.max(base, override);
     },
-    [rounds, nextRoundNoOverrides],
+    [nextRoundNos, nextRoundNoOverrides],
   );
+
+  const handleOpenDraw = async () => {
+    if (openingDraw) return;
+    setOpeningDraw(true);
+    try {
+      const latestDetail = await reload();
+      if (!latestDetail) return;
+      setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
+      setDrawModalOpen(true);
+    } finally {
+      setOpeningDraw(false);
+    }
+  };
 
   const handleRoundNoChanged = useCallback((segmentKey, nextNo) => {
     setNextRoundNoOverrides((prev) => ({
@@ -160,7 +179,10 @@ export default function RoundsTab({
   }, []);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadRounds(), reload()]);
+    const [, latestDetail] = await Promise.all([loadRounds(), reload()]);
+    if (latestDetail) {
+      setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
+    }
   }, [loadRounds, reload]);
 
   const handleDrawSuccess = useCallback(
@@ -365,7 +387,12 @@ export default function RoundsTab({
             刷新轮次
           </Button>
           {canOperate && (
-            <Button type="primary" onClick={() => setDrawModalOpen(true)}>
+            <Button
+              type="primary"
+              loading={openingDraw}
+              disabled={openingDraw}
+              onClick={handleOpenDraw}
+            >
               发起抽签
             </Button>
           )}
@@ -428,6 +455,7 @@ export default function RoundsTab({
         detail={detail}
         galaVersion={galaVersion}
         segments={segments}
+        nextRoundNos={nextRoundNos}
         getNextRoundNo={getNextRoundNo}
         onRoundNoChanged={handleRoundNoChanged}
         onSuccess={handleDrawSuccess}
