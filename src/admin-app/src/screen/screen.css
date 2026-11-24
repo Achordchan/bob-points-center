@@ -23,14 +23,61 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 32px;
   background: radial-gradient(circle at 50% 35%, #182342 0%, #0b1020 70%);
 }
 
 .gala-screen-title {
   margin: 0;
-  font-size: clamp(3rem, 7vw, 6rem);
+  font-size: clamp(2.5rem, 6vw, 5rem);
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   color: #f8fafc;
   text-align: center;
+}
+
+.gala-screen-message {
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2.5rem);
+  color: #cbd5e1;
+  text-align: center;
+}
+
+.gala-screen-debug {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 32px;
+  max-width: 960px;
+  width: 100%;
+}
+
+.gala-screen-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 24px 48px;
+  margin: 0;
+  padding: 20px 32px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.gala-screen-metrics > div {
+  text-align: center;
+  min-width: 110px;
+}
+
+.gala-screen-metrics dt {
+  font-size: 0.9rem;
+  color: #94a3b8;
+  margin-bottom: 6px;
+}
+
+.gala-screen-metrics dd {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: #f8fafc;
 }
