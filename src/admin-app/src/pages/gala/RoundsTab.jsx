@@ -16,10 +16,11 @@ import { amountText } from '../../utils.js';
 import DrawModal from './DrawModal.jsx';
 import { galaErrorText } from './errors.js';
 import {
-  clearPendingDraw,
+  clearPendingDrawIfMatch,
   isAmbiguousDrawError,
   isAuthDrawError,
-  loadPendingDraw,
+  isSameAttempt,
+  readPendingDraw,
   savePendingDraw,
 } from './pendingDraw.js';
 
@@ -89,14 +90,30 @@ export default function RoundsTab({
   const [grantingRoundId, setGrantingRoundId] = useState(null);
   const [partialGrantNotice, setPartialGrantNotice] = useState(null);
   const [nextRoundNoOverrides, setNextRoundNoOverrides] = useState({});
-  const [pendingDraw, setPendingDraw] = useState(() => loadPendingDraw(eventId));
+  const [pendingDraw, setPendingDraw] = useState(() => readPendingDraw(eventId));
   const [pendingDrawModalOpen, setPendingDrawModalOpen] = useState(false);
   const [retryingPendingDraw, setRetryingPendingDraw] = useState(false);
 
   const requestSeqRef = useRef(0);
   const currentEventIdRef = useRef(eventId);
+  const pendingDrawRef = useRef(pendingDraw);
+  const mountedRef = useRef(true);
   const retryingPendingRef = useRef(false);
+  const retryTokenRef = useRef(0);
   currentEventIdRef.current = eventId;
+  pendingDrawRef.current = pendingDraw;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const updatePendingDrawState = useCallback((next) => {
+    pendingDrawRef.current = next;
+    setPendingDraw(next);
+  }, []);
 
   // 只映射公开奖池（is_reserved === 0），绝不展示预留奖池信息
   const publicPoolMap = useMemo(() => {
@@ -161,11 +178,12 @@ export default function RoundsTab({
   }, [eventId, galaVersion, loadRounds]);
 
   useEffect(() => {
-    setPendingDraw(loadPendingDraw(eventId));
+    retryTokenRef.current += 1;
+    updatePendingDrawState(readPendingDraw(eventId));
     setPendingDrawModalOpen(false);
     setRetryingPendingDraw(false);
     retryingPendingRef.current = false;
-  }, [eventId]);
+  }, [eventId, updatePendingDrawState]);
 
   useEffect(() => {
     setNextRoundNos(normalizeNextRoundNos(detail?.next_round_nos));
@@ -183,30 +201,52 @@ export default function RoundsTab({
     [nextRoundNos, nextRoundNoOverrides],
   );
 
-  const clearPendingState = useCallback((targetEventId) => {
-    const id = targetEventId ?? currentEventIdRef.current;
-    clearPendingDraw(id);
-    if (Number(id) === Number(currentEventIdRef.current)) {
-      setPendingDraw(null);
-      setPendingDrawModalOpen(false);
+  const isMatchingAttempt = useCallback((targetEventId, attemptId) => {
+    if (!mountedRef.current || Number(targetEventId) !== Number(currentEventIdRef.current)) {
+      return false;
     }
+    const stored = readPendingDraw(targetEventId);
+    if (stored) {
+      return isSameAttempt(stored, attemptId);
+    }
+    return isSameAttempt(pendingDrawRef.current, attemptId);
   }, []);
 
-  const handleBeforeDraw = useCallback((pending) => {
-    const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
-    savePendingDraw(targetEventId, pending);
-    if (Number(targetEventId) === Number(currentEventIdRef.current)) {
-      setPendingDraw(pending);
-    }
-  }, []);
+  const clearPendingState = useCallback(
+    (targetEventId, attemptId) => {
+      const id = targetEventId ?? currentEventIdRef.current;
+      clearPendingDrawIfMatch(id, attemptId);
+      const isCurrentEvent = mountedRef.current && Number(id) === Number(currentEventIdRef.current);
+      const matchedState = isCurrentEvent && isSameAttempt(pendingDrawRef.current, attemptId);
+      if (matchedState) {
+        updatePendingDrawState(null);
+        setPendingDrawModalOpen(false);
+      }
+      return matchedState;
+    },
+    [updatePendingDrawState],
+  );
+
+  const handleBeforeDraw = useCallback(
+    (pending) => {
+      const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
+      savePendingDraw(targetEventId, pending);
+      if (mountedRef.current && Number(targetEventId) === Number(currentEventIdRef.current)) {
+        updatePendingDrawState(pending);
+      }
+    },
+    [updatePendingDrawState],
+  );
 
   const handleAmbiguousDraw = useCallback(
     (pending, err) => {
       const targetEventId = pending?.payload?.event_id ?? currentEventIdRef.current;
-      savePendingDraw(targetEventId, pending);
-      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
-        setPendingDraw(pending);
+      const attemptId = pending?.attempt_id;
+      if (!isMatchingAttempt(targetEventId, attemptId)) {
+        return;
       }
+      savePendingDraw(targetEventId, pending);
+      updatePendingDrawState(pending);
       setDrawModal(null);
       message.warning(
         isAuthDrawError(err)
@@ -214,7 +254,7 @@ export default function RoundsTab({
           : '抽签结果未确认，请在轮次页按原参数重试',
       );
     },
-    [message],
+    [isMatchingAttempt, message, updatePendingDrawState],
   );
 
   const handleOpenDraw = async () => {
@@ -255,7 +295,15 @@ export default function RoundsTab({
   }, [loadRounds, reload]);
 
   const handleDrawSuccess = useCallback(
-    async (data) => {
+    async (data, meta = {}) => {
+      const targetEventId = meta?.eventId ?? currentEventIdRef.current;
+      const matched = Boolean(meta?.matched);
+      if (!matched) {
+        if (mountedRef.current && Number(targetEventId) === Number(currentEventIdRef.current)) {
+          await loadRounds();
+        }
+        return;
+      }
       setDrawModal(null);
       if (data?.segment) {
         setNextRoundNoOverrides((prev) => {
@@ -268,13 +316,15 @@ export default function RoundsTab({
       setDrawResult(data);
       await refreshAll();
     },
-    [refreshAll],
+    [loadRounds, refreshAll],
   );
 
   const handleRetryPendingDraw = async () => {
     if (!canOperate || !pendingDraw || retryingPendingRef.current) return;
     const targetPending = pendingDraw;
     const targetEventId = targetPending?.payload?.event_id ?? eventId;
+    const targetAttemptId = targetPending?.attempt_id;
+    const retryToken = ++retryTokenRef.current;
     retryingPendingRef.current = true;
     setRetryingPendingDraw(true);
     try {
@@ -282,35 +332,42 @@ export default function RoundsTab({
         method: 'POST',
         body: targetPending.payload,
       });
-      clearPendingState(targetEventId);
-      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
-        await handleDrawSuccess(resp?.data || null);
-      }
+      const matched = clearPendingState(targetEventId, targetAttemptId);
+      await handleDrawSuccess(resp?.data || null, {
+        eventId: targetEventId,
+        attemptId: targetAttemptId,
+        matched,
+      });
     } catch (err) {
       if (isAmbiguousDrawError(err)) {
-        message.warning(
-          isAuthDrawError(err)
-            ? '登录已失效或无权限，恢复后可按原参数重试'
-            : '仍未确认，请稍后再试',
-        );
+        if (isMatchingAttempt(targetEventId, targetAttemptId)) {
+          message.warning(
+            isAuthDrawError(err)
+              ? '登录已失效或无权限，恢复后可按原参数重试'
+              : '仍未确认，请稍后再试',
+          );
+        }
         return;
       }
-      clearPendingState(targetEventId);
-      if (Number(targetEventId) === Number(currentEventIdRef.current)) {
+      const matched = clearPendingState(targetEventId, targetAttemptId);
+      if (matched) {
         const versionChanged = handleError(err);
         if (versionChanged) {
           loadRounds();
         }
       }
     } finally {
-      retryingPendingRef.current = false;
-      setRetryingPendingDraw(false);
+      if (mountedRef.current && retryTokenRef.current === retryToken) {
+        retryingPendingRef.current = false;
+        setRetryingPendingDraw(false);
+      }
     }
   };
 
   const handleDiscardPendingDraw = () => {
     if (!canOperate || !pendingDraw || retryingPendingRef.current) return;
     const targetEventId = pendingDraw?.payload?.event_id ?? eventId;
+    const targetAttemptId = pendingDraw?.attempt_id;
     modal.confirm({
       title: '放弃这次尝试',
       content: '请先在轮次列表确认该轮是否已抽出；放弃后再抽签会生成新的一轮',
@@ -319,7 +376,7 @@ export default function RoundsTab({
       okButtonProps: { danger: true },
       onOk: async () => {
         await loadRounds();
-        clearPendingState(targetEventId);
+        clearPendingState(targetEventId, targetAttemptId);
       },
     });
   };

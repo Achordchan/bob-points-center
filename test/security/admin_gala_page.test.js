@@ -6,12 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { canAccessNav, navPermissionMap } from '../../src/admin-app/src/permissions.js';
 import { galaErrorText } from '../../src/admin-app/src/pages/gala/errors.js';
 import {
-  clearPendingDraw,
+  clearPendingDrawIfMatch,
+  createAttemptId,
   getPendingDrawKey,
   isAmbiguousDrawError,
   isDefinitiveDrawRejection,
+  isSameAttempt,
   loadPendingDraw,
   PENDING_DRAW_KEY_PREFIX,
+  readPendingDraw,
   savePendingDraw,
 } from '../../src/admin-app/src/pages/gala/pendingDraw.js';
 
@@ -124,8 +127,8 @@ test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用
   assert.match(combinedSource, /\bsessionStorage\b/, 'gala 目录应使用 sessionStorage 持久化待确认抽签');
   assert.match(combinedSource, /gala:pendingDraw:/, 'gala 目录应使用 gala:pendingDraw: 键前缀');
   assert.match(combinedSource, /\bsavePendingDraw\b/, 'gala 目录缺少待确认抽签保存逻辑');
-  assert.match(combinedSource, /\bloadPendingDraw\b/, 'gala 目录缺少待确认抽签读取逻辑');
-  assert.match(combinedSource, /\bclearPendingDraw\b/, 'gala 目录缺少待确认抽签清除逻辑');
+  assert.match(combinedSource, /\breadPendingDraw\b/, 'gala 目录缺少待确认抽签读取逻辑');
+  assert.match(combinedSource, /\bclearPendingDrawIfMatch\b/, 'gala 目录缺少待确认抽签清除逻辑');
   assert.match(combinedSource, /\bisAmbiguousDrawError\b/, 'gala 目录缺少结果不明错误判定逻辑');
   assert.match(combinedSource, /按原参数重试/, 'RoundsTab 缺少按原参数重试按钮');
   assert.match(combinedSource, /放弃这次尝试/, 'RoundsTab 缺少放弃这次尝试按钮');
@@ -135,7 +138,7 @@ test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用
   assert.match(drawModalSource, /isAmbiguousDrawError\(err\)/);
   assert.match(roundsTabSource, /api\('\/admin\/gala\/rounds\/draw',[\s\S]*?body:\s*targetPending\.payload/);
   assert.match(roundsTabSource, /savePendingDraw\(/);
-  assert.match(roundsTabSource, /clearPendingDraw\(/);
+  assert.match(roundsTabSource, /clearPendingDrawIfMatch\(/);
 
   // 行为校验：错误分类与 sessionStorage 存取删
   assert.equal(PENDING_DRAW_KEY_PREFIX, 'gala:pendingDraw:');
@@ -160,6 +163,7 @@ test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用
   });
   try {
     const sample = {
+      attempt_id: 'attempt-sample-1',
       payload: {
         event_id: 42,
         segment: 'lucky',
@@ -177,9 +181,12 @@ test('gala 目录包含待确认抽签的保存、重试、清除逻辑并使用
     savePendingDraw(42, sample);
     assert.ok(store.has('gala:pendingDraw:42'));
     assert.deepEqual(loadPendingDraw(42), sample);
+    assert.deepEqual(readPendingDraw(42), sample);
     assert.equal(loadPendingDraw(99), null);
-    clearPendingDraw(42);
-    assert.equal(loadPendingDraw(42), null);
+    assert.equal(clearPendingDrawIfMatch(42, 'other-attempt'), false);
+    assert.deepEqual(readPendingDraw(42), sample);
+    assert.equal(clearPendingDrawIfMatch(42, 'attempt-sample-1'), true);
+    assert.equal(readPendingDraw(42), null);
   } finally {
     if (prevStorage === undefined) {
       delete globalThis.sessionStorage;
@@ -233,4 +240,89 @@ test('待确认抽签错误分类排除 401/403，发请求前持久化，且 ro
   assert.ok(refreshAllBlock, 'RoundsTab.jsx 缺少 refreshAll 定义');
   assert.doesNotMatch(refreshAllBlock, /\bsetDrawModal\b/, 'RoundsTab.refreshAll 不应调用 setDrawModal 修改 version');
   assert.match(refreshAllBlock, /return\s+latestDetail\b/, 'RoundsTab.refreshAll 应返回 latestDetail');
+});
+
+test('待确认抽签按 attempt_id 匹配清除，且 attempt_id 不进入后端 payload', () => {
+  const pendingDrawSource = readRepoFile('src/admin-app/src/pages/gala/pendingDraw.js');
+  const drawModalSource = readRepoFile('src/admin-app/src/pages/gala/DrawModal.jsx');
+
+  // pendingDraw.js 有 createAttemptId 且使用 randomUUID
+  assert.equal(typeof createAttemptId, 'function');
+  const createAttemptBlock =
+    pendingDrawSource.match(/export\s+function\s+createAttemptId\([\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(createAttemptBlock, 'pendingDraw.js 缺少 createAttemptId 实现');
+  assert.match(createAttemptBlock, /randomUUID/, 'createAttemptId 应优先使用 randomUUID');
+  const id1 = createAttemptId();
+  const id2 = createAttemptId();
+  assert.equal(typeof id1, 'string');
+  assert.ok(id1.trim().length > 0);
+  assert.notEqual(id1, id2);
+
+  // clearPendingDrawIfMatch 里比较 attempt_id
+  const clearIfMatchBlock =
+    pendingDrawSource.match(/export\s+function\s+clearPendingDrawIfMatch\([\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(clearIfMatchBlock, 'pendingDraw.js 缺少 clearPendingDrawIfMatch 实现');
+  assert.match(
+    clearIfMatchBlock,
+    /attempt_id\s*!==\s*attemptId|attempt_id\s*===\s*attemptId/,
+    'clearPendingDrawIfMatch 应比较 attempt_id',
+  );
+
+  // DrawModal.jsx 生成 attempt_id 后再调用 onBeforeDraw
+  const createAttemptIdx = drawModalSource.indexOf('createAttemptId(');
+  const beforeDrawIdx = drawModalSource.indexOf('onBeforeDraw?.(');
+  assert.ok(createAttemptIdx !== -1, 'DrawModal.jsx 缺少 createAttemptId() 调用');
+  assert.ok(beforeDrawIdx !== -1, 'DrawModal.jsx 缺少 onBeforeDraw 调用');
+  assert.ok(createAttemptIdx < beforeDrawIdx, 'DrawModal.jsx 应在调用 onBeforeDraw 前生成 attempt_id');
+
+  // 发给后端的 payload 对象里不包含 attempt_id
+  const payloadBlock = drawModalSource.match(/const\s+payload\s*=\s*\{[\s\S]*?\};/)?.[0] || '';
+  assert.ok(payloadBlock, 'DrawModal.jsx 缺少 payload 对象定义');
+  assert.doesNotMatch(payloadBlock, /\battempt_id\b/, '发给后端的 payload 不应包含 attempt_id');
+  assert.doesNotMatch(drawModalSource, /payload\.attempt_id\s*=/, '不应向 payload 写入 attempt_id');
+
+  // 行为校验：isSameAttempt 与缺少 attempt_id 的记录校验
+  assert.equal(isSameAttempt({ attempt_id: 'a1' }, 'a1'), true);
+  assert.equal(isSameAttempt({ attempt_id: 'a1' }, 'a2'), false);
+  assert.equal(isSameAttempt({ attempt_id: '' }, ''), false);
+  assert.equal(isSameAttempt(null, 'a1'), false);
+
+  const store = new Map();
+  const prevStorage = globalThis.sessionStorage;
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  try {
+    const basePayload = {
+      event_id: 7,
+      segment: 'lucky',
+      round_no: 1,
+    };
+    // 缺少 attempt_id 视为无效
+    store.set('gala:pendingDraw:7', JSON.stringify({ payload: basePayload, segment_label: '幸运抽奖' }));
+    assert.equal(readPendingDraw(7), null);
+    assert.equal(savePendingDraw(7, { payload: basePayload, segment_label: '幸运抽奖' }), false);
+
+    // 迟到的旧 attempt 不会清除新 attempt
+    const newer = { attempt_id: 'attempt-new', payload: { ...basePayload, round_no: 2 }, segment_label: '幸运抽奖' };
+    assert.equal(savePendingDraw(7, newer), true);
+    assert.equal(clearPendingDrawIfMatch(7, 'attempt-old'), false);
+    assert.deepEqual(readPendingDraw(7), newer);
+    assert.equal(clearPendingDrawIfMatch(7, 'attempt-new'), true);
+    assert.equal(readPendingDraw(7), null);
+  } finally {
+    if (prevStorage === undefined) {
+      delete globalThis.sessionStorage;
+    } else {
+      Object.defineProperty(globalThis, 'sessionStorage', {
+        configurable: true,
+        value: prevStorage,
+      });
+    }
+  }
 });

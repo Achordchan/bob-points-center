@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   App as AntApp,
@@ -16,7 +16,7 @@ import {
 import { api } from '../../api.js';
 import { amountText } from '../../utils.js';
 import { galaErrorText } from './errors.js';
-import { isAmbiguousDrawError } from './pendingDraw.js';
+import { createAttemptId, isAmbiguousDrawError } from './pendingDraw.js';
 
 const MAX_DRAW_COUNT = 100;
 const MAX_TITLE_LENGTH = 80;
@@ -45,6 +45,7 @@ export default function DrawModal({
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const [roundNoNotice, setRoundNoNotice] = useState('');
+  const activeAttemptRef = useRef(null);
 
   const selectedSegment = Form.useWatch('segment', form);
   const prizeType = Form.useWatch('prize_type', form);
@@ -90,8 +91,14 @@ export default function DrawModal({
     return Number.isSafeInteger(total) ? total : null;
   }, [prizeType, drawCount, amountEach]);
 
+  useEffect(() => () => {
+    activeAttemptRef.current = null;
+  }, []);
+
   useEffect(() => {
     if (!open) return;
+    activeAttemptRef.current = null;
+    setSubmitting(false);
     setRoundNoNotice('');
     form.resetFields();
     form.setFieldsValue({
@@ -190,9 +197,12 @@ export default function DrawModal({
         />
       ),
       onOk: async () => {
+        const targetEventId = eventId;
+        const attemptId = createAttemptId();
+        activeAttemptRef.current = attemptId;
         setSubmitting(true);
         const payload = {
-          event_id: eventId,
+          event_id: targetEventId,
           segment,
           title,
           draw_count: count,
@@ -206,6 +216,7 @@ export default function DrawModal({
           payload.amount_each = each;
         }
         const pending = {
+          attempt_id: attemptId,
           payload,
           segment_label: segmentLabel,
         };
@@ -215,17 +226,27 @@ export default function DrawModal({
             method: 'POST',
             body: payload,
           });
-          onClearPendingDraw?.(eventId);
-          setRoundNoNotice('');
-          await onSuccess(resp?.data || null);
+          const matched = Boolean(onClearPendingDraw?.(targetEventId, attemptId));
+          if (matched) {
+            setRoundNoNotice('');
+          }
+          await onSuccess(resp?.data || null, {
+            eventId: targetEventId,
+            attemptId,
+            matched,
+          });
         } catch (err) {
           if (isAmbiguousDrawError(err)) {
             onAmbiguousDraw?.(pending, err);
             return;
           }
-          onClearPendingDraw?.(eventId);
+          const matched = Boolean(onClearPendingDraw?.(targetEventId, attemptId));
+          if (!matched) {
+            return;
+          }
           if (err?.code === 'round_no_changed') {
             const latestDetail = await onRefreshAll();
+            if (activeAttemptRef.current !== attemptId) return;
             const latestVersion =
               typeof latestDetail?.gala_version === 'string' ? latestDetail.gala_version : '';
             if (!latestDetail || latestVersion !== version) {
@@ -246,10 +267,14 @@ export default function DrawModal({
           const versionChanged = handleError(err);
           if (versionChanged) {
             await onRefreshRounds();
+            if (activeAttemptRef.current !== attemptId) return;
             onCancel();
           }
         } finally {
-          setSubmitting(false);
+          if (activeAttemptRef.current === attemptId) {
+            activeAttemptRef.current = null;
+            setSubmitting(false);
+          }
         }
       },
     });

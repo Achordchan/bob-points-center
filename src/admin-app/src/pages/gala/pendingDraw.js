@@ -6,6 +6,28 @@ export function getPendingDrawKey(eventId) {
   return `${PENDING_DRAW_KEY_PREFIX}${eventId}`;
 }
 
+export function createAttemptId() {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (typeof uuid === 'string' && uuid.trim().length > 0) {
+      return uuid;
+    }
+  } catch {
+    // 忽略异常，回退到时间戳 + 随机数
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isValidAttemptId(attemptId) {
+  return typeof attemptId === 'string' && attemptId.trim().length > 0;
+}
+
+export function isSameAttempt(pending, attemptId) {
+  if (!pending || typeof pending !== 'object') return false;
+  if (!isValidAttemptId(attemptId)) return false;
+  return pending.attempt_id === attemptId;
+}
+
 export function isDefinitiveDrawRejection(err) {
   if (!err || typeof err !== 'object') return false;
   if (typeof err.status !== 'number' || !Number.isFinite(err.status)) return false;
@@ -25,6 +47,7 @@ export function isAuthDrawError(err) {
 
 function isValidPendingDraw(record, eventId) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  if (!isValidAttemptId(record.attempt_id)) return false;
   const payload = record.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   if (Number(payload.event_id) !== Number(eventId)) return false;
@@ -34,7 +57,7 @@ function isValidPendingDraw(record, eventId) {
   return true;
 }
 
-export function loadPendingDraw(eventId) {
+export function readPendingDraw(eventId) {
   if (!eventId) return null;
   try {
     const raw = globalThis.sessionStorage.getItem(getPendingDrawKey(eventId));
@@ -46,20 +69,38 @@ export function loadPendingDraw(eventId) {
   }
 }
 
+export const loadPendingDraw = readPendingDraw;
+
 export function savePendingDraw(eventId, pending) {
-  if (!eventId || !pending) return;
+  if (!eventId || !isValidPendingDraw(pending, eventId)) return false;
   try {
-    globalThis.sessionStorage.setItem(getPendingDrawKey(eventId), JSON.stringify(pending));
+    const record = {
+      attempt_id: pending.attempt_id,
+      payload: pending.payload,
+      segment_label: pending.segment_label,
+    };
+    globalThis.sessionStorage.setItem(getPendingDrawKey(eventId), JSON.stringify(record));
+    return true;
   } catch {
     // sessionStorage 不可用时忽略，回退到仅使用组件 state
+    return false;
   }
 }
 
-export function clearPendingDraw(eventId) {
-  if (!eventId) return;
+export function clearPendingDrawIfMatch(eventId, attemptId) {
+  if (!eventId || !isValidAttemptId(attemptId)) return false;
   try {
-    globalThis.sessionStorage.removeItem(getPendingDrawKey(eventId));
+    const key = getPendingDrawKey(eventId);
+    const raw = globalThis.sessionStorage.getItem(key);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || parsed.attempt_id !== attemptId) {
+      return false;
+    }
+    globalThis.sessionStorage.removeItem(key);
+    return true;
   } catch {
-    // sessionStorage 不可用时忽略
+    // sessionStorage 不可用或数据损坏时忽略
+    return false;
   }
 }
