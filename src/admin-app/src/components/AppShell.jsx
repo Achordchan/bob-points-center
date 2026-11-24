@@ -12,6 +12,7 @@ import {
   SafetyOutlined,
   SettingOutlined,
   ShoppingOutlined,
+  TrophyOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import { Button, Drawer, Dropdown, Grid, Layout, Menu, Typography } from 'antd';
@@ -26,6 +27,7 @@ export const navItems = [
   { key: 'orders', icon: <AuditOutlined />, label: '订单与核销' },
   { key: 'commerce', icon: <ShoppingOutlined />, label: '商城与 CDK' },
   { key: 'activities', icon: <GiftOutlined />, label: '活动与公益' },
+  { key: 'gala', icon: <TrophyOutlined />, label: '年会管理' },
   { key: 'messages', icon: <MessageOutlined />, label: '消息中心' },
   { key: 'content', icon: <BellOutlined />, label: '内容运营' },
   { key: 'integrations', icon: <LinkOutlined />, label: '系统集成' },

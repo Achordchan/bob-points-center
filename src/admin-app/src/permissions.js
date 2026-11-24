@@ -4,6 +4,7 @@ export const navPermissionMap = {
   orders: 'orders:view',
   commerce: 'commerce:view',
   activities: 'activities:view',
+  gala: 'gala:view',
   messages: 'messages:view',
   content: 'content:view',
   integrations: 'integrations:view',
