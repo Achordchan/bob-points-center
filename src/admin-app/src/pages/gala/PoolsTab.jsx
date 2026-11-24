@@ -14,8 +14,7 @@ export default function PoolsTab({
 }) {
   const { message } = AntApp.useApp();
   const [form] = Form.useForm();
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingPool, setEditingPool] = useState(null);
+  const [editing, setEditing] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   // 奖池 Tab 只展示公开奖池（is_reserved === 0），绝不展示预留奖池。
@@ -23,16 +22,18 @@ export default function PoolsTab({
     (pool) => Number(pool?.is_reserved) === 0,
   );
 
+  const modalOpen = Boolean(editing);
+  const editingPool = editing?.pool || null;
   const isEdit = Boolean(editingPool?.id);
 
   useEffect(() => {
-    if (!modalOpen) return;
+    if (!editing) return;
     form.resetFields();
-    if (editingPool?.id) {
+    if (editing.pool?.id) {
       form.setFieldsValue({
-        name: editingPool.name || '',
-        sponsor: editingPool.sponsor || '',
-        budget: Number.isSafeInteger(Number(editingPool.budget)) ? Number(editingPool.budget) : 0,
+        name: editing.pool.name || '',
+        sponsor: editing.pool.sponsor || '',
+        budget: Number.isSafeInteger(Number(editing.pool.budget)) ? Number(editing.pool.budget) : 0,
       });
     } else {
       form.setFieldsValue({
@@ -41,39 +42,45 @@ export default function PoolsTab({
         budget: 0,
       });
     }
-  }, [modalOpen, editingPool, form]);
+  }, [editing, form]);
 
   const openCreate = () => {
-    setEditingPool(null);
-    setModalOpen(true);
+    setEditing({
+      pool: null,
+      version: typeof galaVersion === 'string' ? galaVersion : '',
+    });
   };
 
   const openEdit = (pool) => {
-    setEditingPool(pool);
-    setModalOpen(true);
+    setEditing({
+      pool,
+      version: typeof galaVersion === 'string' ? galaVersion : '',
+    });
   };
 
   const closeModal = () => {
-    setModalOpen(false);
-    setEditingPool(null);
+    setEditing(null);
   };
 
   const handleSubmit = async (values) => {
+    if (!editing) return;
+    const targetPool = editing.pool;
+    const version = editing.version;
     setSubmitting(true);
     try {
       const name = String(values.name || '').trim();
       const sponsor = String(values.sponsor || '').trim();
       const budget = Number(values.budget);
 
-      if (isEdit) {
+      if (targetPool?.id) {
         await api('/admin/gala/pools/update', {
           method: 'POST',
           body: {
-            id: editingPool.id,
+            id: targetPool.id,
             name,
             sponsor,
             budget,
-            gala_version: galaVersion,
+            gala_version: version,
           },
         });
         message.success('奖池已更新');
@@ -85,7 +92,7 @@ export default function PoolsTab({
             name,
             sponsor,
             budget,
-            gala_version: galaVersion,
+            gala_version: version,
           },
         });
         message.success('奖池已创建');

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { App as AntApp, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
@@ -33,6 +33,7 @@ function parseEventDate(value) {
 export default function EventFormModal({
   open,
   event,
+  galaVersion,
   segments = [],
   segmentsLoading = false,
   onCancel,
@@ -42,9 +43,29 @@ export default function EventFormModal({
   const { message } = AntApp.useApp();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
+  const [capturedVersion, setCapturedVersion] = useState('');
+  const wasOpenRef = useRef(false);
   const isEdit = Boolean(event?.id);
   const rawEventDate = isEdit && typeof event?.event_date === 'string' ? event.event_date : '';
   const hasNonStandardEventDate = Boolean(rawEventDate.trim()) && !parseEventDate(rawEventDate);
+
+  useEffect(() => {
+    if (!open) {
+      wasOpenRef.current = false;
+      setCapturedVersion('');
+      return;
+    }
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true;
+      setCapturedVersion(
+        typeof galaVersion === 'string'
+          ? galaVersion
+          : typeof event?.gala_version === 'string'
+            ? event.gala_version
+            : '',
+      );
+    }
+  }, [open, galaVersion, event]);
 
   useEffect(() => {
     if (!open) return;
@@ -90,7 +111,7 @@ export default function EventFormModal({
           ...baseBody,
           id: event.id,
           status: values.status,
-          gala_version: event.gala_version,
+          gala_version: capturedVersion,
         };
         if (form.isFieldTouched('event_date')) {
           body.event_date = values.event_date ? values.event_date.format('YYYY-MM-DD') : null;

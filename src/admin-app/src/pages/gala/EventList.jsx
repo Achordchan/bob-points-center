@@ -18,7 +18,7 @@ export default function EventList({ canEdit, onSelectEvent }) {
   const [segmentsLoading, setSegmentsLoading] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingEvent, setEditingEvent] = useState(null);
+  const [editing, setEditing] = useState(null);
 
   const requestSeqRef = useRef(0);
 
@@ -93,19 +93,22 @@ export default function EventList({ canEdit, onSelectEvent }) {
 
   const openCreate = () => {
     if (segments.length === 0 && !segmentsLoading) loadSegments();
-    setEditingEvent(null);
+    setEditing(null);
     setModalOpen(true);
   };
 
   const openEdit = (record) => {
     if (segments.length === 0 && !segmentsLoading) loadSegments();
-    setEditingEvent(record);
+    setEditing({
+      event: record,
+      version: typeof record?.gala_version === 'string' ? record.gala_version : '',
+    });
     setModalOpen(true);
   };
 
   const closeModal = () => {
     setModalOpen(false);
-    setEditingEvent(null);
+    setEditing(null);
   };
 
   const handleFormSuccess = () => {
@@ -231,7 +234,8 @@ export default function EventList({ canEdit, onSelectEvent }) {
 
       <EventFormModal
         open={modalOpen}
-        event={editingEvent}
+        event={editing?.event || null}
+        galaVersion={editing?.version}
         segments={segments}
         segmentsLoading={segmentsLoading}
         onCancel={closeModal}
