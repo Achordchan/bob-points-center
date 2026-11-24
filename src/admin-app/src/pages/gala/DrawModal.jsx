@@ -28,6 +28,7 @@ export default function DrawModal({
   detail,
   drawGalaVersion,
   segments = [],
+  segmentsLoadFailed = false,
   nextRoundNos,
   getNextRoundNo,
   onRoundNoChanged,
@@ -109,6 +110,7 @@ export default function DrawModal({
   }, [open, drawableSegments, form]);
 
   const handleFinish = (values) => {
+    if (segmentsLoadFailed) return;
     const segment = values.segment;
     const segmentObj = drawableSegments.find((item) => item.key === segment);
     const segmentLabel = segmentObj?.label || segment;
@@ -240,18 +242,26 @@ export default function DrawModal({
       okText="下一步"
       cancelText="取消"
       confirmLoading={submitting}
-      okButtonProps={{ disabled: drawableSegments.length === 0 || !hasNextRoundNos || roundNoExhausted }}
+      okButtonProps={{
+        disabled: segmentsLoadFailed || drawableSegments.length === 0 || !hasNextRoundNos || roundNoExhausted,
+      }}
       width={560}
       destroyOnHidden
     >
       <Space direction="vertical" style={{ width: '100%' }} size={12}>
-        {drawableSegments.length === 0 && (
+        {segmentsLoadFailed ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="环节列表加载失败，请关闭弹窗后在页面顶部点击重试"
+          />
+        ) : drawableSegments.length === 0 ? (
           <Alert
             type="warning"
             showIcon
             message="当前活动没有启用支持抽签的环节，请先在活动设置中启用可抽签环节。"
           />
-        )}
+        ) : null}
 
         {roundNoNotice && (
           <Alert

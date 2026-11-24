@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
-import { App as AntApp, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
+import { App as AntApp, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag, Typography } from 'antd';
 import { api } from '../../api.js';
 import { galaErrorText, isGalaVersionError } from './errors.js';
 
@@ -36,6 +36,7 @@ export default function EventFormModal({
   galaVersion,
   segments = [],
   segmentsLoading = false,
+  segmentsLoadFailed = false,
   onCancel,
   onSuccess,
   onVersionMismatch,
@@ -101,6 +102,10 @@ export default function EventFormModal({
   }, [open, isEdit, segments, form]);
 
   const handleSubmit = async (values) => {
+    if (segmentsLoadFailed || (segmentsLoading && segments.length === 0)) {
+      message.error('环节列表加载失败，请关闭后重试');
+      return;
+    }
     setSubmitting(true);
     try {
       const baseBody = {
@@ -170,6 +175,7 @@ export default function EventFormModal({
       okText={isEdit ? '保存' : '创建'}
       cancelText="取消"
       confirmLoading={submitting}
+      okButtonProps={{ disabled: segmentsLoadFailed || (segmentsLoading && segments.length === 0) }}
       width={600}
       destroyOnHidden
     >
@@ -236,7 +242,7 @@ export default function EventFormModal({
           label={
             <Space size={8}>
               <span>启用环节</span>
-              {segments.length > 0 && (
+              {segments.length > 0 && !segmentsLoadFailed && (
                 <>
                   <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={selectAllSegments}>
                     全选
@@ -247,6 +253,12 @@ export default function EventFormModal({
                 </>
               )}
             </Space>
+          }
+          validateStatus={segmentsLoadFailed ? 'error' : undefined}
+          extra={
+            segmentsLoadFailed ? (
+              <Typography.Text type="danger">环节列表加载失败，请关闭后重试</Typography.Text>
+            ) : undefined
           }
         >
           <Select

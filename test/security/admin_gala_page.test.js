@@ -94,3 +94,13 @@ test('gala/errors.js 覆盖 galaService.js 中全部 GalaError 错误码', () =>
     );
   }
 });
+
+test('EventDetail 环节列表加载失败可提示并在刷新时恢复加载', () => {
+  assert.match(eventDetailSource, /环节列表加载失败/);
+  const refreshHandlerBlock =
+    eventDetailSource.match(/const handleRefresh = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
+  assert.ok(refreshHandlerBlock, 'EventDetail.jsx 缺少 handleRefresh 刷新逻辑');
+  assert.match(refreshHandlerBlock, /\breload\(/);
+  assert.match(refreshHandlerBlock, /\bloadSegments\(/);
+  assert.match(eventDetailSource, /onClick=\{handleRefresh\}[\s\S]*?>\s*刷新\s*<\/Button>/);
+});

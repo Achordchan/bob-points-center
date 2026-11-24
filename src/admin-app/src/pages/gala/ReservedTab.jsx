@@ -44,6 +44,8 @@ export default function ReservedTab({
   detail,
   galaVersion,
   segments = [],
+  segmentsLoadFailed = false,
+  loadSegments,
   me,
   loading: detailLoading,
   reload,
@@ -224,6 +226,19 @@ export default function ReservedTab({
     });
   }, [slotModalOpen, slotForm]);
 
+  useEffect(() => {
+    if (!slotModalOpen || drawableSegments.length === 0) return;
+    const current = slotForm.getFieldValue('segment');
+    if (!current) {
+      const defaultSegment = drawableSegments[0].key;
+      slotForm.setFieldValue('segment', defaultSegment);
+      if (!roundNoManualRef.current) {
+        const defaultRoundNo = resolveNextRoundNo(nextRoundNosRef.current, defaultSegment);
+        slotForm.setFieldValue('round_no', defaultRoundNo > PG_INT_MAX ? undefined : defaultRoundNo);
+      }
+    }
+  }, [slotModalOpen, drawableSegments, slotForm]);
+
   const openCreatePool = () => {
     setPoolEditing({
       pool: null,
@@ -294,7 +309,10 @@ export default function ReservedTab({
     if (openingSlotModal) return;
     setOpeningSlotModal(true);
     try {
-      const latestDetail = await reload();
+      const [latestDetail] = await Promise.all([
+        reload(),
+        segmentsLoadFailed && loadSegments ? loadSegments() : Promise.resolve(),
+      ]);
       if (!latestDetail) return;
       const normalized = normalizeNextRoundNos(latestDetail.next_round_nos);
       nextRoundNosRef.current = normalized;
@@ -322,7 +340,7 @@ export default function ReservedTab({
   };
 
   const handleSlotSubmit = async (values) => {
-    if (!slotModal) return;
+    if (!slotModal || segmentsLoadFailed) return;
     if (resolveNextRoundNo(nextRoundNosRef.current, values.segment) > PG_INT_MAX) {
       message.error('该环节轮次号已用尽');
       return;
@@ -656,7 +674,8 @@ export default function ReservedTab({
         confirmLoading={slotSubmitting}
         okButtonProps={{
           disabled:
-            drawableSegments.length === 0
+            segmentsLoadFailed
+            || drawableSegments.length === 0
             || reservedPools.length === 0
             || atSlotLimit
             || slotRoundNoExhausted,
@@ -665,13 +684,19 @@ export default function ReservedTab({
         destroyOnHidden
       >
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
-          {drawableSegments.length === 0 && (
+          {segmentsLoadFailed ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="环节列表加载失败，请先在页面顶部点击重试"
+            />
+          ) : drawableSegments.length === 0 ? (
             <Alert
               type="warning"
               showIcon
               message="当前活动没有已启用的可抽签环节，请先在概览中启用可抽签环节。"
             />
-          )}
+          ) : null}
           {reservedPools.length === 0 && (
             <Alert
               type="warning"

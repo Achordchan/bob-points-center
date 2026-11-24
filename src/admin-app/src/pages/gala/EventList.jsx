@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { App as AntApp, Button, Card, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, Space, Table, Tag, Typography } from 'antd';
 import { api, qs } from '../../api.js';
 import { amountText } from '../../utils.js';
 import { galaErrorText, isGalaVersionError } from './errors.js';
@@ -16,21 +16,32 @@ export default function EventList({ canEdit, onSelectEvent }) {
 
   const [segments, setSegments] = useState([]);
   const [segmentsLoading, setSegmentsLoading] = useState(false);
+  const [segmentsError, setSegmentsError] = useState('');
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
 
   const requestSeqRef = useRef(0);
+  const segmentsSeqRef = useRef(0);
 
   const loadSegments = useCallback(async () => {
+    const seq = ++segmentsSeqRef.current;
     setSegmentsLoading(true);
     try {
       const resp = await api('/admin/gala/segments');
-      setSegments(Array.isArray(resp?.data) ? resp.data : []);
+      if (seq !== segmentsSeqRef.current) return null;
+      const list = Array.isArray(resp?.data) ? resp.data : [];
+      setSegments(list);
+      setSegmentsError('');
+      return list;
     } catch (err) {
-      message.error(galaErrorText(err));
+      if (seq !== segmentsSeqRef.current) return null;
+      const text = galaErrorText(err);
+      setSegmentsError(text);
+      message.error(text);
+      return null;
     } finally {
-      setSegmentsLoading(false);
+      if (seq === segmentsSeqRef.current) setSegmentsLoading(false);
     }
   }, [message]);
 
@@ -88,17 +99,17 @@ export default function EventList({ canEdit, onSelectEvent }) {
 
   const handleRefresh = () => {
     loadEvents();
-    if (segments.length === 0) loadSegments();
+    if (segments.length === 0 || segmentsError) loadSegments();
   };
 
   const openCreate = () => {
-    if (segments.length === 0 && !segmentsLoading) loadSegments();
+    if ((segments.length === 0 || segmentsError) && !segmentsLoading) loadSegments();
     setEditing(null);
     setModalOpen(true);
   };
 
   const openEdit = (record) => {
-    if (segments.length === 0 && !segmentsLoading) loadSegments();
+    if ((segments.length === 0 || segmentsError) && !segmentsLoading) loadSegments();
     setEditing({
       event: record,
       version: typeof record?.gala_version === 'string' ? record.gala_version : '',
@@ -190,6 +201,21 @@ export default function EventList({ canEdit, onSelectEvent }) {
 
   return (
     <>
+      {segmentsError && (
+        <Alert
+          type="warning"
+          showIcon
+          message="环节列表加载失败"
+          description={segmentsError}
+          action={
+            <Button size="small" onClick={loadSegments} loading={segmentsLoading}>
+              重试
+            </Button>
+          }
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       <Card
         title="年会管理"
         extra={
@@ -238,6 +264,7 @@ export default function EventList({ canEdit, onSelectEvent }) {
         galaVersion={editing?.version}
         segments={segments}
         segmentsLoading={segmentsLoading}
+        segmentsLoadFailed={Boolean(segmentsError)}
         onCancel={closeModal}
         onSuccess={handleFormSuccess}
         onVersionMismatch={handleVersionMismatch}

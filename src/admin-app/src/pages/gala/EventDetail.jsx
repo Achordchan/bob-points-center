@@ -19,11 +19,14 @@ export default function EventDetail({ eventId, me, onBack }) {
   const [detail, setDetail] = useState(null);
   const [galaVersion, setGalaVersion] = useState('');
   const [segments, setSegments] = useState([]);
+  const [segmentsLoading, setSegmentsLoading] = useState(false);
+  const [segmentsError, setSegmentsError] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [activeTab, setActiveTab] = useState('overview');
 
   const requestSeqRef = useRef(0);
+  const segmentsSeqRef = useRef(0);
 
   const reload = useCallback(async () => {
     if (!eventId) return null;
@@ -49,13 +52,30 @@ export default function EventDetail({ eventId, me, onBack }) {
   }, [eventId, message]);
 
   const loadSegments = useCallback(async () => {
+    const seq = ++segmentsSeqRef.current;
+    setSegmentsLoading(true);
     try {
       const resp = await api('/admin/gala/segments');
-      setSegments(Array.isArray(resp?.data) ? resp.data : []);
-    } catch {
-      // 环节名称展示失败不阻塞详情页主流程
+      if (seq !== segmentsSeqRef.current) return null;
+      const list = Array.isArray(resp?.data) ? resp.data : [];
+      setSegments(list);
+      setSegmentsError('');
+      return list;
+    } catch (err) {
+      if (seq !== segmentsSeqRef.current) return null;
+      setSegmentsError(galaErrorText(err));
+      return null;
+    } finally {
+      if (seq === segmentsSeqRef.current) setSegmentsLoading(false);
     }
   }, []);
+
+  const handleRefresh = () => {
+    reload();
+    if (segments.length === 0 || segmentsError) {
+      loadSegments();
+    }
+  };
 
   useEffect(() => {
     setDetail(null);
@@ -81,11 +101,16 @@ export default function EventDetail({ eventId, me, onBack }) {
     [message, reload],
   );
 
+  const segmentsLoadFailed = Boolean(segmentsError);
+
   const tabSharedProps = {
     eventId,
     detail,
     galaVersion,
     segments,
+    segmentsError,
+    segmentsLoadFailed,
+    loadSegments,
     me,
     canEdit,
     loading,
@@ -155,7 +180,7 @@ export default function EventDetail({ eventId, me, onBack }) {
       }
       extra={
         <Space>
-          <Button onClick={reload} loading={loading}>
+          <Button onClick={handleRefresh} loading={loading}>
             刷新
           </Button>
           <Button onClick={onBack}>返回列表</Button>
@@ -179,11 +204,27 @@ export default function EventDetail({ eventId, me, onBack }) {
           }
         />
       ) : detail ? (
-        <Tabs
-          activeKey={effectiveActiveTab}
-          onChange={setActiveTab}
-          items={tabItems}
-        />
+        <>
+          {segmentsError && (
+            <Alert
+              type="warning"
+              showIcon
+              message="环节列表加载失败"
+              description={segmentsError}
+              action={
+                <Button size="small" onClick={loadSegments} loading={segmentsLoading}>
+                  重试
+                </Button>
+              }
+              style={{ marginBottom: 16 }}
+            />
+          )}
+          <Tabs
+            activeKey={effectiveActiveTab}
+            onChange={setActiveTab}
+            items={tabItems}
+          />
+        </>
       ) : null}
     </Card>
   );

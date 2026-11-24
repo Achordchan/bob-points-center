@@ -59,6 +59,8 @@ export default function RoundsTab({
   detail,
   galaVersion,
   segments = [],
+  segmentsLoadFailed = false,
+  loadSegments,
   me,
   reload,
   handleError,
@@ -163,7 +165,10 @@ export default function RoundsTab({
     if (openingDraw) return;
     setOpeningDraw(true);
     try {
-      const latestDetail = await reload();
+      const [latestDetail] = await Promise.all([
+        reload(),
+        segmentsLoadFailed && loadSegments ? loadSegments() : Promise.resolve(),
+      ]);
       if (!latestDetail) return;
       setNextRoundNos(normalizeNextRoundNos(latestDetail.next_round_nos));
       setDrawModal({
@@ -460,6 +465,7 @@ export default function RoundsTab({
         detail={detail}
         drawGalaVersion={drawModal?.version ?? ''}
         segments={segments}
+        segmentsLoadFailed={segmentsLoadFailed}
         nextRoundNos={nextRoundNos}
         getNextRoundNo={getNextRoundNo}
         onRoundNoChanged={handleRoundNoChanged}
