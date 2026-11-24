@@ -350,3 +350,16 @@ test('10. 大屏只在轮次与状态属于同一份数据时认定轮次已加�
   assert.match(hookCode, /knownRoundIds\.has\(roundId\)\s*&&\s*roundsDataVersion === latestDataVersion/);
   assert.match(hookCode, /next\.data_version !== prevVersion[\s\S]*?refreshRounds\(\)/);
 });
+
+test('11. 大屏首次加载版本不一致会重拉轮次；SSE 不可用时状态轮询带着刷新轮次与活动，切到中奖榜也会拉最新轮次', () => {
+  const hookCode = stripJsComments(readRepoFile('src/admin-app/src/screen/useScreenData.js'));
+  const stateHandler = hookCode.slice(hookCode.indexOf('refreshState = createRefresh('), hookCode.indexOf('const refreshSegments'));
+  assert.match(stateHandler, /roundsStale\s*=\s*roundsDataVersion !== null[\s\S]*?roundsDataVersion !== next\.data_version/);
+  assert.match(stateHandler, /polling\s*=\s*!initial && !sseOpen/);
+  assert.match(stateHandler, /enteredWinners\s*=\s*!initial && next\.mode === 'winners'/);
+  assert.match(stateHandler, /if \(dataChanged \|\| roundsStale \|\| enteredWinners \|\| polling\) void refreshRounds\(\)/);
+  assert.match(stateHandler, /if \(dataChanged \|\| polling\) void refreshEvent\(\)/);
+  assert.match(hookCode, /sseOpen = true;/, 'SSE 连上时必须记下');
+  assert.match(hookCode, /sseOpen = false;/, 'SSE 出错时必须记下');
+  assert.match(hookCode, /lastRoundsReconcileKey/, '轮次触发的状态对账必须防止来回打转');
+});

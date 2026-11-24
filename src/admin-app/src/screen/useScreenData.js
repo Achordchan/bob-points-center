@@ -61,6 +61,10 @@ export function useScreenData() {
     const knownRoundIds = new Set();
     let roundsDataVersion = null;
     let latestDataVersion = null;
+    let lastRoundsReconcileKey = null;
+    let lastStateVersion = null;
+    // SSE 是否连着：连着时轮次、活动靠 gala_changed 事件刷新；断开（或浏览器不支持、连接数满）时靠状态轮询带着刷新。
+    let sseOpen = false;
     let backfillRoundId = null;
     let backfillTimer = null;
     let backfillToken = 0;
@@ -132,8 +136,15 @@ export function useScreenData() {
       }
       roundsDataVersion = next.dataVersion;
       setRoundsData({ list: next.rounds, dataVersion: next.dataVersion });
-      // 轮次比状态新（或旧）：再读一次状态，让两边对上；空列表没有版本，不算不一致。
-      if (next.dataVersion !== null && next.dataVersion !== latestDataVersion) void refreshState();
+      // 轮次与状态版本不一致：再读一次状态，让两边对上；空列表没有版本，不算不一致。
+      // 同一对版本只追一次：持续不一致时不会在两个请求之间来回打转，之后由状态轮询（每次都会补拉轮次）收敛。
+      if (next.dataVersion !== null && next.dataVersion !== latestDataVersion) {
+        const key = `${next.dataVersion}|${latestDataVersion}`;
+        if (key !== lastRoundsReconcileKey) {
+          lastRoundsReconcileKey = key;
+          void refreshState();
+        }
+      }
     });
 
     // 每次停止或换轮都换一个令牌：旧循环醒来发现令牌不对就退出，同一时刻只有一个补拉循环。
@@ -173,15 +184,26 @@ export function useScreenData() {
       const next = await fetchScreenState(eventId);
       if (disposed) return;
       const prevVersion = latestDataVersion;
+      const prevStateVersion = lastStateVersion;
       latestDataVersion = next.data_version;
+      lastStateVersion = next.version;
       setState(next);
-      // 数据版本变了（做过全量恢复）：已缓存的活动、名单、轮次都可能属于旧数据，全部重拉。
-      if (prevVersion !== null && next.data_version !== null && next.data_version !== prevVersion) {
+      const dataChanged = prevVersion !== null && next.data_version !== null && next.data_version !== prevVersion;
+      // 已缓存的轮次与状态不是同一份数据（如首次加载时轮次读到恢复前、状态读到恢复后）。
+      const roundsStale = roundsDataVersion !== null && next.data_version !== null && roundsDataVersion !== next.data_version;
+      // 首次加载时 refreshAll 已在拉轮次和活动，下面两种补拉从第二次读取状态起才需要。
+      const initial = prevStateVersion === null;
+      // 切到中奖榜（状态有变化）时拉一次最新轮次，免得显示旧榜单。
+      const enteredWinners = !initial && next.mode === 'winners' && next.version !== prevStateVersion;
+      const polling = !initial && !sseOpen;
+      if (dataChanged) {
+        // 做过全量恢复：已缓存的活动、名单都可能属于旧数据，全部重拉；进行中的补拉作废。
         stopRoundBackfill();
-        void refreshEvent();
         void refreshParticipants();
-        void refreshRounds();
       }
+      // 没有实时推送（SSE 断开、浏览器不支持或连接数满）时，轮次和活动只能靠这里的轮询跟上。
+      if (dataChanged || roundsStale || enteredWinners || polling) void refreshRounds();
+      if (dataChanged || polling) void refreshEvent();
       if (next.mode === 'reveal' && next.round_id && !isRoundLoaded(next.round_id)) {
         startRoundBackfill(next.round_id);
       } else {
@@ -220,6 +242,7 @@ export function useScreenData() {
 
       es.addEventListener('open', () => {
         if (disposed || currentEs !== es) return;
+        sseOpen = true;
         retryDelay = INITIAL_RECONNECT_DELAY_MS;
         if (needsReconnectRefresh) {
           needsReconnectRefresh = false;
@@ -246,6 +269,7 @@ export function useScreenData() {
 
       es.onerror = () => {
         if (disposed || currentEs !== es) return;
+        sseOpen = false;
         closeSse();
         needsReconnectRefresh = true;
         const delay = retryDelay;
