@@ -463,6 +463,12 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
        (SELECT COUNT(*) FROM gala_rounds WHERE event_id = ?) AS rounds`,
     [id, id],
   );
+  const nextRoundRows = await db.all(
+    'SELECT segment, COALESCE(MAX(round_no), 0) + 1 AS next_no FROM gala_rounds WHERE event_id = ? GROUP BY segment',
+    [id],
+  );
+  const nextRoundNos = {};
+  for (const r of nextRoundRows) nextRoundNos[r.segment] = Number(r.next_no);
   const allocated = await allocatedByPool(db, pools.filter((p) => Number(p.is_reserved) === 0).map((p) => p.id));
   const visiblePools = pools.map((p) => serializePool(p, { allocated: allocated.get(Number(p.id)) || 0, includeReserved }));
   const publicPools = visiblePools.filter((p) => p.is_reserved === 0);
@@ -478,6 +484,7 @@ async function readGalaEventDetail(db, { id, includeReserved }) {
     budget_summary: budgetSummary,
     participant_count: Number(counts?.participants || 0),
     round_count: Number(counts?.rounds || 0),
+    next_round_nos: nextRoundNos,
     // 本活动所有写接口（改活动、奖池、名单、抽签、预留）都要原样带回，见 inTx。
     gala_version: await readGalaVersion(db),
   };

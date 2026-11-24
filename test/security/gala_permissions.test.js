@@ -1342,3 +1342,59 @@ test('合并导入受保护账户集合包含目标库真实年会发奖流水�
   assert.match(guardBlock, /UNION[\s\S]*?FROM ledger[\s\S]*?is_gala_payout = 1/);
 });
 
+test('活动详情：在同一只读快照里返回各环节下一轮次号 next_round_nos，无轮次的环节不出现', async () => {
+  const { getGalaEventDetail } = await import('../../src/services/galaService.js');
+  const V = '11111111-2222-4333-8444-555555555555';
+  const makeDb = (roundGroups) => {
+    const queries = [];
+    const tx = {
+      exec: async (sql) => { queries.push(sql); },
+      get: async (sql) => {
+        queries.push(sql);
+        if (sql.includes('FROM gala_events')) {
+          return {
+            id: 1,
+            title: '2026 年会',
+            event_date: '2026-12-31',
+            status: 'live',
+            total_budget: 10000,
+            enabled_segments: '["lottery","game","giveaway"]',
+            created_by: 'admin',
+            created_name: '管理员',
+            created_at: 100,
+            updated_at: 200,
+          };
+        }
+        if (sql.includes('AS participants')) return { participants: 50, rounds: 4 };
+        if (sql.includes('version_token')) return { version_token: V };
+        return null;
+      },
+      all: async (sql) => {
+        queries.push(sql);
+        if (sql.includes('FROM gala_pools')) return [];
+        if (sql.includes('FROM gala_rounds') && sql.includes('GROUP BY segment')) return roundGroups;
+        return [];
+      },
+    };
+    return {
+      queries,
+      transaction: async (fn) => fn(tx),
+    };
+  };
+
+  const db = makeDb([
+    { segment: 'lottery', next_no: '4' },
+    { segment: 'game', next_no: 2 },
+  ]);
+  const detail = await getGalaEventDetail(db, { eventId: 1 });
+  assert.deepEqual(detail.next_round_nos, { lottery: 4, game: 2 });
+  assert.equal(typeof detail.next_round_nos.lottery, 'number');
+  assert.equal(Object.hasOwn(detail.next_round_nos, 'giveaway'), false);
+  assert.equal(detail.gala_version, V);
+  assert.ok(db.queries.some((q) => q.includes('REPEATABLE READ, READ ONLY')));
+  assert.ok(db.queries.some((q) => q.includes('COALESCE(MAX(round_no), 0) + 1 AS next_no') && q.includes('GROUP BY segment')));
+
+  const emptyDetail = await getGalaEventDetail(makeDb([]), { eventId: 1 });
+  assert.deepEqual(emptyDetail.next_round_nos, {});
+});
+
