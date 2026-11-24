@@ -410,3 +410,13 @@ test('15. 球体名字卡折行兜底、定时刷新名单时一并刷新活动�
   assert.match(timer, /refreshParticipants\(\)/);
   assert.match(timer, /refreshEvent\(\)/);
 });
+
+test('16. 荣耀榜中奖人名字限制在轮次卡片宽度内，超长名字换行而不是越出分栏', () => {
+  const css = readRepoFile('src/admin-app/src/screen/screen.css');
+  const block = css.slice(css.indexOf('.gs-winner-name {'));
+  const rule = stripJsComments(block.slice(0, block.indexOf('}')));
+  assert.match(rule, /max-width:\s*100%/);
+  assert.match(rule, /white-space:\s*normal/);
+  assert.match(rule, /overflow-wrap:\s*break-word/);
+  assert.doesNotMatch(rule, /white-space:\s*nowrap/);
+});

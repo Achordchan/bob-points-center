@@ -613,13 +613,18 @@ body,
 }
 
 .gs-winner-name {
+  /* 名字不超过轮次卡片宽度：常规名字一行放得下照常单行；超长名字（如长英文全名）在卡片内按词换行，
+     不越过相邻分栏，也不被最后一栏外的视口裁掉。break-word 不改变最小内容宽度，短名字不会被拆开。 */
+  max-width: 100%;
+  min-width: 0;
   font-family: var(--gs-font-sans);
   font-size: 30px;
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: 0.04em;
   color: var(--gs-ivory);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 /* ---------- NameSphere 3D 名字球体 ---------- */
