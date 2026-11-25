@@ -10,7 +10,7 @@ const MODE_SUCCESS_TEXT = {
   idle: '大屏已切换为待机',
   rolling: '大屏已开始滚动',
   reveal: '大屏已切换为揭晓所选轮次',
-  winners: '大屏已切换为中奖榜',
+  winners: '大屏已切换为荣耀榜',
 };
 
 function formatRoundOptionLabel(round, segmentLabelMap) {
@@ -227,7 +227,7 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
       return <Tag color="gold">{rid > 0 ? `揭晓：轮次 #${rid}` : '揭晓'}</Tag>;
     }
     if (screenState.mode === 'winners') {
-      return <Tag color="green">中奖榜</Tag>;
+      return <Tag color="green">荣耀榜</Tag>;
     }
     return <Tag>待机</Tag>;
   };
@@ -320,7 +320,7 @@ export default function ScreenControlCard({ eventId, galaVersion, me, segments =
               disabled={isSubmitting && submittingMode !== 'winners'}
               onClick={() => handleSwitchMode('winners')}
             >
-              中奖榜
+              荣耀榜
             </Button>
           </Space>
         )}
