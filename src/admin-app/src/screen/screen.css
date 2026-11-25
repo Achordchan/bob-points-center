@@ -411,7 +411,7 @@ body,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin-bottom: 48px;
+  margin-bottom: 32px;
 }
 
 .gs-winners-title {
@@ -460,7 +460,7 @@ body,
 }
 
 .gs-winners-track {
-  padding: 4px 0 24px;
+  padding: 4px 0 8px;
   will-change: transform;
 }
 
@@ -505,11 +505,16 @@ body,
   margin-bottom: 40px;
 }
 
+/* 最后一个环节后面不留空：多出的 40px 会让刚好放得下的榜单也开始滚动，把顶部的环节标题滚出视口。 */
+.gs-segment-column:last-child {
+  margin-bottom: 0;
+}
+
 .gs-segment-heading {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  margin-bottom: 24px;
+  gap: 12px;
+  margin-bottom: 20px;
 }
 
 .gs-segment-title {
@@ -545,11 +550,11 @@ body,
 .gs-round-list {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
 }
 
 .gs-round-card {
-  padding: 24px 28px 26px;
+  padding: 20px 28px 22px;
   border-radius: 12px;
   border: 1px solid rgba(var(--gs-gold-2-rgb), 0.25);
   background: rgba(var(--gs-bg-center-rgb), 0.55);
@@ -560,7 +565,7 @@ body,
   flex-direction: column;
   align-items: flex-start;
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .gs-round-meta {
