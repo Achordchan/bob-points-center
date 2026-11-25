@@ -1,5 +1,7 @@
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
+  const currentHostEl = document.getElementById('currentHost');
+  if (currentHostEl) currentHostEl.textContent = window.location.host;
   const fetchJson = window.BOB.fetchJson;
 
   function getLoginRedirectTarget() {

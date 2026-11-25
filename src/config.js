@@ -32,7 +32,7 @@ export function loadConfig() {
 
   // 会话与 Cookie：sessionSalt 已废弃，签名仅依赖稳定 secret。
   // Secure 判定：显式 COOKIE_SECURE > HTTPS 的 SERVER_BASE_URL > NODE_ENV=production。
-  // 宝塔反代 HTTPS 时即使 NODE_ENV 为空，也不应发出可被 HTTP 窃听的会话 Cookie。
+  // nginx 反代 HTTPS 时即使 NODE_ENV 为空，也不应发出可被 HTTP 窃听的会话 Cookie。
   const serverBaseUrl = process.env.SERVER_BASE_URL || `http://127.0.0.1:${process.env.PORT || 8000}`;
   const baseIsHttps = /^https:\/\//i.test(String(serverBaseUrl).trim());
   const cookieSecureEnv = process.env.COOKIE_SECURE;

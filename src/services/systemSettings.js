@@ -138,90 +138,104 @@ export async function saveExternalLoginSettings(db, input) {
   return normalized;
 }
 
-const DEFAULT_GROUP_CARD_SETTINGS = {
-  enabled: true,
-  channelPresets: [
-    { name: 'BOB大群', openConversationId: 'cidxEY0ywSnrjDytDeXzEscwg==' },
-    { name: '测试群', openConversationId: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
-  ],
-  channel: {
-    openConversationId: null,
-    cardTemplateId: null,
-    operatorUserid: null,
-    broadcastAll: null,
-    recipients: null,
-    titleKey: null,
-    contentKey: null,
-    searchIcon: null,
-  },
-  templates: {
-    manual: {
-      enabled: true,
-      title: '{{title}}',
-      content: '{{content}}',
-      buttons: [
-        { text: '去商城', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-        { text: '查余额', url: 'https://bob.baymaxgroup.com/mall?tab=balance', color: 'gray' },
-      ],
+// 群卡片默认按钮链接按 SERVER_BASE_URL 拼接，不写死域名。
+// 调用时才读取环境变量：本模块在 loadConfig()（dotenv.config()）之前就会被 import。
+function serverBaseUrl() {
+  const raw = String(process.env.SERVER_BASE_URL || '').trim();
+  const base = raw || `http://127.0.0.1:${process.env.PORT || 8000}`;
+  return base.replace(/\/+$/, '');
+}
+
+function mallUrl(tab) {
+  return `${serverBaseUrl()}/mall?tab=${tab}`;
+}
+
+export function getDefaultGroupCardSettings() {
+  return {
+    enabled: true,
+    channelPresets: [
+      { name: 'BOB大群', openConversationId: 'cidxEY0ywSnrjDytDeXzEscwg==' },
+      { name: '测试群', openConversationId: 'cidGgW6mYLsdUyYN4rIuPvgYw==' },
+    ],
+    channel: {
+      openConversationId: null,
+      cardTemplateId: null,
+      operatorUserid: null,
+      broadcastAll: null,
+      recipients: null,
+      titleKey: null,
+      contentKey: null,
+      searchIcon: null,
     },
-    mall_open: {
-      enabled: true,
-      title: '【BOB币中心】商城已开启',
-      content: '## 商城已开启\n\n- 开启时间：{{open_time}}\n\n现在可以下单啦！',
-      buttons: [
-        { text: '立刻下单', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-        { text: '查余额', url: 'https://bob.baymaxgroup.com/mall?tab=balance', color: 'gray' },
-      ],
+    templates: {
+      manual: {
+        enabled: true,
+        title: '{{title}}',
+        content: '{{content}}',
+        buttons: [
+          { text: '去商城', url: mallUrl('shop'), color: 'blue' },
+          { text: '查余额', url: mallUrl('balance'), color: 'gray' },
+        ],
+      },
+      mall_open: {
+        enabled: true,
+        title: '【BOB币中心】商城已开启',
+        content: '## 商城已开启\n\n- 开启时间：{{open_time}}\n\n现在可以下单啦！',
+        buttons: [
+          { text: '立刻下单', url: mallUrl('shop'), color: 'blue' },
+          { text: '查余额', url: mallUrl('balance'), color: 'gray' },
+        ],
+      },
+      mall_open_remind: {
+        enabled: true,
+        title: '【BOB币中心】即将开启下单',
+        content: '## 即将开启下单\n\n- 开启时间：{{open_time}}\n\n请提前准备，下单即将开放。',
+        buttons: [
+          { text: '去商城看看', url: mallUrl('shop'), color: 'blue' },
+        ],
+      },
+      mall_close_remind: {
+        enabled: true,
+        title: '【BOB币中心】商城即将关闭',
+        content: '## 即将关闭\n\n- 关闭时间：{{close_time}}\n\n请尽快完成下单。',
+        buttons: [
+          { text: '抢购！', url: mallUrl('shop'), color: 'blue' },
+        ],
+      },
+      mall_close: {
+        enabled: true,
+        title: '【BOB币中心】商城已关闭',
+        content: '## 商城已关闭\n\n- 关闭时间：{{close_time}}\n\n本轮下单已结束。',
+        buttons: [
+          { text: '查看订单', url: mallUrl('orders'), color: 'gray' },
+        ],
+      },
+      stock_low: {
+        enabled: true,
+        title: '【BOB币中心】库存告急：{{product_name}}',
+        content: '## 库存快没啦！\n\n- 商品：{{product_name}}\n- 库存：{{stock}}\n\n想要的同学欲购从速，售完为止。',
+        buttons: [
+          { text: '抢购', url: mallUrl('shop'), color: 'blue' },
+        ],
+      },
+      stock_soldout: {
+        enabled: true,
+        title: '【BOB币中心】已售罄：{{product_name}}',
+        content: '## 已售罄\n\n- 商品：{{product_name}}\n- 状态：全部卖光啦\n\n感谢支持～',
+        buttons: [],
+      },
+      new_product: {
+        enabled: true,
+        title: '【BOB币中心】新品上架：{{product_name}}',
+        content: '## 新品上架\n\n- 商品：{{product_name}}\n- 价格：{{amount}}\n- 库存：{{stock}}\n\n欢迎在商城下单。',
+        buttons: [
+          { text: '去下单', url: mallUrl('shop'), color: 'blue' },
+          { text: '查余额', url: mallUrl('balance'), color: 'gray' },
+        ],
+      },
     },
-    mall_open_remind: {
-      enabled: true,
-      title: '【BOB币中心】即将开启下单',
-      content: '## 即将开启下单\n\n- 开启时间：{{open_time}}\n\n请提前准备，下单即将开放。',
-      buttons: [
-        { text: '去商城看看', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-      ],
-    },
-    mall_close_remind: {
-      enabled: true,
-      title: '【BOB币中心】商城即将关闭',
-      content: '## 即将关闭\n\n- 关闭时间：{{close_time}}\n\n请尽快完成下单。',
-      buttons: [
-        { text: '抢购！', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-      ],
-    },
-    mall_close: {
-      enabled: true,
-      title: '【BOB币中心】商城已关闭',
-      content: '## 商城已关闭\n\n- 关闭时间：{{close_time}}\n\n本轮下单已结束。',
-      buttons: [
-        { text: '查看订单', url: 'https://bob.baymaxgroup.com/mall?tab=orders', color: 'gray' },
-      ],
-    },
-    stock_low: {
-      enabled: true,
-      title: '【BOB币中心】库存告急：{{product_name}}',
-      content: '## 库存快没啦！\n\n- 商品：{{product_name}}\n- 库存：{{stock}}\n\n想要的同学欲购从速，售完为止。',
-      buttons: [
-        { text: '抢购', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-      ],
-    },
-    stock_soldout: {
-      enabled: true,
-      title: '【BOB币中心】已售罄：{{product_name}}',
-      content: '## 已售罄\n\n- 商品：{{product_name}}\n- 状态：全部卖光啦\n\n感谢支持～',
-      buttons: [],
-    },
-    new_product: {
-      enabled: true,
-      title: '【BOB币中心】新品上架：{{product_name}}',
-      content: '## 新品上架\n\n- 商品：{{product_name}}\n- 价格：{{amount}}\n- 库存：{{stock}}\n\n欢迎在商城下单。',
-      buttons: [
-        { text: '去下单', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
-        { text: '查余额', url: 'https://bob.baymaxgroup.com/mall?tab=balance', color: 'gray' },
-      ],
-    },
-  },
-};
+  };
+}
 
 function toBool(value, fallback) {
   if (value === true) return true;
@@ -339,7 +353,8 @@ function normalizeGroupChannelPresets(value, fallback = []) {
 export function normalizeGroupCardSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const allowEmptyChannelPresets = src.channelPresetsEmpty === true;
-  const defaults = DEFAULT_GROUP_CARD_SETTINGS.templates || {};
+  const defaultSettings = getDefaultGroupCardSettings();
+  const defaults = defaultSettings.templates || {};
   const nextTemplates = {};
   for (const [key, def] of Object.entries(defaults)) {
     const curr = src?.templates?.[key] && typeof src.templates[key] === 'object' ? src.templates[key] : {};
@@ -352,10 +367,10 @@ export function normalizeGroupCardSettings(input) {
   }
   const channelPresets = normalizeGroupChannelPresets(
     src.channelPresets,
-    allowEmptyChannelPresets ? [] : DEFAULT_GROUP_CARD_SETTINGS.channelPresets,
+    allowEmptyChannelPresets ? [] : defaultSettings.channelPresets,
   );
   return {
-    enabled: toBool(src.enabled, DEFAULT_GROUP_CARD_SETTINGS.enabled),
+    enabled: toBool(src.enabled, defaultSettings.enabled),
     channelPresets,
     channelPresetsEmpty: allowEmptyChannelPresets && channelPresets.length === 0,
     channel: {
@@ -375,21 +390,21 @@ export function normalizeGroupCardSettings(input) {
 }
 
 export async function getGroupCardSettings(db) {
-  if (!db) return DEFAULT_GROUP_CARD_SETTINGS;
+  if (!db) return getDefaultGroupCardSettings();
   const row = await db.get('SELECT value FROM system_settings WHERE key = ? LIMIT 1', ['group_card_settings']);
-  if (!row?.value) return DEFAULT_GROUP_CARD_SETTINGS;
+  if (!row?.value) return getDefaultGroupCardSettings();
   try {
     const parsed = JSON.parse(String(row.value));
     return normalizeGroupCardSettings(parsed);
   } catch {
-    return DEFAULT_GROUP_CARD_SETTINGS;
+    return getDefaultGroupCardSettings();
   }
 }
 
 export async function saveGroupCardSettings(db, input) {
-  if (!db) return DEFAULT_GROUP_CARD_SETTINGS;
+  if (!db) return getDefaultGroupCardSettings();
   const normalized = input?.reset === true
-    ? DEFAULT_GROUP_CARD_SETTINGS
+    ? getDefaultGroupCardSettings()
     : normalizeGroupCardSettings(input);
   await db.exec(
     'INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()',

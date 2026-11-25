@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "deploy:baota": "bash scripts/deploy-baota.sh",
+    "deploy": "bash scripts/deploy.sh",
     "db:tunnel": "bash scripts/pg-tunnel.sh",
     "db:sync-from-prod": "bash scripts/sync-prod-to-local.sh",
     "dev:session": "node scripts/dev-session.js",

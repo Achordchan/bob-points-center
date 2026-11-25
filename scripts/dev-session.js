@@ -66,7 +66,7 @@ try {
 }
 const baseHost = baseUrl.hostname.toLowerCase();
 const loopbackBase = ['localhost', '127.0.0.1', '::1'].includes(baseHost);
-const developmentDomain = baseHost === 'dev.bob.baymaxgroup.com';
+const developmentDomain = baseHost === 'dev.b.achord.cn';
 if ((!loopbackBase && !developmentDomain)
   || !['http:', 'https:'].includes(baseUrl.protocol)
   || (developmentDomain && baseUrl.protocol !== 'https:')
