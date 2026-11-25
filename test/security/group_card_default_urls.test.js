@@ -45,3 +45,28 @@ test('未配置 SERVER_BASE_URL 时退回本机地址', () => {
     assert.equal(getDefaultGroupCardSettings().templates.mall_close.buttons[0].url, 'http://127.0.0.1:8123/mall?tab=orders');
   });
 });
+
+test('已保存设置里指向旧域名的按钮在读取时改指 SERVER_BASE_URL，其它自定义链接不变', () => {
+  withEnv({ SERVER_BASE_URL: 'https://b.example.test' }, () => {
+    const saved = {
+      templates: {
+        manual: {
+          buttons: [
+            { text: '去商城', url: 'https://bob.baymaxgroup.com/mall?tab=shop', color: 'blue' },
+            { text: '外链', url: 'https://example.org/page', color: 'gray' },
+            { text: '相似域名', url: 'https://bob.baymaxgroup.com.evil.test/x', color: 'gray' },
+          ],
+        },
+        mall_close: { buttons: JSON.stringify([{ text: '订单', url: 'http://bob.baymaxgroup.com/mall?tab=orders' }]) },
+      },
+    };
+    const settings = normalizeGroupCardSettings(saved);
+    assert.deepEqual(settings.templates.manual.buttons.map((b) => b.url), [
+      'https://b.example.test/mall?tab=shop',
+      'https://example.org/page',
+      'https://bob.baymaxgroup.com.evil.test/x',
+    ]);
+    assert.equal(settings.templates.mall_close.buttons[0].url, 'https://b.example.test/mall?tab=orders');
+    assert.equal(saved.templates.manual.buttons[0].url, 'https://bob.baymaxgroup.com/mall?tab=shop');
+  });
+});

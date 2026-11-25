@@ -150,6 +150,26 @@ function mallUrl(tab) {
   return `${serverBaseUrl()}/mall?tab=${tab}`;
 }
 
+// 已停用的旧域名。数据库里早先保存的群卡片按钮若仍指向它，读取时改指当前 SERVER_BASE_URL（只改读取结果，不回写数据库）。
+const RETIRED_ORIGINS = ['https://bob.baymaxgroup.com', 'http://bob.baymaxgroup.com'];
+
+function rebaseRetiredUrl(url) {
+  if (typeof url !== 'string') return url;
+  for (const origin of RETIRED_ORIGINS) {
+    if (url === origin || url.startsWith(`${origin}/`) || url.startsWith(`${origin}?`)) {
+      return `${serverBaseUrl()}${url.slice(origin.length)}`;
+    }
+  }
+  return url;
+}
+
+function rebaseRetiredButtons(buttons) {
+  if (!Array.isArray(buttons)) return buttons;
+  return buttons.map((btn) => (btn && typeof btn === 'object' && typeof btn.url === 'string'
+    ? { ...btn, url: rebaseRetiredUrl(btn.url) }
+    : btn));
+}
+
 export function getDefaultGroupCardSettings() {
   return {
     enabled: true,
@@ -362,7 +382,7 @@ export function normalizeGroupCardSettings(input) {
       enabled: toBool(curr?.enabled, def.enabled !== false),
       title: curr?.title === null || curr?.title === undefined ? def.title : String(curr.title),
       content: curr?.content === null || curr?.content === undefined ? def.content : String(curr.content),
-      buttons: normalizeButtons(curr?.buttons, def.buttons),
+      buttons: rebaseRetiredButtons(normalizeButtons(curr?.buttons, def.buttons)),
     };
   }
   const channelPresets = normalizeGroupChannelPresets(

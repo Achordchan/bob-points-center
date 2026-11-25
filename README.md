@@ -515,14 +515,14 @@ DRY_RUN=1 npm run deploy
 npm run deploy
 ```
 
-`DRY_RUN=1` 只预览 rsync 将新增、修改、删除哪些文件，不写服务器、不重启服务。
+`DRY_RUN=1` 只预览 rsync 将新增、修改、删除哪些文件，不改动应用目录、不重启服务。
 
 ### 部署脚本行为
 
 `scripts/deploy.sh` 依次执行：
 
 1. 检查工作区干净且 `HEAD` 等于 `origin/main`，否则拒绝部署（确需强制可设 `ALLOW_DIRTY=1`）。
-2. 本机 `npm run build` 构建管理端。
+2. 本机 `npm run build` 构建管理端，然后在服务器上获取部署锁 `/var/lock/bob-deploy.lock`（同一时间只允许一次部署，结束时自动释放；中断残留时脚本会提示清理命令）。
 3. `rsync --delete` 以 `bob` 用户身份同步到 `/srv/bob/app`，排除 `.env`、`.env.*`、`.git/`、`node_modules/`、上传文件（`uploads/`）、日志与备份目录等运行期文件，这些文件不会被覆盖或删除。
 4. 服务器只检查 `.env` 存在且已配置 `SERVER_BASE_URL`、`ADMIN_SESSION_SECRET`、`WEB_SESSION_SECRET`，不读取、不修改任何值。
 5. `sudo -u bob npm ci --omit=dev`，然后 `sudo systemctl restart bob`。

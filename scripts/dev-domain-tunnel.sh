@@ -13,6 +13,12 @@
 #       服务器上已配置 dev.b.achord.cn 的 nginx 站点（反代到 127.0.0.1:18000）与证书。
 set -euo pipefail
 
+# 旧变量 DEV_TUNNEL_REMOTE_HOST / DEV_TUNNEL_REMOTE_USER 已废弃：明确报错，避免旧启动配置被静默忽略。
+if [ -n "${DEV_TUNNEL_REMOTE_HOST:-}" ] || [ -n "${DEV_TUNNEL_REMOTE_USER:-}" ]; then
+  echo "DEV_TUNNEL_REMOTE_HOST / DEV_TUNNEL_REMOTE_USER 已废弃，请改用 DEV_TUNNEL_SSH_TARGET（SSH 别名或 user@host）。" >&2
+  exit 1
+fi
+
 LOCAL_PORT="${DEV_TUNNEL_LOCAL_PORT:-8000}"
 REMOTE_PORT="${DEV_TUNNEL_REMOTE_PORT:-18000}"
 # SSH 目标默认用 ~/.ssh/config 里的别名 bob-hk（43.161.221.5，用户 ubuntu）。

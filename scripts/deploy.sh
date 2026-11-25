@@ -10,7 +10,7 @@
 #
 # 用法：
 #   npm run deploy                 # 正式部署
-#   DRY_RUN=1 npm run deploy       # 只预览 rsync 会改动哪些文件，不写服务器、不重启
+#   DRY_RUN=1 npm run deploy       # 只预览 rsync 会改动哪些文件，不改应用目录、不重启
 #
 # 部署前建议先在服务器做一次数据库备份：
 #   ssh bob-hk 'sudo /usr/local/sbin/bob-backup.sh'
@@ -53,6 +53,18 @@ else
 fi
 [ -f "src/pages/admin-app-dist/index.html" ] || die "缺少 src/pages/admin-app-dist/index.html，构建失败或未构建。"
 
+# 服务器侧部署锁（mkdir 原子），覆盖从 rsync 到验证结束，同一时间只允许一次部署或预览。
+# 锁在 /run/lock（tmpfs），服务器重启后自动消失。
+DEPLOY_LOCK="${DEPLOY_LOCK:-/var/lock/bob-deploy.lock}"
+if ! ssh "${DEPLOY_SSH}" "sudo mkdir '${DEPLOY_LOCK}' 2>/dev/null"; then
+  holder="$(ssh "${DEPLOY_SSH}" "sudo cat '${DEPLOY_LOCK}/owner' 2>/dev/null" || true)"
+  die "服务器上已有部署在进行（${holder:-持有者未知}）。若确认是中断后残留的锁，可执行：ssh ${DEPLOY_SSH} 'sudo rm -rf ${DEPLOY_LOCK}'"
+fi
+release_lock() { ssh "${DEPLOY_SSH}" "sudo rm -rf '${DEPLOY_LOCK}'" || echo "警告：释放部署锁失败，请手动执行 ssh ${DEPLOY_SSH} 'sudo rm -rf ${DEPLOY_LOCK}'" >&2; }
+trap release_lock EXIT
+lock_owner="$(whoami)@$(hostname -s) pid=$$ $(date '+%F %T') $(git rev-parse --short HEAD)"
+ssh "${DEPLOY_SSH}" "printf '%s\\n' '${lock_owner}' | sudo tee '${DEPLOY_LOCK}/owner' >/dev/null" || true
+
 # 运行期文件一律排除：被排除的路径不会被 --delete 删除。
 RSYNC_EXCLUDES=(
   --exclude ".git/"
@@ -80,7 +92,7 @@ RSYNC_EXCLUDES=(
 RSYNC_OPTS=(-rltz --delete --no-perms --no-owner --no-group)
 if [ "${DRY_RUN}" = "1" ]; then
   RSYNC_OPTS+=(--dry-run -v)
-  echo "[2/4] 预览 rsync 改动（DRY_RUN=1，不写服务器）…"
+  echo "[2/4] 预览 rsync 改动（DRY_RUN=1，不改应用目录）…"
 else
   echo "[2/4] rsync 同步代码 …"
 fi
@@ -120,7 +132,14 @@ done
 as_app sh -c 'cd "$1" && npm ci --omit=dev --no-audit --no-fund' sh "${DEPLOY_PATH}"
 
 LOG=/var/log/bob/app.log
-log_start=$(( $(sudo wc -l < "${LOG}" 2>/dev/null || echo 0) + 1 ))
+# 行数在 sudo 内读取（ubuntu 不一定有读权限）；日志不存在时从第 1 行看起，读取失败则停止。
+if sudo test -e "${LOG}"; then
+  log_lines="$(sudo wc -l "${LOG}" | awk '{print $1}')"
+  [[ "${log_lines}" =~ ^[0-9]+$ ]] || { echo "无法读取 ${LOG} 行数，停止部署。" >&2; exit 1; }
+else
+  log_lines=0
+fi
+log_start=$(( log_lines + 1 ))
 sudo systemctl restart "${DEPLOY_SERVICE}"
 
 ok=0
