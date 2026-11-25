@@ -260,7 +260,7 @@ npm run dev:session -- admin
 npm run dev:session -- web
 ```
 
-该脚本不修改任何认证逻辑，直接调用项目自身的签名函数。仅允许在明确的 `NODE_ENV=development` 下使用，入口仅接受 loopback 地址或 HTTPS 的 `dev.b.achord.cn`。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`），并将 `SESSION_SALT` 与仅供本地使用的 `DEV_SESSION_SALT` 设为相同且不少于 32 个字符；`ADMIN_SESSION_SECRET` 和 `WEB_SESSION_SECRET` 也必须分别显式配置、不少于 32 个字符且互不相同。脚本会先以只读事务核对实际数据库名与 PostgreSQL `bob.environment=development` 标记，再从数据库刷新当前全局会话版本，全部通过后才允许查询用户并签发 Token。生产环境不要配置 `DEV_SESSION_SALT`。可追加 `userid` 参数指定用户。
+该脚本不修改任何认证逻辑，直接调用项目自身的签名函数。仅允许在明确的 `NODE_ENV=development` 下使用，入口仅接受 loopback 地址（`localhost` / `127.0.0.1` / `::1`）。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`），并将 `SESSION_SALT` 与仅供本地使用的 `DEV_SESSION_SALT` 设为相同且不少于 32 个字符；`ADMIN_SESSION_SECRET` 和 `WEB_SESSION_SECRET` 也必须分别显式配置、不少于 32 个字符且互不相同。脚本会先以只读事务核对实际数据库名与 PostgreSQL `bob.environment=development` 标记，再从数据库刷新当前全局会话版本，全部通过后才允许查询用户并签发 Token。生产环境不要配置 `DEV_SESSION_SALT`。可追加 `userid` 参数指定用户。
 
 ### 6. 访问入口
 
@@ -537,7 +537,8 @@ npm run deploy
 | --- | --- |
 | `npm run db:tunnel` | SSH 隧道：本机 `127.0.0.1:35432` → `bob-hk` 的 `127.0.0.1:5432` |
 | `npm run db:sync-from-prod` | 经隧道把生产库只读导出并恢复到本地 Compose 容器 |
-| `npm run dev:tunnel` | SSH 反向隧道：`https://dev.b.achord.cn` → `bob-hk` 的 `127.0.0.1:18000` → 本机 `127.0.0.1:8000` |
+
+目前不提供开发域名（原 `dev.bob.baymaxgroup.com` 反向隧道已下线）：本机只用 loopback 地址调试，需要在钉钉内打开的联调直接在线上进行。
 
 ## 运维手册
 

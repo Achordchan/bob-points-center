@@ -66,10 +66,8 @@ try {
 }
 const baseHost = baseUrl.hostname.toLowerCase();
 const loopbackBase = ['localhost', '127.0.0.1', '::1'].includes(baseHost);
-const developmentDomain = baseHost === 'dev.b.achord.cn';
-if ((!loopbackBase && !developmentDomain)
+if (!loopbackBase
   || !['http:', 'https:'].includes(baseUrl.protocol)
-  || (developmentDomain && baseUrl.protocol !== 'https:')
   || baseUrl.username
   || baseUrl.password
   || (baseUrl.pathname && baseUrl.pathname !== '/')
