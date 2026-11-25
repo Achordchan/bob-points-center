@@ -776,6 +776,82 @@
     }
   }
 
+  // 百人同时看竞拍时，各手机若在同一刻重拉会在服务端叠成尖峰；重拉统一错开 0–1.5 秒。
+  const AUCTION_REFETCH_JITTER_MS = 1500;
+  function auctionRefetchJitterMs() {
+    return Math.floor(Math.random() * AUCTION_REFETCH_JITTER_MS);
+  }
+
+  // 出价推送自带活动快照：直接更新列表与详情，不再每次出价都重拉。
+  // 返回 false 表示当前界面用不上快照（如列表里没有这一场），交给调用方重拉。
+  function applyAuctionBidSnapshot(payload) {
+    const snap = payload?.activity;
+    const id = Number(snap?.id || 0);
+    if (!snap || !id) return false;
+    const nextCount = Number(snap.bid_count || 0);
+    const newBid = payload?.bid && Number(payload.bid.id) ? payload.bid : null;
+    let handled = true;
+
+    const detailOpen = state.auctionDetailId
+      && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
+    if (detailOpen && Number(state.auctionDetailId) === id) {
+      const detail = state.auctionDetail;
+      const curCount = Number(detail?.activity?.bid_count || 0);
+      if (!detail?.activity) {
+        // 详情还在首次加载：那次请求可能早于这次出价，让调用方再拉一次。
+        handled = false;
+      } else if (nextCount > curCount + 1) {
+        // 中间漏了出价（两次出价几乎同时提交，两条推送带的是同一份快照）：快照只有最新一条，
+        // 出价记录补不全，让调用方重拉详情。
+        handled = false;
+      } else if (nextCount > curCount) {
+        let bids = Array.isArray(detail.activity.bids) ? detail.activity.bids : [];
+        if (newBid && !bids.some((b) => Number(b.id) === Number(newBid.id))) {
+          // 每场至多一条在押出价：新出价进来，旧的在押出价即被退回。
+          bids = [newBid, ...bids.map((b) => (b.state === 'held' ? { ...b, state: 'refunded' } : b))].slice(0, 30);
+        }
+        detail.activity = { ...detail.activity, ...snap, bids };
+        const myBid = detail.my_bid;
+        if (myBid?.state === 'held' && newBid && Number(myBid.id) !== Number(newBid.id)) {
+          detail.my_bid = { ...myBid, state: 'refunded' };
+        }
+        renderAuctionDetail();
+        syncAuctionBidModal();
+      }
+    }
+
+    if (isAuctionVisible() && state.marketTab === 'auction-mine') {
+      // 「我的竞拍」页的数据结构与快照不同，交给原有的重拉路径（只有停在这一页的人会拉）。
+      handled = false;
+    } else if (isAuctionVisible()) {
+      const list = Array.isArray(state.auctionList) ? state.auctionList : [];
+      const idx = list.findIndex((row) => Number(row.id) === id);
+      if (idx < 0) {
+        handled = false;
+      } else if (nextCount > Number(list[idx].bid_count || 0)) {
+        list[idx] = { ...list[idx], ...snap };
+        renderAuctionList();
+      }
+    }
+    return handled;
+  }
+
+  // 出价弹窗开着时价格被别人抬高：同步当前价与最低出价，免得按旧价提交被拒。
+  function syncAuctionBidModal() {
+    const modal = document.getElementById('auctionBidModal');
+    const a = state.auctionDetail?.activity;
+    if (!modal || modal.classList.contains('hidden') || !a) return;
+    setText('auctionBidCurrent', `${a.current_price !== null && a.current_price !== undefined ? Number(a.current_price) : Number(a.start_price || 0)} BOB 币`);
+    const floor = Number(a.next_bid_floor || 0);
+    setText('auctionBidFloorHint', `最低可出价 ${floor} BOB 币（当前价 + 加价幅度 ${Number(a.min_increment || 0)}）`);
+    const input = document.getElementById('auctionBidAmount');
+    if (input) {
+      input.min = String(floor);
+      const typed = Number(String(input.value || '').trim());
+      if (!Number.isFinite(typed) || typed < floor) input.value = String(floor);
+    }
+  }
+
   function refreshAuctionCountdowns() {
     const byId = new Map();
     for (const row of state.auctionList || []) byId.set(Number(row.id), row);
@@ -813,11 +889,20 @@
       })();
       if (due && tabVisible && !state.auctionListRefreshing) {
         state.auctionListRefreshing = true;
-        loadAuctionList().catch(() => null).finally(() => { state.auctionListRefreshing = false; });
+        setTimeout(() => {
+          loadAuctionList().catch(() => null).finally(() => { state.auctionListRefreshing = false; });
+        }, auctionRefetchJitterMs());
       }
       if (detailDue && modalOpen && !state.auctionDetailRefreshing) {
         state.auctionDetailRefreshing = true;
-        loadAuctionDetail(state.auctionDetailId).catch(() => null).finally(() => { state.auctionDetailRefreshing = false; });
+        const detailId = state.auctionDetailId;
+        setTimeout(() => {
+          const stillOpen = state.auctionDetailId === detailId
+            && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
+          (stillOpen ? loadAuctionDetail(detailId) : Promise.resolve())
+            .catch(() => null)
+            .finally(() => { state.auctionDetailRefreshing = false; });
+        }, auctionRefetchJitterMs());
       }
     }, 1000);
   }
@@ -1728,6 +1813,16 @@
       return;
     }
     if (eventName === 'balance_changed') {
+      if (payload?.reason === 'auction_outbid_refund' || payload?.reason === 'auction_bid') {
+        // 定向推送，只有本人收到：被超出时在押→已退回、出价按钮恢复；自己出价（含在另一台设备上出价）
+        // 时变成领先、出价按钮隐藏。广播快照不带个人出价状态，这里只让本人重拉一次。
+        scheduleRealtimeTask('auction_outbid', async () => {
+          const detailOpen = state.auctionDetailId
+            && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
+          if (detailOpen) await loadAuctionDetail(state.auctionDetailId);
+          if (isAuctionVisible() && state.marketTab === 'auction-mine') await loadMyAuction();
+        }, 60);
+      }
       scheduleRealtimeTask('balance', async () => {
         await refreshBalanceAndLedger();
         if (state.activeTab === 'more') {
@@ -1802,6 +1897,9 @@
       return;
     }
     if (eventName === 'auction_changed') {
+      if (payload?.reason === 'bid' && payload?.activity && applyAuctionBidSnapshot(payload)) {
+        return;
+      }
       scheduleRealtimeTask('auction', async () => {
         const detailOpen = state.auctionDetailId
           && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
@@ -1815,7 +1913,7 @@
             await loadAuctionList();
           }
         }
-      }, 60);
+      }, 60 + auctionRefetchJitterMs());
       return;
     }
     if (eventName === 'announcement_access_changed') {

@@ -497,6 +497,36 @@ export async function listAuctionActivitiesForMall(db, { now = nowSeconds(), lim
   return { list: out, settledWinners };
 }
 
+// 出价后的广播快照：一条查询拿到活动当前状态与当前最高出价，随 auction_changed 推给所有手机，
+// 手机直接更新界面，不必每次出价都各自重拉详情和列表（百人同时围观时，后者会把接口打满）。
+// 推送可能乱序到达，客户端按 bid_count 只接受更新的快照。
+export async function getAuctionBidBroadcast(db, { activityId, now = nowSeconds() } = {}) {
+  const id = toInt(activityId);
+  if (id === null || id <= 0) return null;
+  const row = await db.get(
+    `SELECT a.*, COALESCE(NULLIF(u.name, ''), a.current_bid_userid, '') AS current_bidder_name,
+            b.created_at AS current_bid_created_at, b.state AS current_bid_state
+       FROM auction_activities a
+       LEFT JOIN users u ON u.userid = a.current_bid_userid
+       LEFT JOIN auction_bids b ON b.id = a.current_bid_id
+      WHERE a.id = ?`,
+    [id],
+  );
+  if (!row) return null;
+  const activity = serializeAuctionRow(row, { now, includeBidderUserid: false });
+  const bid = row.current_bid_id
+    ? {
+      id: Number(row.current_bid_id),
+      display_name: activity.current_bidder_name,
+      amount: Number(row.current_price ?? 0),
+      // 出价提交到这条查询之间可能已被结算或取消：用出价的实际状态，而不是假定仍在押。
+      state: String(row.current_bid_state || 'held'),
+      created_at: Number(row.current_bid_created_at || now),
+    }
+    : null;
+  return { activity, bid };
+}
+
 export async function getAuctionDetailForMall(db, { activityId, now = nowSeconds() } = {}) {
   const id = toInt(activityId);
   if (id === null || id <= 0) throw new Error('invalid activity_id');

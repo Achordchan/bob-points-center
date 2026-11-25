@@ -19,6 +19,7 @@ import { getMallProductsSnapshotCached, invalidateMallProductsCache } from '../s
 import { buildExchangeData, encodeData, QRSignError } from '../utils/qr.js';
 import { claimActiveRedPacket, resolveRedPacketActivity } from '../services/redPacketService.js';
 import {
+  getAuctionBidBroadcast,
   getAuctionDetailForMall,
   getMyAuctionBidForActivity,
   listAuctionActivitiesForMall,
@@ -1213,9 +1214,12 @@ export function mallRouter() {
         });
       }
       publishMallRealtimeEvent('balance_changed', { userid, reason: 'auction_bid' });
+      // 快照读取失败不影响出价结果：推送退化为不带快照，手机按旧逻辑重拉。
+      const snapshot = await getAuctionBidBroadcast(db, { activityId: result.activity_id }).catch(() => null);
       publishMallRealtimeEvent('auction_changed', {
         activity_id: result.activity_id,
         reason: 'bid',
+        ...(snapshot ? { activity: snapshot.activity, bid: snapshot.bid } : {}),
       });
       const serverNowMs = Date.now();
       return res.json({
