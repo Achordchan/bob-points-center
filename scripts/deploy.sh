@@ -143,8 +143,10 @@ log_start=$(( log_lines + 1 ))
 sudo systemctl restart "${DEPLOY_SERVICE}"
 
 ok=0
-for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:${DEPLOY_PORT}/health" >/dev/null 2>&1; then ok=1; break; fi
+# 每次请求限时 5 秒，总时限 30 秒（含请求耗时），应用挂起时也不会无限等待。
+deadline=$(( SECONDS + 30 ))
+while [ "${SECONDS}" -lt "${deadline}" ]; do
+  if curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:${DEPLOY_PORT}/health" >/dev/null 2>&1; then ok=1; break; fi
   sleep 1
 done
 if [ "${ok}" != "1" ]; then
@@ -176,8 +178,10 @@ REMOTE
 
 echo "[4/4] 公网健康检查 ${DEPLOY_BASE_URL}/health …"
 health=""
-for _ in $(seq 1 10); do
-  health="$(curl -fsS "${DEPLOY_BASE_URL}/health" 2>/dev/null || true)"
+# 每次请求限时 10 秒，总时限 30 秒（含请求耗时）。
+deadline=$(( SECONDS + 30 ))
+while [ "${SECONDS}" -lt "${deadline}" ]; do
+  health="$(curl -fsS --connect-timeout 5 --max-time 10 "${DEPLOY_BASE_URL}/health" 2>/dev/null || true)"
   if printf '%s' "${health}" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then break; fi
   sleep 2
 done
