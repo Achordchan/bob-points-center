@@ -248,6 +248,7 @@ class FakeAuctionDb {
       ...a,
       current_bidder_name: a.current_bid_userid ? (this.users.get(a.current_bid_userid)?.name || a.current_bid_userid) : '',
       current_bid_created_at: a.current_bid_id ? (this.bids.get(Number(a.current_bid_id))?.created_at ?? null) : null,
+      current_bid_state: a.current_bid_id ? (this.bids.get(Number(a.current_bid_id))?.state ?? null) : null,
     }));
     const s = String(sql);
     if (s.includes('WHERE a.id = ?')) {
@@ -979,6 +980,13 @@ test('出价广播快照：带最新价、出价次数与当前在押出价，�
     state: 'held',
     created_at: ACTIVE_NOW + 5,
   });
+
+  // 出价提交后、快照查询前竞拍已被结算：快照里的当前出价是实际的 won，而不是 held。
+  await settleAuctionIfDue(db, { activityId: id, now: 1700003600 });
+  const settled = await getAuctionBidBroadcast(db, { activityId: id, now: 1700003601 });
+  assert.equal(settled.activity.effective_status, 'settled');
+  assert.equal(settled.bid.id, second.bid_id);
+  assert.equal(settled.bid.state, 'won');
 
   assert.equal(await getAuctionBidBroadcast(db, { activityId: 999999, now: ACTIVE_NOW }), null);
   assert.equal(await getAuctionBidBroadcast(db, { activityId: 'x', now: ACTIVE_NOW }), null);

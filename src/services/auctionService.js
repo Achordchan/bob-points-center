@@ -505,7 +505,7 @@ export async function getAuctionBidBroadcast(db, { activityId, now = nowSeconds(
   if (id === null || id <= 0) return null;
   const row = await db.get(
     `SELECT a.*, COALESCE(NULLIF(u.name, ''), a.current_bid_userid, '') AS current_bidder_name,
-            b.created_at AS current_bid_created_at
+            b.created_at AS current_bid_created_at, b.state AS current_bid_state
        FROM auction_activities a
        LEFT JOIN users u ON u.userid = a.current_bid_userid
        LEFT JOIN auction_bids b ON b.id = a.current_bid_id
@@ -519,7 +519,8 @@ export async function getAuctionBidBroadcast(db, { activityId, now = nowSeconds(
       id: Number(row.current_bid_id),
       display_name: activity.current_bidder_name,
       amount: Number(row.current_price ?? 0),
-      state: 'held',
+      // 出价提交到这条查询之间可能已被结算或取消：用出价的实际状态，而不是假定仍在押。
+      state: String(row.current_bid_state || 'held'),
       created_at: Number(row.current_bid_created_at || now),
     }
     : null;

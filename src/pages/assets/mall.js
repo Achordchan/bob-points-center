@@ -796,10 +796,15 @@
       && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
     if (detailOpen && Number(state.auctionDetailId) === id) {
       const detail = state.auctionDetail;
+      const curCount = Number(detail?.activity?.bid_count || 0);
       if (!detail?.activity) {
         // 详情还在首次加载：那次请求可能早于这次出价，让调用方再拉一次。
         handled = false;
-      } else if (nextCount > Number(detail.activity.bid_count || 0)) {
+      } else if (nextCount > curCount + 1) {
+        // 中间漏了出价（两次出价几乎同时提交，两条推送带的是同一份快照）：快照只有最新一条，
+        // 出价记录补不全，让调用方重拉详情。
+        handled = false;
+      } else if (nextCount > curCount) {
         let bids = Array.isArray(detail.activity.bids) ? detail.activity.bids : [];
         if (newBid && !bids.some((b) => Number(b.id) === Number(newBid.id))) {
           // 每场至多一条在押出价：新出价进来，旧的在押出价即被退回。
@@ -815,7 +820,10 @@
       }
     }
 
-    if (isAuctionVisible() && state.marketTab !== 'auction-mine') {
+    if (isAuctionVisible() && state.marketTab === 'auction-mine') {
+      // 「我的竞拍」页的数据结构与快照不同，交给原有的重拉路径（只有停在这一页的人会拉）。
+      handled = false;
+    } else if (isAuctionVisible()) {
       const list = Array.isArray(state.auctionList) ? state.auctionList : [];
       const idx = list.findIndex((row) => Number(row.id) === id);
       if (idx < 0) {
