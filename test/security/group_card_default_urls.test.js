@@ -91,3 +91,16 @@ test('完整格式按钮（event.params.url）里的旧域名同样在读取时�
     assert.equal(saved.templates.manual.buttons[0].event.params.url, 'https://bob.baymaxgroup.com/mall?tab=shop');
   });
 });
+
+test('只带 # 片段的旧域名链接也会改指新地址', () => {
+  withEnv({ SERVER_BASE_URL: 'https://b.example.test' }, () => {
+    const buttons = normalizeGroupCardSettings({
+      templates: { manual: { buttons: [
+        { text: 'a', url: 'https://bob.baymaxgroup.com#section' },
+        { text: 'b', url: 'https://bob.baymaxgroup.com' },
+      ] } },
+    }).templates.manual.buttons;
+    assert.equal(buttons[0].url, 'https://b.example.test#section');
+    assert.equal(buttons[1].url, 'https://b.example.test');
+  });
+});

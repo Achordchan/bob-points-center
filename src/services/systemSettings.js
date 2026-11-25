@@ -156,7 +156,7 @@ const RETIRED_ORIGINS = ['https://bob.baymaxgroup.com', 'http://bob.baymaxgroup.
 function rebaseRetiredUrl(url) {
   if (typeof url !== 'string') return url;
   for (const origin of RETIRED_ORIGINS) {
-    if (url === origin || url.startsWith(`${origin}/`) || url.startsWith(`${origin}?`)) {
+    if (url === origin || ['/', '?', '#'].some((sep) => url.startsWith(`${origin}${sep}`))) {
       return `${serverBaseUrl()}${url.slice(origin.length)}`;
     }
   }
