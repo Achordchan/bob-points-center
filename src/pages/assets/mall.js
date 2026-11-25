@@ -1813,8 +1813,9 @@
       return;
     }
     if (eventName === 'balance_changed') {
-      if (payload?.reason === 'auction_outbid_refund') {
-        // 只有被超出的那个人收到：刷新自己的出价状态（在押→已退回），出价按钮随之恢复。
+      if (payload?.reason === 'auction_outbid_refund' || payload?.reason === 'auction_bid') {
+        // 定向推送，只有本人收到：被超出时在押→已退回、出价按钮恢复；自己出价（含在另一台设备上出价）
+        // 时变成领先、出价按钮隐藏。广播快照不带个人出价状态，这里只让本人重拉一次。
         scheduleRealtimeTask('auction_outbid', async () => {
           const detailOpen = state.auctionDetailId
             && !document.getElementById('auctionDetailModal')?.classList.contains('hidden');
