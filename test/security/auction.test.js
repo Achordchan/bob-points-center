@@ -8,6 +8,7 @@ import {
   computeAntiSnipeEndAt,
   computeNextBidFloor,
   createAuction,
+  getAuctionBidBroadcast,
   getAuctionDetailForMall,
   listMyAuctionBids,
   normalizeAuctionCreateInput,
@@ -246,6 +247,7 @@ class FakeAuctionDb {
     let rows = [...this.activities.values()].map((a) => ({
       ...a,
       current_bidder_name: a.current_bid_userid ? (this.users.get(a.current_bid_userid)?.name || a.current_bid_userid) : '',
+      current_bid_created_at: a.current_bid_id ? (this.bids.get(Number(a.current_bid_id))?.created_at ?? null) : null,
     }));
     const s = String(sql);
     if (s.includes('WHERE a.id = ?')) {
@@ -948,4 +950,45 @@ test('用户清理先锁竞拍活动再锁账户，与出价/结算加锁顺序�
   const bidAccountLock = auctionSrc.search(/SELECT balance FROM accounts WHERE userid = \? FOR UPDATE/);
   assert.ok(bidActivityLock >= 0 && bidAccountLock >= 0);
   assert.ok(bidActivityLock < bidAccountLock, '出价先锁活动、后锁账户');
+});
+
+test('出价广播快照：带最新价、出价次数与当前在押出价，不含出价人 userid', async () => {
+  const db = makeDb();
+  await seedUser(db, 'alice', 'Alice', 500);
+  await seedUser(db, 'bob', 'Bob', 500);
+  const id = await seedActiveAuction(db, { startPrice: 100, increment: 10 });
+
+  const empty = await getAuctionBidBroadcast(db, { activityId: id, now: ACTIVE_NOW });
+  assert.equal(empty.bid, null, '无出价时没有当前出价');
+  assert.equal(empty.activity.bid_count, 0);
+
+  await placeAuctionBid(db, { activityId: id, userid: 'alice', name: 'Alice', amount: 110, now: ACTIVE_NOW });
+  const second = await placeAuctionBid(db, { activityId: id, userid: 'bob', name: 'Bob', amount: 130, now: ACTIVE_NOW + 5 });
+
+  const snap = await getAuctionBidBroadcast(db, { activityId: id, now: ACTIVE_NOW + 5 });
+  assert.equal(snap.activity.id, id);
+  assert.equal(snap.activity.current_price, 130);
+  assert.equal(snap.activity.bid_count, 2);
+  assert.equal(snap.activity.next_bid_floor, 140);
+  assert.equal(snap.activity.current_bidder_name, 'Bob');
+  assert.equal('current_bid_userid' in snap.activity, false);
+  assert.deepEqual(snap.bid, {
+    id: second.bid_id,
+    display_name: 'Bob',
+    amount: 130,
+    state: 'held',
+    created_at: ACTIVE_NOW + 5,
+  });
+
+  assert.equal(await getAuctionBidBroadcast(db, { activityId: 999999, now: ACTIVE_NOW }), null);
+  assert.equal(await getAuctionBidBroadcast(db, { activityId: 'x', now: ACTIVE_NOW }), null);
+});
+
+test('出价接口把广播快照放进 auction_changed 推送', () => {
+  const src = readFileSync(fileURLToPath(new URL('../../src/routes/mall.js', import.meta.url)), 'utf8');
+  const start = src.indexOf("router.post('/auction/bid'");
+  assert.ok(start > 0);
+  const body = src.slice(start, start + 4000);
+  assert.match(body, /getAuctionBidBroadcast\(db, \{ activityId: result\.activity_id \}\)\.catch\(/);
+  assert.match(body, /publishMallRealtimeEvent\('auction_changed', \{[\s\S]*?activity: snapshot\.activity, bid: snapshot\.bid/);
 });
