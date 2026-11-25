@@ -523,9 +523,9 @@ npm run deploy
 
 1. 检查工作区干净且 `HEAD` 等于 `origin/main`，否则拒绝部署（确需强制可设 `ALLOW_DIRTY=1`）。
 2. 本机 `npm run build` 构建管理端，然后在服务器上获取部署锁 `/var/lock/bob-deploy.lock`（同一时间只允许一次部署，结束时自动释放；中断残留时脚本会提示清理命令）。
-3. `rsync --delete` 以 `bob` 用户身份同步到 `/srv/bob/app`，排除 `.env`、`.env.*`、`.git/`、`node_modules/`、上传文件（`uploads/`）、日志与备份目录等运行期文件，这些文件不会被覆盖或删除。
-4. 服务器只检查 `.env` 存在且已配置 `SERVER_BASE_URL`、`ADMIN_SESSION_SECRET`、`WEB_SESSION_SECRET`，不读取、不修改任何值。
-5. `sudo -u bob npm ci --omit=dev`，然后 `sudo systemctl restart bob`。
+3. 服务器只检查 `.env` 存在且已配置 `SERVER_BASE_URL`、`ADMIN_SESSION_SECRET`、`WEB_SESSION_SECRET`，不读取、不修改任何值；然后把 `package.json`、`package-lock.json` 放到暂存目录 `/srv/bob/.deploy-stage`，以 `bob` 用户执行 `npm ci --omit=dev`。安装失败时线上目录完全不动。
+4. `rsync --delete` 以 `bob` 用户身份同步到 `/srv/bob/app`，排除 `.env`、`.env.*`、`.git/`、`node_modules/`、上传文件（`uploads/`）、日志与备份目录等运行期文件，这些文件不会被覆盖或删除。
+5. 用暂存目录装好的 `node_modules` 替换线上 `node_modules`，然后 `sudo systemctl restart bob`。
 6. 等待本机 `/health` 通过，检查重启后的日志出现 `[DingtalkStream] connected`，并列出重启后出现的 error 行。
 7. 检查公网 `https://b.achord.cn/health` 返回 `{"ok":true}`，否则部署视为失败。
 

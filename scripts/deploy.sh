@@ -3,8 +3,9 @@
 #
 # 流程：
 #   本机 npm run build 构建管理端
+#   → 服务器在暂存目录 sudo -u bob npm ci --omit=dev（失败时线上目录完全不动）
 #   → rsync 同步到 /srv/bob/app（以 bob 用户写入，保留 .env、node_modules、上传文件等运行期文件）
-#   → 服务器 sudo -u bob npm ci --omit=dev
+#   → 用暂存目录装好的 node_modules 替换线上 node_modules
 #   → sudo systemctl restart bob
 #   → 检查 https://b.achord.cn/health 返回 {"ok":true}
 #
@@ -23,6 +24,8 @@ DEPLOY_SERVICE="${DEPLOY_SERVICE:-bob}"
 DEPLOY_NODE_DIR="${DEPLOY_NODE_DIR:-/opt/node/bin}"
 DEPLOY_PORT="${DEPLOY_PORT:-8000}"
 DEPLOY_BASE_URL="${DEPLOY_BASE_URL:-https://b.achord.cn}"
+# 依赖暂存目录，须与 DEPLOY_PATH 同一文件系统（切换用 mv）。
+DEPLOY_STAGE="${DEPLOY_STAGE:-/srv/bob/.deploy-stage}"
 DRY_RUN="${DRY_RUN:-0}"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,7 +51,7 @@ echo "版本：$(git rev-parse --short HEAD) $(git log -1 --format=%s)"
 if [ "${SKIP_LOCAL_BUILD:-0}" = "1" ]; then
   echo "跳过本地构建（SKIP_LOCAL_BUILD=1）"
 else
-  echo "[1/4] 本地构建管理端 admin-app …"
+  echo "[1/5] 本地构建管理端 admin-app …"
   npm run build
 fi
 [ -f "src/pages/admin-app-dist/index.html" ] || die "缺少 src/pages/admin-app-dist/index.html，构建失败或未构建。"
@@ -89,12 +92,47 @@ RSYNC_EXCLUDES=(
   --exclude ".DS_Store"
 )
 
+REMOTE_ENV=(
+  DEPLOY_PATH="${DEPLOY_PATH}"
+  DEPLOY_STAGE="${DEPLOY_STAGE}"
+  DEPLOY_APP_USER="${DEPLOY_APP_USER}"
+  DEPLOY_SERVICE="${DEPLOY_SERVICE}"
+  DEPLOY_NODE_DIR="${DEPLOY_NODE_DIR}"
+  DEPLOY_PORT="${DEPLOY_PORT}"
+)
+
+if [ "${DRY_RUN}" != "1" ]; then
+  echo "[2/5] 服务器暂存目录安装生产依赖（线上目录不动）…"
+  ssh "${DEPLOY_SSH}" "${REMOTE_ENV[@]}" 'bash -s' <<'REMOTE'
+set -euo pipefail
+# 只检查 .env 是否存在以及关键键是否配置，不回显、不修改任何值。
+sudo test -f "${DEPLOY_PATH}/.env" || { echo "缺少 ${DEPLOY_PATH}/.env，停止部署。" >&2; exit 1; }
+for key in SERVER_BASE_URL ADMIN_SESSION_SECRET WEB_SESSION_SECRET; do
+  if ! sudo grep -Eq "^${key}=.+" "${DEPLOY_PATH}/.env"; then
+    echo ".env 缺少 ${key}，停止部署。" >&2
+    exit 1
+  fi
+done
+sudo -u "${DEPLOY_APP_USER}" rm -rf "${DEPLOY_STAGE}"
+sudo -u "${DEPLOY_APP_USER}" mkdir -p "${DEPLOY_STAGE}"
+REMOTE
+  rsync -rlt --no-perms --no-owner --no-group -e "ssh" \
+    --rsync-path="sudo -u ${DEPLOY_APP_USER} rsync" \
+    package.json package-lock.json "${DEPLOY_SSH}:${DEPLOY_STAGE}/"
+  ssh "${DEPLOY_SSH}" "${REMOTE_ENV[@]}" 'bash -s' <<'REMOTE'
+set -euo pipefail
+sudo -H -u "${DEPLOY_APP_USER}" env PATH="${DEPLOY_NODE_DIR}:/usr/local/bin:/usr/bin:/bin" \
+  sh -c 'cd "$1" && npm ci --omit=dev --no-audit --no-fund' sh "${DEPLOY_STAGE}"
+sudo test -d "${DEPLOY_STAGE}/node_modules" || { echo "暂存目录没有生成 node_modules，停止部署。" >&2; exit 1; }
+REMOTE
+fi
+
 RSYNC_OPTS=(-rltz --delete --no-perms --no-owner --no-group)
 if [ "${DRY_RUN}" = "1" ]; then
   RSYNC_OPTS+=(--dry-run -v)
-  echo "[2/4] 预览 rsync 改动（DRY_RUN=1，不改应用目录）…"
+  echo "[2/5] 预览 rsync 改动（DRY_RUN=1，不改应用目录）…"
 else
-  echo "[2/4] rsync 同步代码 …"
+  echo "[3/5] rsync 同步代码 …"
 fi
 
 rsync "${RSYNC_OPTS[@]}" \
@@ -108,28 +146,18 @@ if [ "${DRY_RUN}" = "1" ]; then
   exit 0
 fi
 
-echo "[3/4] 服务器安装生产依赖、重启并检查日志 …"
-ssh "${DEPLOY_SSH}" \
-  DEPLOY_PATH="${DEPLOY_PATH}" \
-  DEPLOY_APP_USER="${DEPLOY_APP_USER}" \
-  DEPLOY_SERVICE="${DEPLOY_SERVICE}" \
-  DEPLOY_NODE_DIR="${DEPLOY_NODE_DIR}" \
-  DEPLOY_PORT="${DEPLOY_PORT}" \
-  'bash -s' <<'REMOTE'
+echo "[4/5] 切换依赖、重启并检查日志 …"
+ssh "${DEPLOY_SSH}" "${REMOTE_ENV[@]}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 
-as_app() { sudo -H -u "${DEPLOY_APP_USER}" env PATH="${DEPLOY_NODE_DIR}:/usr/local/bin:/usr/bin:/bin" "$@"; }
-
-# 只检查 .env 是否存在以及关键键是否配置，不回显、不修改任何值。
-sudo test -f "${DEPLOY_PATH}/.env" || { echo "缺少 ${DEPLOY_PATH}/.env，停止部署。" >&2; exit 1; }
-for key in SERVER_BASE_URL ADMIN_SESSION_SECRET WEB_SESSION_SECRET; do
-  if ! sudo grep -Eq "^${key}=.+" "${DEPLOY_PATH}/.env"; then
-    echo ".env 缺少 ${key}，停止部署。" >&2
-    exit 1
-  fi
-done
-
-as_app sh -c 'cd "$1" && npm ci --omit=dev --no-audit --no-fund' sh "${DEPLOY_PATH}"
+# 用暂存目录装好的依赖替换线上 node_modules（同一文件系统内 mv，旧依赖先挪开再删除）。
+prev="${DEPLOY_STAGE}.node_modules.prev"
+sudo -u "${DEPLOY_APP_USER}" rm -rf "${prev}"
+if sudo test -d "${DEPLOY_PATH}/node_modules"; then
+  sudo -u "${DEPLOY_APP_USER}" mv "${DEPLOY_PATH}/node_modules" "${prev}"
+fi
+sudo -u "${DEPLOY_APP_USER}" mv "${DEPLOY_STAGE}/node_modules" "${DEPLOY_PATH}/node_modules"
+sudo -u "${DEPLOY_APP_USER}" rm -rf "${prev}" "${DEPLOY_STAGE}"
 
 LOG=/var/log/bob/app.log
 # 行数在 sudo 内读取（ubuntu 不一定有读权限）；日志不存在时从第 1 行看起，读取失败则停止。
@@ -176,7 +204,7 @@ else
 fi
 REMOTE
 
-echo "[4/4] 公网健康检查 ${DEPLOY_BASE_URL}/health …"
+echo "[5/5] 公网健康检查 ${DEPLOY_BASE_URL}/health …"
 health=""
 # 每次请求限时 10 秒，总时限 30 秒（含请求耗时）。
 deadline=$(( SECONDS + 30 ))
