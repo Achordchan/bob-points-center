@@ -1025,7 +1025,7 @@
             <div class="kv">
               <label for="groupCardTplButtons" style="align-self:flex-start;padding-top:6px;">按钮（JSON 数组）</label>
               <div style="flex:1;">
-                <textarea id="groupCardTplButtons" rows="4" placeholder='[{"text":"去商城","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"}]' style="font-family:monospace;font-size:12px;"></textarea>
+                <textarea id="groupCardTplButtons" data-fill-origin rows="4" placeholder='[{"text":"去商城","url":"{origin}/mall?tab=shop","color":"blue"}]' style="font-family:monospace;font-size:12px;"></textarea>
                 <div class="help" style="margin-top:4px;">支持字段：text（按钮文字）、url（跳转链接，支持变量）、color（blue / gray / red）。留空则不显示按钮。</div>
               </div>
             </div>
@@ -1065,7 +1065,7 @@
 
             <div class="kv">
               <label for="groupCardLinkUrl">linkUrl（可选：用于生成默认按钮）</label>
-              <input id="groupCardLinkUrl" placeholder="例如：https://bob.baymaxgroup.com/mall" />
+              <input id="groupCardLinkUrl" data-fill-origin placeholder="例如：{origin}/mall" />
             </div>
 
             <div style="height:10px"></div>
@@ -1086,9 +1086,9 @@
 
             <div class="kv">
               <label for="groupCardButtons">btns（可选：JSON 数组）</label>
-              <textarea id="groupCardButtons" placeholder='例如：[{"text":"去商城","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"}]'>[
-  {"text":"俺要购物！","url":"https://bob.baymaxgroup.com/mall?tab=shop","color":"blue"},
-  {"text":"俺有多少钱？","url":"https://bob.baymaxgroup.com/mall?tab=balance","color":"gray"}
+              <textarea id="groupCardButtons" data-fill-origin placeholder='例如：[{"text":"去商城","url":"{origin}/mall?tab=shop","color":"blue"}]'>[
+  {"text":"俺要购物！","url":"{origin}/mall?tab=shop","color":"blue"},
+  {"text":"俺有多少钱？","url":"{origin}/mall?tab=balance","color":"gray"}
 ]</textarea>
             </div>
 

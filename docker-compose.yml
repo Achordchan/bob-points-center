@@ -1,6 +1,6 @@
 version: "3.9"
 
-# 仅本机开发辅助。生产默认走宝塔 + 既有 PostgreSQL，不依赖本文件。
+# 仅本机开发辅助。生产走 bob-hk 上的 systemd + 本机 PostgreSQL，不依赖本文件。
 # 使用前请设置 POSTGRES_PASSWORD；Redis 默认不启用（项目主链路未使用）。
 services:
   postgres:

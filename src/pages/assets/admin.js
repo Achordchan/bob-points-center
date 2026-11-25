@@ -20,6 +20,20 @@
     mount();
   } catch (_) {}
 })();
+
+/* 群卡片示例链接里的 {origin} 按当前访问域名填充，不写死域名。 */
+(function fillOriginExamples() {
+  const apply = () => {
+    const origin = window.location.origin;
+    document.querySelectorAll('[data-fill-origin]').forEach((el) => {
+      if (el.placeholder) el.placeholder = el.placeholder.split('{origin}').join(origin);
+      if (el.value) el.value = el.value.split('{origin}').join(origin);
+    });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply, { once: true });
+  else apply();
+})();
+
 (function () {
   const currentUrl = window.location.origin + window.location.pathname + window.location.search;
 

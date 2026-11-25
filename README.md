@@ -2,7 +2,7 @@
 
 企业内部积分（BOB 币）的发行、流通与运营平台。面向钉钉组织内的员工提供移动端积分门户，面向运营与管理人员提供权限分级的 Web 管理后台。
 
-生产环境：`https://bob.baymaxgroup.com`
+生产环境：`https://b.achord.cn`
 
 ## 目录
 
@@ -93,7 +93,7 @@
 ```text
 客户端
   ↓
-反向代理（宝塔 Nginx，HTTPS 终止）
+反向代理（Nginx，HTTPS 终止，certbot 证书）
   ↓
 Express 应用（src/app.js）
   ├─ JSON 解析：默认 1MB，备份导入与图片上传放宽至 50MB
@@ -260,7 +260,7 @@ npm run dev:session -- admin
 npm run dev:session -- web
 ```
 
-该脚本不修改任何认证逻辑，直接调用项目自身的签名函数。仅允许在明确的 `NODE_ENV=development` 下使用，入口仅接受 loopback 地址或 HTTPS 的 `dev.bob.baymaxgroup.com`。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`），并将 `SESSION_SALT` 与仅供本地使用的 `DEV_SESSION_SALT` 设为相同且不少于 32 个字符；`ADMIN_SESSION_SECRET` 和 `WEB_SESSION_SECRET` 也必须分别显式配置、不少于 32 个字符且互不相同。脚本会先以只读事务核对实际数据库名与 PostgreSQL `bob.environment=development` 标记，再从数据库刷新当前全局会话版本，全部通过后才允许查询用户并签发 Token。生产环境不要配置 `DEV_SESSION_SALT`。可追加 `userid` 参数指定用户。
+该脚本不修改任何认证逻辑，直接调用项目自身的签名函数。仅允许在明确的 `NODE_ENV=development` 下使用，入口仅接受 loopback 地址（`localhost` / `127.0.0.1` / `::1`）。执行前必须将 `PG_DATABASE` 和 `DEV_SESSION_DATABASE` 显式设为同一个预期开发库名（Docker Compose 默认为 `bob`），并将 `SESSION_SALT` 与仅供本地使用的 `DEV_SESSION_SALT` 设为相同且不少于 32 个字符；`ADMIN_SESSION_SECRET` 和 `WEB_SESSION_SECRET` 也必须分别显式配置、不少于 32 个字符且互不相同。脚本会先以只读事务核对实际数据库名与 PostgreSQL `bob.environment=development` 标记，再从数据库刷新当前全局会话版本，全部通过后才允许查询用户并签发 Token。生产环境不要配置 `DEV_SESSION_SALT`。可追加 `userid` 参数指定用户。
 
 ### 6. 访问入口
 
@@ -287,7 +287,7 @@ npm run admin:build
 npm run admin:dev
 ```
 
-构建产物目录 `src/pages/admin-app-dist/` 已被 `.gitignore` 排除，由 CI 在部署前构建。
+构建产物目录 `src/pages/admin-app-dist/` 已被 `.gitignore` 排除，由部署脚本在本机构建后同步到服务器。
 
 ## 配置项
 
@@ -469,36 +469,76 @@ Swagger UI 位于 `/docs/`，OpenAPI 规范位于 `/docs/openapi.json`，两者�
 
 | 项 | 值 |
 | --- | --- |
-| 域名 | `bob.baymaxgroup.com` |
-| 宝塔项目名 | `bob_points_center` |
-| 部署目录 | `/www/wwwroot/bob.baymaxgroup.com` |
-| 服务端口 | `8000` |
-| Node 版本 | `v20.19.0` |
+| 域名 | `b.achord.cn`（Cloudflare DNS，仅 DNS 解析，不走代理） |
+| 服务器 | 腾讯云香港轻量 `43.161.221.5`，Ubuntu 22.04，SSH 别名 `bob-hk`（用户 `ubuntu`，有 sudo） |
+| 部署目录 | `/srv/bob/app`（属主 `bob`） |
+| 运行方式 | systemd 服务 `bob.service`，以 `bob` 用户运行，只监听 `127.0.0.1:8000` |
+| Node 版本 | `v20.19.0`（`/opt/node/bin/node`） |
+| 反向代理 | Nginx `/etc/nginx/sites-available/b.achord.cn` → `127.0.0.1:8000`，certbot 自动续期 |
+| 数据库 | 本机 PostgreSQL 16，库 `bob`，用户 `bob`，`127.0.0.1:5432` |
+| 配置文件 | `/srv/bob/app/.env`（权限 600，不在 git 中） |
+| 日志 | `/var/log/bob/app.log` |
+| 数据库备份 | 每天 03:17 执行 `/usr/local/sbin/bob-backup.sh`，本机保留在 `/var/backups/bob`（14 天），另推一份到异地 |
+
+本机 `~/.ssh/config` 需要有 `bob-hk` 别名：
+
+```text
+Host bob-hk
+  HostName 43.161.221.5
+  User ubuntu
+  IdentityFile ~/.ssh/chordv_deploy
+  IdentitiesOnly yes
+```
 
 ### 标准发布流程
 
 ```text
-本地开发 → 本地校验（npm run check）→ git commit → git push origin main
-  → GitHub Actions 构建管理端 → rsync 同步代码 → 宝塔重启 Node 项目 → 健康检查
+本地开发 → 本地校验（npm run check）→ PR 合并到 main
+  → 本机切到最新 main → 服务器备份数据库 → npm run deploy
 ```
 
-`git commit` 仅写入本机仓库，不影响生产环境。**只有 `git push origin main` 才会触发自动部署。**
+合并到 `main` 只会触发 CI 校验，**不会自动部署**。发布由人在本机手动执行：
 
-部署工作流为 `.github/workflows/deploy-baota.yml`，并发组配置为不取消进行中的部署，避免同时写入服务器。
+```bash
+git switch main && git pull --ff-only
+```
+
+```bash
+ssh bob-hk 'sudo /usr/local/sbin/bob-backup.sh'
+```
+
+```bash
+DRY_RUN=1 npm run deploy
+```
+
+```bash
+npm run deploy
+```
+
+`DRY_RUN=1` 只预览 rsync 将新增、修改、删除哪些文件，不改动应用目录、不重启服务。
 
 ### 部署脚本行为
 
-`scripts/deploy-baota.sh` 通过 `rsync` 同步代码，并保留服务器上的运行期文件：`.env`、上传文件、日志、备份目录与 `node_modules`。同步完成后调用宝塔 `nodejsModel` 重启项目，随后依次检查本机 `/health` 与公网 `/health`，任一失败则部署视为失败。
+`scripts/deploy.sh` 依次执行：
 
-### 手动部署
+1. 检查工作区干净且 `HEAD` 等于 `origin/main`，否则拒绝部署（确需强制可设 `ALLOW_DIRTY=1`）。
+2. 本机 `npm run build` 构建管理端，然后在服务器上获取部署锁 `/var/lock/bob-deploy.lock`（同一时间只允许一次部署，结束时自动释放；中断残留时脚本会提示清理命令）。
+3. 服务器只检查 `.env` 存在且已配置 `SERVER_BASE_URL`、`ADMIN_SESSION_SECRET`、`WEB_SESSION_SECRET`，不读取、不修改任何值；然后把 `package.json`、`package-lock.json` 放到暂存目录 `/srv/bob/.deploy-stage`，以 `bob` 用户执行 `npm ci --omit=dev`。安装失败时线上目录完全不动。
+4. `rsync --delete` 以 `bob` 用户身份同步到 `/srv/bob/app`，排除 `.env`、`.env.*`、`.git/`、`node_modules/`、上传文件（`uploads/`）、日志与备份目录等运行期文件，这些文件不会被覆盖或删除。
+5. 用暂存目录装好的 `node_modules` 替换线上 `node_modules`，然后 `sudo systemctl restart bob`。
+6. 等待本机 `/health` 通过，检查重启后的日志出现 `[DingtalkStream] connected`，并列出重启后出现的 error 行。
+7. 检查公网 `https://b.achord.cn/health` 返回 `{"ok":true}`，否则部署视为失败。
 
-常规开发无需手动部署。确需从本机直接同步服务器时：
+> 上传的图片位于 `src/pages/assets/uploads/`，部署时被排除；它不在数据库备份范围内，迁移或重建服务器时需单独拷贝。
 
-```bash
-npm run deploy:baota
-```
+### 开发辅助脚本
 
-手动部署同样不会上传 `.env`，服务器必须已存在正确的配置文件。
+| 命令 | 作用 |
+| --- | --- |
+| `npm run db:tunnel` | SSH 隧道：本机 `127.0.0.1:35432` → `bob-hk` 的 `127.0.0.1:5432` |
+| `npm run db:sync-from-prod` | 经隧道把生产库只读导出并恢复到本地 Compose 容器 |
+
+目前不提供开发域名（原 `dev.bob.baymaxgroup.com` 反向隧道已下线）：本机只用 loopback 地址调试，需要在钉钉内打开的联调直接在线上进行。
 
 ## 运维手册
 
