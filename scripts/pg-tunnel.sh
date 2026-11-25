@@ -29,5 +29,5 @@ exec ssh \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
   -N \
-  -L "127.0.0.1:${LOCAL_PORT}:${REMOTE_PG_HOST}:${REMOTE_PG_PORT}" \
+  -L "${LOCAL_PORT}:${REMOTE_PG_HOST}:${REMOTE_PG_PORT}" \
   "${SSH_TARGET}"

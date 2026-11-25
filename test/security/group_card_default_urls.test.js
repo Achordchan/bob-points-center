@@ -70,3 +70,24 @@ test('已保存设置里指向旧域名的按钮在读取时改指 SERVER_BASE_U
     assert.equal(saved.templates.manual.buttons[0].url, 'https://bob.baymaxgroup.com/mall?tab=shop');
   });
 });
+
+test('完整格式按钮（event.params.url）里的旧域名同样在读取时改指新地址', () => {
+  withEnv({ SERVER_BASE_URL: 'https://b.example.test' }, () => {
+    const saved = {
+      templates: {
+        manual: {
+          buttons: [
+            { text: '去商城', color: 'blue', status: 'normal', event: { type: 'openLink', params: { url: 'https://bob.baymaxgroup.com/mall?tab=shop' } } },
+            { text: '外链', event: { type: 'openLink', params: { url: 'https://example.org/x' } } },
+          ],
+        },
+      },
+    };
+    const buttons = normalizeGroupCardSettings(saved).templates.manual.buttons;
+    assert.equal(buttons[0].event.params.url, 'https://b.example.test/mall?tab=shop');
+    assert.equal(buttons[0].event.type, 'openLink');
+    assert.equal(buttons[0].text, '去商城');
+    assert.equal(buttons[1].event.params.url, 'https://example.org/x');
+    assert.equal(saved.templates.manual.buttons[0].event.params.url, 'https://bob.baymaxgroup.com/mall?tab=shop');
+  });
+});

@@ -165,9 +165,17 @@ function rebaseRetiredUrl(url) {
 
 function rebaseRetiredButtons(buttons) {
   if (!Array.isArray(buttons)) return buttons;
-  return buttons.map((btn) => (btn && typeof btn === 'object' && typeof btn.url === 'string'
-    ? { ...btn, url: rebaseRetiredUrl(btn.url) }
-    : btn));
+  return buttons.map((btn) => {
+    if (!btn || typeof btn !== 'object') return btn;
+    let next = btn;
+    if (typeof btn.url === 'string') next = { ...next, url: rebaseRetiredUrl(btn.url) };
+    // 完整格式：{ event: { type: 'openLink', params: { url } } }
+    const eventUrl = btn.event?.params?.url;
+    if (typeof eventUrl === 'string') {
+      next = { ...next, event: { ...btn.event, params: { ...btn.event.params, url: rebaseRetiredUrl(eventUrl) } } };
+    }
+    return next;
+  });
 }
 
 export function getDefaultGroupCardSettings() {
